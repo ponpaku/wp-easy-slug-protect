@@ -38,6 +38,9 @@ easy-slug-protect/
 │   ├── esp-admin.js       # 管理画面JS
 │   └── esp-admin.css      # 管理画面CSS
 │
+├── front/                 # フロント用
+│   └── esp-styles.css     # フロント用スタイル
+│
 └── languages/                  # 翻訳ファイル（未実装）
     ├── easy-slug-protect-ja.po
     └── easy-slug-protect-ja.mo
