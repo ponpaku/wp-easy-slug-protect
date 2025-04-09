@@ -18,7 +18,8 @@ class ESP_Session {
      * シングルトンパターンのためprivate
      */
     private function __construct() {
-        add_action('init', [$this, 'start_session'], 1);
+        // initでは遅いのでtemplate_redirect
+        add_action('template_redirect', [$this, 'start_session'], 1);
         add_action('wp_logout', [$this, 'end_session']);
         add_action('wp_login', [$this, 'end_session']);
     }
