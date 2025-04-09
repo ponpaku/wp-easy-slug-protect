@@ -14,6 +14,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+
 // プラグインの基本定数を定義
 define('ESP_VERSION', '0.3.32');
 define('ESP_PATH', plugin_dir_path(__FILE__));
