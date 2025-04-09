@@ -44,14 +44,17 @@ class ESP_Security {
     /**
      * ログイン試行が可能か確認
      * 
-     * @param string $path 保護対象のパス
+     * @param array $path_settings 保護対象のパス設定
      * @return bool 試行可能な場合はtrue
      */
-    public function can_try_login($path) {
+    public function can_try_login($path_settings) {
         $ip = $this->get_ip();
         if (!$ip) {
             return false;
         }
+
+        $path = $path_settings['path'];
+        $path_id = $path_settings['id'];
 
         global $wpdb;
         $settings = ESP_Option::get_current_setting('brute');
@@ -62,10 +65,10 @@ class ESP_Security {
             "SELECT COUNT(*) 
             FROM $table 
             WHERE ip_address = %s 
-            AND path = %s 
+            AND path_id = %s 
             AND time > DATE_SUB(NOW(), INTERVAL %d MINUTE)",
             $ip,
-            $path,
+            $path_id,
             $settings['time_frame']
         ));
 
@@ -79,11 +82,11 @@ class ESP_Security {
             "SELECT time 
             FROM $table 
             WHERE ip_address = %s 
-            AND path = %s 
+            AND path_id = %s 
             ORDER BY time DESC 
             LIMIT 1",
             $ip,
-            $path
+            $path_id
         ));
 
         // ブロック時間が経過していれば許可
@@ -91,16 +94,20 @@ class ESP_Security {
         return time() > $block_end_time;
     }
 
+
     /**
      * ログイン失敗を記録
      * 
-     * @param string $path 保護対象のパス
+     * @param array $path_settings 保護対象のパス設定
      */
-    public function record_failed_attempt($path) {
+    public function record_failed_attempt($path_settings) {
         $ip = $this->get_ip();
         if (!$ip) {
             return;
         }
+
+        $path = $path_settings['path'];
+        $path_id = $path_settings['id'];
 
         global $wpdb;
 
@@ -110,9 +117,10 @@ class ESP_Security {
             array(
                 'ip_address' => $ip,
                 'path' => $path,
+                'path_id' => $path_id,
                 'time' => current_time('mysql')
             ),
-            array('%s', '%s', '%s')
+            array('%s', '%s', '%s', '%s')
         );
 
         // 古いレコードを削除
@@ -139,10 +147,10 @@ class ESP_Security {
      * CSRFトークンの検証
      * 
      * @param string $nonce POSTされたnonce
-     * @param string $path 保護対象のパス
+     * @param string $path_id パスID
      * @return bool 検証成功時はtrue
      */
-    public function verify_nonce($nonce, $path) {
-        return wp_verify_nonce($nonce, 'esp_login_' . $path);
+    public function verify_nonce($nonce, $path_id) {
+        return wp_verify_nonce($nonce, 'esp_login_' . $path_id);
     }
 }

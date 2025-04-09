@@ -27,67 +27,76 @@
 			 */
 			addNewPath: function (e) {
 				e.preventDefault();
+				const pathId = "new"; // 新規追加時は仮のIDとして'new'を使用
 				const template = `
-					<div class="esp-path-item" style="display: none;">
-						<div class="esp-path-header">
-							<h3>${espAdminData.i18n.newProtectedPath}</h3>
-							<button type="button" class="button esp-remove-path">
-								${espAdminData.i18n.delete}
-							</button>
-						</div>
-						<div class="esp-path-content">
-							<p>
-								<label>${espAdminData.i18n.path}</label>
-								<input type="text" 
-									name="${espAdminData.optionKey}[path][${this.pathCount}][path]" 
-									class="esp-path-input regular-text"
-									placeholder="/example/"
-									required>
-								<span class="description">
-									${wp.i18n.__("例: /members/ または /private/docs/", "easy-slug-protect")}
-								</span>
-							</p>
-							<p>
-								<label>${espAdminData.i18n.password}</label>
-								<div class="esp-password-field">
-									<input type="password" 
-										name="${espAdminData.optionKey}[path][${this.pathCount}][password]" 
-										class="regular-text"
-										required>
-									<button type="button" class="button esp-toggle-password">
-										${espAdminData.i18n.show}
-									</button>
-								</div>
-							</p>
-							<p>
-								<label>${espAdminData.i18n.loginPage}</label>
-								${this.getPageSelectHTML(this.pathCount)}
-								<span class="description">
-									${espAdminData.i18n.shortcodeNotice}
-								</span>
-							</p>
-						</div>
-					</div>
-				`;
+        <div class="esp-path-item" style="display: none;" data-path-id="${pathId}">
+            <div class="esp-path-header">
+                <h3>${espAdminData.i18n.newProtectedPath}</h3>
+                <button type="button" class="button esp-remove-path">
+                    ${espAdminData.i18n.delete}
+                </button>
+            </div>
+            <div class="esp-path-content">
+                <input type="hidden" 
+                    name="${espAdminData.optionKey}[path][${pathId}][id]" 
+                    value="${pathId}">
+                <p>
+                    <label>${espAdminData.i18n.path}</label>
+                    <input type="text" 
+                        name="${espAdminData.optionKey}[path][${pathId}][path]" 
+                        class="esp-path-input regular-text"
+                        placeholder="/example/"
+                        required>
+                    <span class="description">
+                        ${wp.i18n.__(
+													"例: /members/ または /private/docs/",
+													"easy-slug-protect"
+												)}
+                    </span>
+                </p>
+                <p>
+                    <label>${espAdminData.i18n.password}</label>
+                    <div class="esp-password-field">
+                        <input type="password" 
+                            name="${
+															espAdminData.optionKey
+														}[path][${pathId}][password]" 
+                            class="regular-text"
+                            required>
+                        <button type="button" class="button esp-toggle-password">
+                            ${espAdminData.i18n.show}
+                        </button>
+                    </div>
+                </p>
+                <p>
+                    <label>${espAdminData.i18n.loginPage}</label>
+                    ${this.getPageSelectHTML(pathId)}
+                    <span class="description">
+                        ${espAdminData.i18n.shortcodeNotice}
+                    </span>
+                </p>
+            </div>
+        </div>
+    `;
 
 				const $newPath = $(template);
 				$("#esp-paths-container").append($newPath);
 				$newPath.slideDown(300);
-				this.pathCount++;
 				this.markFormAsUnsaved();
 			},
 
 			/**
 			 * ページ選択のセレクトボックスHTML生成
-			 * @param {number} index インデックス
+			 * @param {string} pathId パスID
 			 * @returns {string} セレクトボックスのHTML
 			 */
-			getPageSelectHTML: function (index) {
-				return `<select name="${espAdminData.optionKey}[path][${index}][login_page]" required>
-					<option value="">${espAdminData.i18n.selectPage}</option>
-					${espAdminData.pages_list}
-				</select>`;
+			getPageSelectHTML: function (pathId) {
+				return `<select name="${espAdminData.optionKey}[path][${pathId}][login_page]" required>
+        <option value="">${espAdminData.i18n.selectPage}</option>
+        ${espAdminData.pages_list}
+    </select>`;
 			},
+
 			/**
 			 * 既存のパスを変更できないようにする
 			 */

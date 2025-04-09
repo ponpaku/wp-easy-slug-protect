@@ -138,9 +138,9 @@ class ESP_Settings {
         }
 
         $old_paths_map = array();
-        foreach ($old_value as $old_path) {
+        foreach ($old_value as $path_id => $old_path) {
             if (isset($old_path['path'])) {
-                $old_paths_map[$old_path['path']] = $old_path;
+                $old_paths_map[$path_id] = $old_path;
             }
         }
 
@@ -154,13 +154,12 @@ class ESP_Settings {
 
         $current_paths = array();
         // 新規追加と更新の処理
-        foreach ($new_value as $new_path) {
-
+        foreach ($new_value as $path_id => $new_path) {
             if (!isset($new_path['path'])) {
                 continue;
             }
 
-            $current_paths[] = $new_path['path'];
+            $current_paths[] = $path_id;
             $path_key = $new_path['path'];
 
             // 平文パスワードの取得
@@ -171,7 +170,7 @@ class ESP_Settings {
             $raw_password = $raw_passwords[$path_key];
 
             // 既存のパスかチェック
-            if (isset($old_paths_map[$path_key])) {
+            if (isset($old_paths_map[$path_id])) {
                 // パスワードが変更された場合のみ通知
                 $this->mail->notify_password_change(
                     $path_key,
@@ -187,9 +186,9 @@ class ESP_Settings {
         }
 
         // 削除されたパスの検出と通知
-        foreach ($old_paths_map as $path => $old_path) {
-            if (!in_array($path, $current_paths, true)) {
-                $this->mail->notify_path_removed($path);
+        foreach ($old_paths_map as $path_id => $old_path) {
+            if (!in_array($path_id, $current_paths, true)) {
+                $this->mail->notify_path_removed($old_path['path']);
             }
         }
 

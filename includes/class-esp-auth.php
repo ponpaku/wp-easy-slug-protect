@@ -39,13 +39,14 @@ class ESP_Auth {
     /**
      * ログインフォームの生成
      * 
-     * @param string $path 保護対象のパス
-     * @param string $redirect_to リダイレクト先のURL(基本はパス)
+     * @param array $path_settings 保護対象のパス設定
+     * @param string $redirect_to リダイレクト先のURL
+     * @param string $place_holder プレースホルダーテキスト
      * @return string HTML形式のログインフォーム
      */
-    public function get_login_form($path, $redirect_to, $place_holder) {
+    public function get_login_form($path_settings, $redirect_to, $place_holder) {
         // CSRFトークンの生成
-        $nonce = wp_create_nonce('esp_login_' . $path);
+        $nonce = wp_create_nonce('esp_login_' . $path_settings['id']);
         
         // エラーメッセージの取得
         $error = $this->session->get_error();
@@ -58,12 +59,12 @@ class ESP_Auth {
             <?php endif; ?>
 
             <form method="post" action="">
-                <?php wp_nonce_field('esp_login_' . $path, 'esp_nonce'); ?>
-                <input type="hidden" name="esp_path" value="<?php echo esc_attr($path); ?>">
+                <?php wp_nonce_field('esp_login_' . $path_settings['id'], 'esp_nonce'); ?>
+                <input type="hidden" name="esp_path_id" value="<?php echo esc_attr($path_settings['id']); ?>">
+                <input type="hidden" name="esp_path" value="<?php echo esc_attr($path_settings['path']); ?>">
                 <input type="hidden" name="redirect_to" value="<?php echo esc_attr($redirect_to) ?>">
                 
                 <div class="esp-form-group">
-                    <!-- <label for="esp-password"><?php _e('パスワード:', $this->text_domain); ?></label> -->
                     <input type="password" name="esp_password" id="esp-password" placeholder="<?php echo $place_holder ?>" required>
                 </div>
 
@@ -89,7 +90,7 @@ class ESP_Auth {
     /**
      * ログイン処理
      * 
-     * @param string $path_settings ターゲットのパス設定
+     * @param array $path_settings ターゲットのパス設定
      * @param string $password 入力されたパスワード
      * @return bool ログイン成功ならtrue
      */
@@ -100,13 +101,13 @@ class ESP_Auth {
         }
 
         // ブルートフォース対策のチェック
-        if (!$this->security->can_try_login($path_settings['path'])) {
+        if (!$this->security->can_try_login($path_settings)) {
             $this->session->set_error(__('試行回数が制限を超えました。しばらく時間をおいてお試しください。', $this->text_domain));
             return false;
         }
 
         if (!wp_check_password($password, $path_settings['password'])) {
-            $this->security->record_failed_attempt($path_settings['path']);
+            $this->security->record_failed_attempt($path_settings);
             $this->session->set_error(__('パスワードが正しくありません。', $this->text_domain));
             return false;
         }
@@ -114,9 +115,9 @@ class ESP_Auth {
         // ログイン成功時の処理
         $remember = isset($_POST['esp_remember']) && $_POST['esp_remember'];
         if ($remember) {
-            $this->set_remember_login($path_settings['path']);
+            $this->set_remember_login($path_settings);
         } else {
-            $this->set_session_login($path_settings['path']);
+            $this->set_session_login($path_settings);
         }
 
         return true;
@@ -125,19 +126,20 @@ class ESP_Auth {
     /**
      * セッションベースのログイン情報を設定
      */
-    private function set_session_login($path) {
+    private function set_session_login($path_settings) {
+        $path_id = $path_settings['id'];
         $token = wp_generate_password(64, false);
-        $this->session->set('esp_auth_' . $path, $token);
+        $this->session->set('esp_auth_' . $path_id, $token);
         
         // Cookie設定を一時保存
-        $this->cookie->prepare_session_cookie($path, $token);
+        $this->cookie->prepare_session_cookie($path_id, $token);
     }
 
 
     /**
      * 永続的なログイン情報を設定
      */
-    private function set_remember_login($path) {
+    private function set_remember_login($path_settings) {
         global $wpdb;
         
         // ランダムなIDとトークンを生成
@@ -151,63 +153,68 @@ class ESP_Auth {
         $wpdb->insert(
             $wpdb->prefix . ESP_Config::DB_TABLES['remember'],
             array(
-                'path' => $path,
+                'path' => $path_settings['path'],
+                'path_id' => $path_settings['id'],
                 'token' => $token,
                 'user_id' => $user_id,
                 'created' => current_time('mysql'),
                 'expires' => date('Y-m-d H:i:s', $expires)
             ),
-            array('%s', '%s', '%s', '%s', '%s')
+            array('%s', '%s', '%s', '%s', '%s', '%s')
         );
 
         // パスを含めてCookie設定を準備
-        $this->cookie->prepare_remember_cookies($path, $user_id, $token, $expires);
+        $this->cookie->prepare_remember_cookies($path_settings, $user_id, $token, $expires);
     }
 
     /**
      * ログイン状態のチェック
      * 
-     * @param string $path チェック対象のパス
+     * @param array $path_settings 保護対象のパス設定
      * @return bool ログイン済みならtrue
      */
-    public function is_logged_in($path) {
+    public function is_logged_in($path_settings) {
+        $path_id = $path_settings['id'];
+        $path = $path_settings['path'];
+        
         // セッションベースのチェック
-        $session_token = $this->session->get('esp_auth_' . $path);
-        $cookie_token = $this->cookie->get_session_cookie($path);
+        $session_token = $this->session->get('esp_auth_' . $path_id);
+        $cookie_token = $this->cookie->get_session_cookie($path_id);
 
         if ($session_token && $cookie_token && $session_token === $cookie_token) {
             return true;
         }
 
         // 永続的ログインのチェック
-        return $this->check_remember_login($path);
+        return $this->check_remember_login($path_settings);
     }
 
     /**
      * 永続的ログインのチェック
      */
-    private function check_remember_login($path) {
+    private function check_remember_login($path_settings) {
         global $wpdb;
 
-        $cookie_data = $this->cookie->get_remember_cookies_for_path($path);
+        $cookie_data = $this->cookie->get_remember_cookies_for_path($path_settings);
         if (!$cookie_data) {
             return false;
         }
 
+        $path_id = $path_settings['id'];
         $table = $wpdb->prefix . ESP_Config::DB_TABLES['remember'];
         $login_info = $wpdb->get_row($wpdb->prepare(
             "SELECT * FROM $table
             WHERE user_id = %s 
             AND token = %s 
-            AND path = %s 
+            AND path_id = %s 
             AND expires > NOW()",
-            $cookie_data['id'],  // $_COOKIEの直接参照を修正
-            $cookie_data['token'],  // $_COOKIEの直接参照を修正
-            $path
+            $cookie_data['id'],
+            $cookie_data['token'],
+            $path_id
         ));
 
         if ($login_info) {
-            $this->refresh_remember_login($path, $login_info->id, $cookie_data['id'], $cookie_data['token']);
+            $this->refresh_remember_login($path_settings, $login_info->id, $cookie_data['id'], $cookie_data['token']);
             return true;
         }
 
@@ -217,12 +224,12 @@ class ESP_Auth {
     /**
      * 永続的ログイントークンの更新
      * 
-     * @param string $path パス
+     * @param array $path_settings パス設定
      * @param int $id DBのレコードID
      * @param string $user_id ユーザーID
      * @param string $token トークン
      */
-    private function refresh_remember_login($path, $id, $user_id, $token) {
+    private function refresh_remember_login($path_settings, $id, $user_id, $token) {
         global $wpdb;
         
         $remember_settings = ESP_Option::get_current_setting('remember');
@@ -238,6 +245,6 @@ class ESP_Auth {
         );
 
         // パスを含めてCookieの更新を準備
-        $this->cookie->prepare_remember_cookies($path, $user_id, $token, $expires);
+        $this->cookie->prepare_remember_cookies($path_settings, $user_id, $token, $expires);
     }
 }

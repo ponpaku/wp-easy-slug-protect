@@ -65,11 +65,11 @@ class ESP_Cookie {
     /**
      * 認証用セッションCookieの準備
      * 
-     * @param string $path パス
+     * @param string $path_id パスID
      * @param string $token トークン
      */
-    public function prepare_session_cookie($path, $token) {
-        $this->pending_cookies['esp_auth_' . $path] = [
+    public function prepare_session_cookie($path_id, $token) {
+        $this->pending_cookies['esp_auth_' . $path_id] = [
             'value' => $token,
             'expires' => time() + DAY_IN_SECONDS
         ];
@@ -78,18 +78,18 @@ class ESP_Cookie {
     /**
      * ログイン保持用Cookieの準備
      * 
-     * @param string $path パス
+     * @param array $path_settings パス設定
      * @param string $user_id ユーザーID
      * @param string $token トークン
      * @param int $expires 有効期限のタイムスタンプ
      */
-    public function prepare_remember_cookies($path, $user_id, $token, $expires) {
-        $path_hash = md5($path); // パスをハッシュ化して識別子として使用
-        $this->pending_cookies["esp_remember_id_{$path_hash}"] = [
+    public function prepare_remember_cookies($path_settings, $user_id, $token, $expires) {
+        $path_id = $path_settings['id'];
+        $this->pending_cookies["esp_remember_id_{$path_id}"] = [
             'value' => $user_id,
             'expires' => $expires
         ];
-        $this->pending_cookies["esp_remember_token_{$path_hash}"] = [
+        $this->pending_cookies["esp_remember_token_{$path_id}"] = [
             'value' => $token,
             'expires' => $expires
         ];
@@ -123,34 +123,33 @@ class ESP_Cookie {
     /**
      * 特定のパスのすべてのCookieをクリア
      * 
-     * @param string $path パス
+     * @param array $path_settings パス設定
      */
-    public function clear_all_cookies_for_path($path) {
-        $this->clear_session_cookie($path);
-        $this->clear_remember_cookies_for_path($path);
+    public function clear_all_cookies_for_path($path_settings) {
+        $this->clear_session_cookie($path_settings['id']);
+        $this->clear_remember_cookies_for_path($path_settings);
     }
 
     /**
      * 特定のパスの認証Cookieをクリア
      * 
-     * @param string $path パス
+     * @param string $path_id パスID
      */
-    public function clear_session_cookie($path) {
-        $this->pending_cookies['esp_auth_' . $path] = [
+    public function clear_session_cookie($path_id) {
+        $this->pending_cookies['esp_auth_' . $path_id] = [
             'value' => '',
             'expires' => time() - HOUR_IN_SECONDS
         ];
     }
 
-
     /**
      * 特定のパスのログイン保持Cookieをクリア
      * 
-     * @param string $path パス
+     * @param array $path_settings パス設定
      */
-    public function clear_remember_cookies_for_path($path) {
-        $path_hash = md5($path);
-        foreach (["esp_remember_id_{$path_hash}", "esp_remember_token_{$path_hash}"] as $name) {
+    public function clear_remember_cookies_for_path($path_settings) {
+        $path_id = $path_settings['id'];
+        foreach (["esp_remember_id_{$path_id}", "esp_remember_token_{$path_id}"] as $name) {
             $this->pending_cookies[$name] = [
                 'value' => '',
                 'expires' => time() - HOUR_IN_SECONDS
@@ -161,29 +160,29 @@ class ESP_Cookie {
     /**
      * 特定のパスのセッションCookie値を取得
      * 
-     * @param string $path パス
+     * @param string $path_id パスID
      * @return string|null Cookie値。存在しない場合はnull
      */
-    public function get_session_cookie($path) {
-        return isset($_COOKIE['esp_auth_' . $path]) ? $_COOKIE['esp_auth_' . $path] : null;
+    public function get_session_cookie($path_id) {
+        return isset($_COOKIE['esp_auth_' . $path_id]) ? $_COOKIE['esp_auth_' . $path_id] : null;
     }
 
     /**
      * 特定のパスのログイン保持Cookie値を取得
      * 
-     * @param string $path パス
+     * @param array $path_settings パス設定
      * @return array|null ID,トークンの配列。存在しない場合はnull
      */
-    public function get_remember_cookies_for_path($path) {
-        $path_hash = md5($path);
-        if (!isset($_COOKIE["esp_remember_id_{$path_hash}"]) || 
-            !isset($_COOKIE["esp_remember_token_{$path_hash}"])) {
+    public function get_remember_cookies_for_path($path_settings) {
+        $path_id = $path_settings['id'];
+        if (!isset($_COOKIE["esp_remember_id_{$path_id}"]) || 
+            !isset($_COOKIE["esp_remember_token_{$path_id}"])) {
             return null;
         }
 
         return [
-            'id' => $_COOKIE["esp_remember_id_{$path_hash}"],
-            'token' => $_COOKIE["esp_remember_token_{$path_hash}"]
+            'id' => $_COOKIE["esp_remember_id_{$path_id}"],
+            'token' => $_COOKIE["esp_remember_token_{$path_id}"]
         ];
     }
 

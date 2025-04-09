@@ -28,7 +28,9 @@ class ESP_Config {
                 'brute_force' => false,
                 'critical_error' => true
             )
-        )
+        ),
+        'db_version' => 1 // DBバージョン
+
     );
 
     const DB_TABLES = array(

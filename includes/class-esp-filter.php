@@ -118,8 +118,11 @@ class ESP_Filter {
         }
 
         $result = [];
-        foreach ($cached_ids as $path => $ids) {
-            if (!$this->auth->is_logged_in($path)) {
+        $protected_paths = ESP_Option::get_current_setting('path');
+        
+        foreach ($cached_ids as $path_id => $ids) {
+            // パスIDが存在するか確認
+            if (isset($protected_paths[$path_id]) && !$this->auth->is_logged_in($protected_paths[$path_id])) {
                 $result = array_merge($result, $ids);
             }
         }
@@ -154,9 +157,8 @@ class ESP_Filter {
 
         $all_protected_posts = [];
 
-        foreach ($protected_paths as $path_setting) {
+        foreach ($protected_paths as $path_id => $path_setting) {
             $path = $path_setting['path'];
-            $protected_path = '/' . trim($path, '/') . '/';
             $post_ids = [];
 
             foreach ($all_posts as $post_id) {
@@ -164,12 +166,12 @@ class ESP_Filter {
                 $parsed_url = parse_url($permalink);
                 $post_path = isset($parsed_url['path']) ? '/' . trim($parsed_url['path'], '/') . '/' : '/';
             
-                if (strpos($post_path, $protected_path) !== false) {
-                    // ここで$all_protected_posts[$protected_path]が配列かどうかを確認し、配列でなければ初期化
-                    if (!isset($all_protected_posts[$protected_path])) {
-                        $all_protected_posts[$protected_path] = [];
+                if (strpos($post_path, $path) !== false) {
+                    // ここで$all_protected_posts[$path_id]が配列かどうかを確認し、配列でなければ初期化
+                    if (!isset($all_protected_posts[$path_id])) {
+                        $all_protected_posts[$path_id] = [];
                     }
-                    $all_protected_posts[$protected_path][] = $post_id; 
+                    $all_protected_posts[$path_id][] = $post_id; 
                 }
             }
         }

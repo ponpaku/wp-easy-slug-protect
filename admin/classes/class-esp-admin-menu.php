@@ -105,17 +105,20 @@ class ESP_Admin_Menu {
                     </button>
                     <div class="esp-paths-container" id="esp-paths-container">
                         <?php if (!empty($protected_paths)): ?>
-                            <?php foreach ($protected_paths as $index => $path): ?>
-                                <div class="esp-path-item">
+                            <?php foreach ($protected_paths as $path_id => $path): ?>
+                                <div class="esp-path-item" data-path-id="<?php echo esc_attr($path_id); ?>">
                                     <div class="esp-path-header">
                                         <h3><?php echo esc_html($path['path']); ?></h3>
                                         <button type="button" class="button esp-remove-path">削除</button>
                                     </div>
                                     <div class="esp-path-content">
+                                        <input type="hidden" 
+                                            name="<?php echo $option_key; ?>[path][<?php echo $path_id; ?>][id]" 
+                                            value="<?php echo esc_attr($path_id); ?>">
                                         <p>
                                             <label><?php _e('パス:', $text_domain); ?></label>
                                             <input type="text" 
-                                                name="<?php echo $option_key; ?>[path][<?php echo $index; ?>][path]" 
+                                                name="<?php echo $option_key; ?>[path][<?php echo $path_id; ?>][path]" 
                                                 value="<?php echo esc_attr($path['path']); ?>"
                                                 class="regular-text"
                                                 placeholder="/example/"
@@ -125,7 +128,7 @@ class ESP_Admin_Menu {
                                         <p>
                                             <label><?php _e('パスワード:', $text_domain); ?></label>
                                             <input type="password" 
-                                                name="<?php echo $option_key; ?>[path][<?php echo $index; ?>][password]" 
+                                                name="<?php echo $option_key; ?>[path][<?php echo $path_id; ?>][password]" 
                                                 class="regular-text"
                                                 placeholder="<?php _e('変更する場合のみ入力', $text_domain); ?>">
                                             <span class="description">
@@ -136,7 +139,7 @@ class ESP_Admin_Menu {
                                             <label><?php _e('ログインページ:', $text_domain); ?></label>
                                             <?php 
                                             wp_dropdown_pages(array(
-                                                'name' => "{$option_key}[path][{$index}][login_page]",
+                                                'name' => "{$option_key}[path][{$path_id}][login_page]",
                                                 'selected' => $path['login_page'],
                                                 'show_option_none' => __('選択してください', $text_domain),
                                                 'option_none_value' => '0'

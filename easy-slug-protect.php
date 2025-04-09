@@ -3,7 +3,7 @@
  * Plugin Name: Easy Slug Protect
  * Plugin URI: https://github.com/ponpaku/wp-easy-slug-protect
  * Description: URLの階層（スラッグ）ごとにシンプルなパスワード保護を実現するプラグイン
- * Version: 0.3.32
+ * Version: 0.4.00
  * Author: ponpaku
  * Text Domain: easy-slug-protect
  * Domain Path: /languages
@@ -16,7 +16,7 @@ if (!defined('ABSPATH')) {
 
 
 // プラグインの基本定数を定義
-define('ESP_VERSION', '0.3.32');
+define('ESP_VERSION', '0.4.00');
 define('ESP_PATH', plugin_dir_path(__FILE__));
 define('ESP_URL', plugin_dir_url(__FILE__));
 
@@ -65,6 +65,9 @@ class Easy_Slug_Protect {
         if (is_admin()) {
             // 管理画面の初期化
             new ESP_Admin_page();
+
+            // バージョンチェックと更新
+            add_action('admin_init', [$this, 'version_check']);
         } else {
             // セッション管理の初期化
             ESP_Session::get_instance();
@@ -73,8 +76,8 @@ class Easy_Slug_Protect {
             $core->init();
         }
 
-        // 言語ファイルの読み込み
-        add_action('plugins_loaded', array($this, 'load_textdomain'));
+        // 言語ファイルの読み込み(plugins_loadedは優先度下げる)
+        add_action('plugins_loaded', [$this, 'load_textdomain'], 20);
     }
 
     /**
@@ -86,6 +89,15 @@ class Easy_Slug_Protect {
             false,
             dirname(plugin_basename(__FILE__)) . '/languages'
         );
+    }
+
+    /**
+     * バージョンチェックと更新処理
+     */
+    public function version_check() {
+        require_once ESP_PATH . 'includes/class-esp-setup.php';
+        $setup = new ESP_Setup();
+        $setup->update_check();
     }
 }
 

@@ -37,18 +37,47 @@ class ESP_Logout {
             'redirect_to' => '',
             'text' => __('ログアウト', ESP_Config::TEXT_DOMAIN),
             'class' => 'esp-logout-button',
-            'path' => null  // ログアウト対象のパスを指定可能に
+            'path' => null,  // ログアウト対象のパスを指定可能に
+            'path_id' => null // ログアウト対象のパスIDを指定可能に
         ), $atts);
 
-        // パスが指定されていない場合は現在のパスを取得
-        if (!$atts['path']) {
+        // パスIDが指定されている場合はそれを優先
+        $path_settings = null;
+        $protected_paths = ESP_Option::get_current_setting('path');
+        
+        if ($atts['path_id'] && isset($protected_paths[$atts['path_id']])) {
+            $path_settings = $protected_paths[$atts['path_id']];
+        }
+        // パスが指定されている場合はそのパスを検索
+        else if ($atts['path']) {
+            $target_path = '/' . trim($atts['path'], '/') . '/';
+            foreach ($protected_paths as $path_id => $path) {
+                if ($path['path'] === $target_path) {
+                    $path_settings = $path;
+                    break;
+                }
+            }
+        }
+        // どちらも指定されていない場合は現在のパスを検索
+        else {
             global $wp;
-            $atts['path'] = '/' . trim($wp->request, '/') . '/';
+            $current_path = '/' . trim($wp->request, '/') . '/';
+            foreach ($protected_paths as $path_id => $path) {
+                if (strpos($current_path, $path['path']) === 0) {
+                    $path_settings = $path;
+                    break;
+                }
+            }
+        }
+
+        // 対象の設定が見つからないか、ログインしていない場合は何も表示しない
+        if (!$path_settings) {
+            return '';
         }
 
         // 指定されたパスにログインしているか確認
         $auth = new ESP_Auth();
-        if (!$auth->is_logged_in($atts['path'])) {
+        if (!$auth->is_logged_in($path_settings)) {
             return '';
         }
 
@@ -57,6 +86,7 @@ class ESP_Logout {
                 <form method="post" action="%s" class="esp-logout-form">
                     <input type="hidden" name="esp_action" value="logout">
                     <input type="hidden" name="esp_nonce" value="%s">
+                    <input type="hidden" name="esp_logout_path_id" value="%s">
                     <input type="hidden" name="esp_logout_path" value="%s">
                     <input type="hidden" name="redirect_to" value="%s">
                     <button type="submit" class="esp-submit %s">%s</button>
@@ -64,13 +94,13 @@ class ESP_Logout {
             </div>',
             esc_url(home_url('/')),
             wp_create_nonce('esp_logout'),
-            esc_attr($atts['path']),
+            esc_attr($path_settings['id']),
+            esc_attr($path_settings['path']),
             esc_url($atts['redirect_to']),
             esc_attr($atts['class']),
             esc_html($atts['text'])
         );
     }
-
     /**
      * いずれかのパスにログインしているか確認
      * 
@@ -98,11 +128,23 @@ class ESP_Logout {
         }
 
         // ログアウト対象のパスを取得
+        $logout_path_id = isset($_POST['esp_logout_path_id']) ? $_POST['esp_logout_path_id'] : null;
         $logout_path = isset($_POST['esp_logout_path']) ? $_POST['esp_logout_path'] : null;
         
-        if ($logout_path) {
+        // 保護パス設定を取得
+        $protected_paths = ESP_Option::get_current_setting('path');
+        
+        if ($logout_path_id && isset($protected_paths[$logout_path_id])) {
             // 特定のパスからのログアウト
-            $this->logout_from_path($logout_path);
+            $this->logout_from_path($protected_paths[$logout_path_id]);
+        } else if ($logout_path) {
+            // パスIDがなくパスだけの場合（旧データ対応）
+            foreach ($protected_paths as $path_id => $path_settings) {
+                if ($path_settings['path'] === $logout_path) {
+                    $this->logout_from_path($path_settings);
+                    break;
+                }
+            }
         } else {
             // すべてのパスからログアウト
             $this->logout_from_all_paths();
@@ -112,39 +154,41 @@ class ESP_Logout {
     /**
      * 各データの削除
      * 
-     * @param string $path 削除対象のパス
+     * @param array $path_settings 削除対象のパス設定
      */
-    private function logout_from_path($path) {
+    private function logout_from_path($path_settings) {
+        $path_id = $path_settings['id'];
+        
         // セッションデータのクリア
-        $this->session->delete('esp_auth_' . $path);
+        $this->session->delete('esp_auth_' . $path_id);
         
         // DBデータのクリア
-        $cookie_data = $this->cookie->get_remember_cookies_for_path($path);
+        $cookie_data = $this->cookie->get_remember_cookies_for_path($path_settings);
         if ($cookie_data) {
             global $wpdb;
             $wpdb->delete(
                 $wpdb->prefix . ESP_Config::DB_TABLES['remember'],
                 array(
                     'user_id' => $cookie_data['id'],
-                    'path' => $path
+                    'path_id' => $path_id
                 ),
                 array('%s', '%s')
             );
         }
         
         // Cookieのクリア
-        $this->cookie->clear_all_cookies_for_path($path);
+        $this->cookie->clear_all_cookies_for_path($path_settings);
     }
 
-    /**
-     * 全てのページからログアウトさせる
-     */
-    private function logout_from_all_paths() {
-        $protected_paths = ESP_Option::get_current_setting('path');
-        foreach ($protected_paths as $path) {
-            $this->logout_from_path($path['path']);
-        }
+/**
+ * 全てのページからログアウトさせる
+ */
+private function logout_from_all_paths() {
+    $protected_paths = ESP_Option::get_current_setting('path');
+    foreach ($protected_paths as $path_id => $path_settings) {
+        $this->logout_from_path($path_settings);
     }
+}
 
     /**
      * Cookie削除の準備

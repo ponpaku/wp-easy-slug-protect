@@ -136,7 +136,7 @@ class ESP_Core {
         }
 
         // ログイン済みの場合は処理終了（アクセスを許可）
-        if ($this->auth->is_logged_in($target_path['path'])) {
+        if ($this->auth->is_logged_in($target_path)) {
             return;
         }
 
@@ -181,7 +181,7 @@ class ESP_Core {
      * @return array|false マッチしたパスの設定。ない場合はfalse
      */
     private function get_matching_protected_path($current_path, $protected_paths) {
-        foreach ($protected_paths as $protected_path) {
+        foreach ($protected_paths as $path_id => $protected_path) {
             if (strpos($current_path, $protected_path['path']) === 0) {
                 return $protected_path;
             }
@@ -193,11 +193,11 @@ class ESP_Core {
      * 指定されたページIDがいずれかの保護パスのログインページとして設定されているか確認
      * 
      * @param int $page_id ページID
-     * @return array ログインページで無い場合false
+     * @return array|bool ログインページである場合はパス設定、そうでない場合はfalse
      */
     private function is_login_page($page_id) {
         $protected_paths = ESP_Option::get_current_setting('path');
-        foreach ($protected_paths as $path_setting) {
+        foreach ($protected_paths as $path_id => $path_setting) {
             if ($path_setting['login_page'] == $page_id) {
                 return $path_setting;
             }
@@ -212,7 +212,7 @@ class ESP_Core {
      */
     private function handle_login_request($path_settings) {
         // CSRFチェック
-        if (!isset($_POST['esp_nonce']) || !$this->security->verify_nonce($_POST['esp_nonce'], $path_settings['path'])) {
+        if (!isset($_POST['esp_nonce']) || !$this->security->verify_nonce($_POST['esp_nonce'], $path_settings['id'])) {
             $this->session->set_error(__('不正なリクエストです。', ESP_Config::TEXT_DOMAIN));
             $this->redirect_to_login_page($path_settings);
             return;
@@ -336,6 +336,7 @@ class ESP_Core {
         // ショートコードの属性を取得（デフォルトで空の path）
         $atts = shortcode_atts(array(
             'path' => '',
+            'path_id' => '',
             'place_holder' => 'パスワード'
         ), $atts);
 
@@ -345,21 +346,27 @@ class ESP_Core {
             return '';
         }
 
-        // ショートコードの `path` 属性が指定されているか確認
+        // ショートコードの属性が指定されているか確認
         $lock_path = $atts['path'] ? '/' . trim($atts['path'], '/') . '/' : null;
+        $lock_path_id = $atts['path_id'] ?: null;
 
         // 保護パス設定から対応するパスを検索
         $protected_paths = ESP_Option::get_current_setting('path');
         $target_path = null;
 
-        foreach ($protected_paths as $path) {
-            // `path`属性が指定されている場合はそれを使用
-            if ($lock_path && $path['path'] === $lock_path) {
+        foreach ($protected_paths as $path_id => $path) {
+            // path_id属性が指定されている場合はそれを優先
+            if ($lock_path_id && $path_id === $lock_path_id) {
+                $target_path = $path;
+                break;
+            }
+            // path属性が指定されている場合
+            elseif ($lock_path && $path['path'] === $lock_path) {
                 $target_path = $path;
                 break;
             }
             // 指定がない場合は現在のページIDに基づいてパスを検索
-            elseif (!$lock_path && $path['login_page'] == $post->ID) {
+            elseif (!$lock_path && !$lock_path_id && $path['login_page'] == $post->ID) {
                 $target_path = $path;
                 break;
             }
@@ -371,7 +378,7 @@ class ESP_Core {
 
         // リダイレクト先の取得
         $redirect_to = isset($_GET['redirect_to']) ? $_GET['redirect_to'] : '';
-        return $this->auth->get_login_form($target_path['path'], $redirect_to, $atts['place_holder']);
+        return $this->auth->get_login_form($target_path, $redirect_to, $atts['place_holder']);
     }
 
     /**

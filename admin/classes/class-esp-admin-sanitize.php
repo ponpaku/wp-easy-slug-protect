@@ -29,7 +29,7 @@ class ESP_Sanitize {
         $login_pages = array();  // login_pageの重複チェック用
         $raw_passwords = array(); // 平文パスワード一時保存用
 
-        foreach ($paths as $path) {
+        foreach ($paths as $id => $path) {
             if (empty($path['path']) || empty($path['login_page'])) {
                 continue;
             }
@@ -69,11 +69,16 @@ class ESP_Sanitize {
                     $hashed_password = wp_hash_password($path['password']);
                 }
             } else {
-                // 既存のパスワードを維持
-                foreach ($existing_paths as $existing) {
-                    if ($existing['path'] === $normalized_path && !empty($existing['password'])) {
-                        $hashed_password = $existing['password'];
-                        break;
+                // 既存のパスワードを維持（IDをキーとして検索）
+                if (isset($existing_paths[$id]) && !empty($existing_paths[$id]['password'])) {
+                    $hashed_password = $existing_paths[$id]['password'];
+                } else {
+                    // 新規追加で既存のIDがないか、元々パスワードがない場合
+                    foreach ($existing_paths as $existing_id => $existing_path) {
+                        if ($existing_path['path'] === $normalized_path && !empty($existing_path['password'])) {
+                            $hashed_password = $existing_path['password'];
+                            break;
+                        }
                     }
                 }
             }
@@ -83,14 +88,20 @@ class ESP_Sanitize {
                 continue;
             }
 
+            // IDがない場合は新しく生成（新規追加の場合）
+            if (empty($id) || $id === 'new') {
+                $id = 'path_' . uniqid();
+            }
+
             // サニタイズされたパス情報を準備
             $sanitized_path = array(
+                'id' => $id,
                 'path' => $normalized_path,
                 'login_page' => $login_page_id,
                 'password' => $hashed_password
             );
 
-            $sanitized[] = $sanitized_path;
+            $sanitized[$id] = $sanitized_path;
         }
 
         // 平文パスワードを一時的に保存（メール通知用）
