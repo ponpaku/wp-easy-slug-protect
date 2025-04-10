@@ -18,19 +18,22 @@ class ESP_Session {
      * シングルトンパターンのためprivate
      */
     private function __construct() {
-        // initだとヘッダー書き出し後にセッション張ってもダメだと怒られることがある。
-        // filterクラス用にpre_get_postsより前にセッションを張る必要もある。
-        // 暫定:wp_loaded
-        add_action('wp_loaded', [$this, 'start_session'], 1);
+        /**
+         * initだとヘッダー書き出し後にセッション張ってもダメだと怒られることがあり、
+         * filterクラス用にpre_get_postsより前にセッションを張る必要もあるので、暫定的wp_loaded 
+         */
+        // ↑wp-cronを省いてなかったからかも。initに戻す20250410
+        add_action('init', [$this, 'start_session'], 0);
+        
         add_action('wp_logout', [$this, 'end_session']);
-        add_action('wp_login', [$this, 'end_session']);
     }
 
     /**
      * セッションの開始
      */
     public function start_session() {
-        if (!is_admin() && !wp_doing_ajax() && session_status() !== PHP_SESSION_ACTIVE) {
+        // admin, ajax, cron, rest_api,はセッション開始しない
+        if (!is_admin() && !wp_doing_ajax() && !wp_doing_cron() && !(defined('REST_REQUEST') && REST_REQUEST) && session_status() !== PHP_SESSION_ACTIVE) {
             session_start();
         }
     }

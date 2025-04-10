@@ -135,10 +135,10 @@ class ESP_Filter {
      */
     public function regenerate_protected_posts_cache() {
         // init後まで待つ
-        if (!did_action('init')) {
-            add_action('init', [$this, 'regenerate_protected_posts_cache'], 999);
-            return;
-        }
+        // if (!did_action('init')) {
+        //     add_action('init', [$this, 'regenerate_protected_posts_cache'], 999);
+        //     return;
+        // }
 
         $protected_paths = ESP_Option::get_current_setting('path');
         if (empty($protected_paths)) {
