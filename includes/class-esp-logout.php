@@ -180,15 +180,15 @@ class ESP_Logout {
         $this->cookie->clear_all_cookies_for_path($path_settings);
     }
 
-/**
- * 全てのページからログアウトさせる
- */
-private function logout_from_all_paths() {
-    $protected_paths = ESP_Option::get_current_setting('path');
-    foreach ($protected_paths as $path_id => $path_settings) {
-        $this->logout_from_path($path_settings);
+    /**
+     * 全てのページからログアウトさせる
+     */
+    private function logout_from_all_paths() {
+        $protected_paths = ESP_Option::get_current_setting('path');
+        foreach ($protected_paths as $path_id => $path_settings) {
+            $this->logout_from_path($path_settings);
+        }
     }
-}
 
     /**
      * Cookie削除の準備

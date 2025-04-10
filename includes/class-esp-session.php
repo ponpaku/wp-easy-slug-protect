@@ -18,8 +18,10 @@ class ESP_Session {
      * シングルトンパターンのためprivate
      */
     private function __construct() {
-        // initでは遅いのでtemplate_redirect
-        add_action('template_redirect', [$this, 'start_session'], 1);
+        // initだとヘッダー書き出し後にセッション張ってもダメだと怒られることがある。
+        // filterクラス用にpre_get_postsより前にセッションを張る必要もある。
+        // 暫定:wp_loaded
+        add_action('wp_loaded', [$this, 'start_session'], 1);
         add_action('wp_logout', [$this, 'end_session']);
         add_action('wp_login', [$this, 'end_session']);
     }
