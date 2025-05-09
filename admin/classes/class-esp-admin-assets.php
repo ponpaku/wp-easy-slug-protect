@@ -27,6 +27,16 @@ class ESP_Admin_Assets {
             'alertCantChengePath' => __('パスの変更は出来ません。変更したい場合は新たに追加してください', $plugin_name),
             'alertDuplicatePath' => __('パスが重複しています。各パスは一意でなければなりません。', $plugin_name),
             'alertDuplicateLoginPage' => __('同じログインページが複数のパスに設定されています。それぞれ異なるページを指定してください。', $plugin_name),
+            'confirmRegeneratePermalinks' => __('全ての投稿のパーマリンクパス情報を再生成します。投稿数が多い場合、時間がかかることがあります。よろしいですか？', $plugin_name),
+            'regenerating' => __('再生成中...', $plugin_name),
+            'regeneratePermalinksButton' => __('全投稿のパーマリンクパス情報を再生成する', $plugin_name),
+            'regenerateError' => __('エラーが発生しました。詳細はコンソールを確認してください。', $plugin_name),
+            'regenerateCompleteNoItems' => __('処理対象の投稿がありませんでした。または全ての処理が完了しました。', $plugin_name),
+            'confirmClearCache' => __('保護キャッシュをクリアします。よろしいですか？', $plugin_name),
+            'clearingCache' => __('クリア中...', $plugin_name),
+            'clearCacheButton' => __('保護キャッシュをクリアする', $plugin_name),
+            'clearCacheError' => __('キャッシュのクリア中にエラーが発生しました。', $plugin_name),
+            'ajaxError' => __('AJAXリクエストに失敗しました:', $plugin_name),
         );
     }
 
@@ -71,6 +81,8 @@ class ESP_Admin_Assets {
                 'pages_list' => $pages_list,
                 'currentSettings' => $current_settings,
                 'settingsNonce' => wp_create_nonce('esp_settings_group-options'),
+                'regenerateNonce' => wp_create_nonce('esp_regenerate_permalinks_nonce'), // メタデータ再生成用Nonce
+                'clearCacheNonce' => wp_create_nonce('esp_clear_cache_nonce'),         // キャッシュクリア用Nonce
                 'i18n' => $this::localize_data()
             )
         );

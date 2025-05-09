@@ -3,7 +3,7 @@
  * Plugin Name: Easy Slug Protect
  * Plugin URI: https://github.com/ponpaku/wp-easy-slug-protect
  * Description: URLの階層（スラッグ）ごとにシンプルなパスワード保護を実現するプラグイン
- * Version: 0.4.00
+ * Version: 0.5.10
  * Author: ponpaku
  * Text Domain: easy-slug-protect
  * Domain Path: /languages
@@ -14,9 +14,8 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-
 // プラグインの基本定数を定義
-define('ESP_VERSION', '0.4.00');
+define('ESP_VERSION', '0.5.10');
 define('ESP_PATH', plugin_dir_path(__FILE__));
 define('ESP_URL', plugin_dir_url(__FILE__));
 
@@ -24,12 +23,21 @@ define('ESP_URL', plugin_dir_url(__FILE__));
  * プラグインのメインクラス
  */
 class Easy_Slug_Protect {
+
+    /**
+     * @var ESP_Setup セットアップクラスのインスタンス
+     */
+    private $setup;
+
     /**
      * プラグインの初期化
      */
     public function __construct() {
         // 必要なファイルを読み込む
         $this->load_dependencies();
+
+        // セットアップクラスのインスタンス化
+        $this->setup = new ESP_Setup();
 
         // プラグインの初期化
         $this->init();
@@ -46,11 +54,12 @@ class Easy_Slug_Protect {
         require_once ESP_PATH . 'includes/class-esp-cookie.php';
         require_once ESP_PATH . 'includes/class-esp-logout.php';
         require_once ESP_PATH . 'includes/class-esp-security.php';
-        require_once ESP_PATH . 'includes/class-esp-session.php';
+        require_once ESP_PATH . 'includes/class-esp-message.php';
         require_once ESP_PATH . 'includes/class-esp-mail.php';
         require_once ESP_PATH . 'includes/class-esp-config.php';
         require_once ESP_PATH . 'includes/class-esp-option.php';
         require_once ESP_PATH . 'includes/class-esp-filter.php';
+        require_once ESP_PATH . 'includes/class-esp-path-matcher.php'; 
 
         // 管理画面クラスの読み込み
         if (is_admin()) {
@@ -67,10 +76,8 @@ class Easy_Slug_Protect {
             new ESP_Admin_page();
 
             // バージョンチェックと更新
-            add_action('admin_init', [$this, 'version_check']);
+            add_action('admin_init', [$this->setup, 'check_plugin_version']);
         } else {
-            // セッション管理の初期化
-            ESP_Session::get_instance();
             // コア機能の初期化
             $core = new ESP_Core();
             $core->init();
@@ -78,6 +85,30 @@ class Easy_Slug_Protect {
 
         // 言語ファイルの読み込み(plugins_loadedは優先度下げる)
         add_action('plugins_loaded', [$this, 'load_textdomain'], 20);
+
+        // パスマッチャーの初期化
+        add_action('init', function() {
+            if (!is_admin()) {
+                // フロントエンドでのみパスマッチャーを初期化
+                new ESP_Path_Matcher();
+            }
+        }, 5); // 優先度を高めに設定
+        
+        // クリーンアップタスクの実行（Setupで登録したcronから呼び出される）
+        add_action(ESP_Config::DAILY_CLEANUP_HOOK, ['ESP_Setup', 'run_cleanup_tasks']);
+
+        // AJAXアクションのフック
+        add_action('wp_loaded', function() {
+            if (is_admin()) { // 管理画面からのリクエストのみ
+                $esp_filter = new ESP_Filter(); // インスタンス取得
+                add_action('wp_ajax_esp_regenerate_permalink_paths_batch', [$esp_filter, 'ajax_regenerate_permalink_paths_batch']);
+                add_action('wp_ajax_esp_clear_protection_cache', [$esp_filter, 'ajax_clear_protection_cache']);
+            }
+        });
+
+        if (class_exists('ESP_Filter')) { // ESP_Filter がロードされていることを確認
+            add_action(ESP_Config::INTEGRITY_CHECK_HOOK, ['ESP_Filter', 'cron_check_and_fix_permalink_paths']);
+       }
     }
 
     /**
@@ -89,15 +120,6 @@ class Easy_Slug_Protect {
             false,
             dirname(plugin_basename(__FILE__)) . '/languages'
         );
-    }
-
-    /**
-     * バージョンチェックと更新処理
-     */
-    public function version_check() {
-        require_once ESP_PATH . 'includes/class-esp-setup.php';
-        $setup = new ESP_Setup();
-        $setup->update_check();
     }
 }
 

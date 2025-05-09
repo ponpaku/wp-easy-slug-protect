@@ -138,7 +138,7 @@ class ESP_Sanitize {
      */
     public function sanitize_mail_settings($settings) {
         if (!is_array($settings)) {
-            return ESP_Cofig::OPTION_DEFAULTS['mail'];
+            return ESP_Config::OPTION_DEFAULTS['mail'];
         }
 
         $sanitized_settings = array();

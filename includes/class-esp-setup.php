@@ -9,12 +9,54 @@ if (!defined('ABSPATH')) {
  */
 class ESP_Setup {
     public function __construct() {
-        require_once ESP_PATH . 'includes/class-esp-config.php';
+        if (!class_exists('ESP_Config')) {
+            require_once ESP_PATH . 'includes/class-esp-config.php';
+        }
     }
 
     public function activate() {
         $this->create_tables();
         $this->create_options();
+        $this->schedule_cron_jobs();
+        flush_rewrite_rules();
+    }
+
+    /**
+     * Cronジョブのスケジュール登録
+     */
+    public function schedule_cron_jobs() {
+        // 日次クリーンアップジョブ
+        if (!wp_next_scheduled(ESP_Config::DAILY_CLEANUP_HOOK)) {
+            wp_schedule_event(time(), 'daily', ESP_Config::DAILY_CLEANUP_HOOK);
+        }
+
+        // パーマリンク整合性チェックジョブ (例: 1日1回)
+        // 実行頻度はサイトの規模や更新頻度に応じて調整 (例: 'hourly', 'twicedaily', 'daily')
+        // あまり頻繁すぎると負荷になるため注意
+        if (!wp_next_scheduled(ESP_Config::INTEGRITY_CHECK_HOOK)) {
+            // 毎日深夜3時など、アクセスの少ない時間帯を狙う例
+            wp_schedule_event(strtotime('tomorrow 3:00am'), 'daily', ESP_Config::INTEGRITY_CHECK_HOOK);
+        }
+    }
+
+    /**
+     * クリーンアップタスクの実行 (既存のメソッド)
+     */
+    public static function run_cleanup_tasks() {
+        // ESP_Security クラスの存在確認を追加するとより堅牢
+        if (class_exists('ESP_Security')) {
+            ESP_Security::cron_cleanup_brute();
+            ESP_Security::cron_cleanup_remember();
+        }
+    }
+
+    // ... create_tables, create_options, update_check, check_plugin_version, migrate_to_version ... は変更なし
+
+    public function deactivate() {
+        // Cronタスクの削除
+        wp_clear_scheduled_hook(ESP_Config::DAILY_CLEANUP_HOOK);
+        wp_clear_scheduled_hook(ESP_Config::INTEGRITY_CHECK_HOOK); // 追加
+        
         flush_rewrite_rules();
     }
 
@@ -85,6 +127,22 @@ class ESP_Setup {
     }
 
     /**
+     * プラグインバージョンをチェックして必要に応じて更新
+     */
+    public function check_plugin_version() {
+        $current_version = get_option(ESP_Config::VERSION_OPTION_KEY, '0.0.0');
+        
+        // バージョンが変更された場合の処理
+        if (version_compare($current_version, ESP_VERSION, '<')) {
+            // バージョンに応じた更新処理
+            $this->update_check();
+            
+            // バージョン情報を更新
+            update_option(ESP_Config::VERSION_OPTION_KEY, ESP_VERSION);
+        }
+    }
+
+    /**
      * バージョン間のマイグレーション処理
      */
     private function migrate_to_version($from, $to) {
@@ -148,9 +206,10 @@ class ESP_Setup {
         update_option('esp_db_version', 1);
     }
 
-
     public function deactivate() {
+        // Cronタスクの削除
+        wp_clear_scheduled_hook('esp_daily_cleanup');
+        
         flush_rewrite_rules();
     }
-
 }

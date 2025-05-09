@@ -9,11 +9,6 @@ if (!defined('ABSPATH')) {
  */
 class ESP_Logout {
     /**
-     * @var ESP_Session セッション管理クラスのインスタンス
-     */
-    private $session;
-
-    /**
      * @var ESP_Cookie cookie管理クラスのインスタンス
      */
     private $cookie;
@@ -22,7 +17,6 @@ class ESP_Logout {
      * コンストラクタ
      */
     public function __construct() {
-        $this->session = ESP_Session::get_instance();
         $this->cookie = ESP_Cookie::get_instance();
     }
 
@@ -60,14 +54,11 @@ class ESP_Logout {
         }
         // どちらも指定されていない場合は現在のパスを検索
         else {
+            // パスマッチャーを使用して現在のパスに該当する設定を取得
+            $path_matcher = new ESP_Path_Matcher();
             global $wp;
             $current_path = '/' . trim($wp->request, '/') . '/';
-            foreach ($protected_paths as $path_id => $path) {
-                if (strpos($current_path, $path['path']) === 0) {
-                    $path_settings = $path;
-                    break;
-                }
-            }
+            $path_settings = $path_matcher->match($current_path);
         }
 
         // 対象の設定が見つからないか、ログインしていない場合は何も表示しない
@@ -101,6 +92,7 @@ class ESP_Logout {
             esc_html($atts['text'])
         );
     }
+
     /**
      * いずれかのパスにログインしているか確認
      * 
@@ -110,8 +102,8 @@ class ESP_Logout {
         $auth = new ESP_Auth();
         $protected_paths = ESP_Option::get_current_setting('path');
         
-        foreach ($protected_paths as $path) {
-            if ($auth->is_logged_in($path['path'])) {
+        foreach ($protected_paths as $path_settings) {
+            if ($auth->is_logged_in($path_settings)) {
                 return true;
             }
         }
@@ -124,7 +116,8 @@ class ESP_Logout {
      */
     public function process_logout() {
         if (!isset($_POST['esp_nonce']) || !wp_verify_nonce($_POST['esp_nonce'], 'esp_logout')) {
-            wp_die(__('不正なリクエストです。', ESP_Config::TEXT_DOMAIN));
+            ESP_Message::set_error(__('不正なリクエストです。', ESP_Config::TEXT_DOMAIN));
+            return;
         }
 
         // ログアウト対象のパスを取得
@@ -159,9 +152,6 @@ class ESP_Logout {
     private function logout_from_path($path_settings) {
         $path_id = $path_settings['id'];
         
-        // セッションデータのクリア
-        $this->session->delete('esp_auth_' . $path_id);
-        
         // DBデータのクリア
         $cookie_data = $this->cookie->get_remember_cookies_for_path($path_settings);
         if ($cookie_data) {
@@ -189,89 +179,4 @@ class ESP_Logout {
             $this->logout_from_path($path_settings);
         }
     }
-
-    /**
-     * Cookie削除の準備
-     */
-    private function prepare_clear_cookies() {
-        // セッションCookieのクリア
-        $protected_paths = ESP_Option::get_current_setting('path');
-        foreach ($protected_paths as $path) {
-            $this->cookie->clear_session_cookie($path['path']);
-        }
-        
-        // ログイン保持Cookieのクリア
-        $this->cookie->clear_remember_cookies();
-    }
-
-    // /**
-    //  * リダイレクトURLの生成
-    //  * 
-    //  * @param string|null $redirect_to リダイレクト先のパス
-    //  * @return string 完全なリダイレクトURL
-    //  */
-    // private function get_redirect_url($redirect_to = null) {
-    //     // リダイレクト先が指定されていない場合はサイトホームURLを使用
-    //     if (empty($redirect_to)) {
-    //         return get_home_url();
-    //     }
-
-    //     // 現在のURLを取得
-    //     $current_url = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? "https" : "http") . 
-    //         "://$_SERVER[HTTP_HOST]$_SERVER[REQUEST_URI]";
-    //     $current_path = parse_url($current_url, PHP_URL_PATH);
-
-    //     // WordPressのホームURLを取得
-    //     $home_url = get_home_url();
-    //     $home_path = parse_url($home_url, PHP_URL_PATH);
-    //     $home_path = $home_path ?: '/';
-
-    //     // リダイレクト先の処理
-    //     if (strpos($redirect_to, 'http') === 0) {
-    //         return $redirect_to;
-    //     } elseif (strpos($redirect_to, '/') === 0) {
-    //         if ($home_path !== '/') {
-    //             $redirect_to = rtrim($home_path, '/') . $redirect_to;
-    //         }
-    //         return home_url($redirect_to);
-    //     } else {
-    //         $current_dir = dirname($current_path);
-    //         if ($current_dir === '\\' || $current_dir === '/') {
-    //             $current_dir = '';
-    //         }
-    //         $resolved_path = $this->resolve_relative_path($current_dir . '/' . $redirect_to);
-            
-    //         if ($home_path !== '/') {
-    //             if (strpos($resolved_path, $home_path) !== 0) {
-    //                 $resolved_path = rtrim($home_path, '/') . '/' . ltrim($resolved_path, '/');
-    //             }
-    //         }
-    //         return home_url($resolved_path);
-    //     }
-    // }
-
-    // /**
-    //  * 相対パスの解決
-    //  * 
-    //  * @param string $path 解決する相対パス
-    //  * @return string 解決された絶対パス
-    //  */
-    // private function resolve_relative_path($path) {
-    //     $path = str_replace('\\', '/', $path);
-    //     $parts = array_filter(explode('/', $path), 'strlen');
-    //     $absolutes = array();
-
-    //     foreach ($parts as $part) {
-    //         if ($part === '.') {
-    //             continue;
-    //         }
-    //         if ($part === '..') {
-    //             array_pop($absolutes);
-    //         } else {
-    //             $absolutes[] = $part;
-    //         }
-    //     }
-
-    //     return '/' . implode('/', $absolutes);
-    // }
 }

@@ -120,6 +120,11 @@ class ESP_Settings {
                 $old_value['path'] ?? array(),
                 $value['path']
             );
+            
+            // パスマッチャーのキャッシュを無効化
+            if (class_exists('ESP_Path_Matcher')) {
+                ESP_Path_Matcher::invalidate();
+            }
         }
 
         // 現状他は不要

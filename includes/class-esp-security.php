@@ -153,4 +153,20 @@ class ESP_Security {
     public function verify_nonce($nonce, $path_id) {
         return wp_verify_nonce($nonce, 'esp_login_' . $path_id);
     }
+
+    /**
+     * Cron用の古いブルートフォース試行ログクリーンアップ
+     */
+    public static function cron_cleanup_brute() {
+        (new self)->cleanup_old_attempts();
+    }
+
+    /**
+     * Cron用の古いRemember Meトークンクリーンアップ
+     */
+    public static function cron_cleanup_remember() {
+        global $wpdb;
+        $table = $wpdb->prefix . ESP_Config::DB_TABLES['remember'];
+        $wpdb->query("DELETE FROM {$table} WHERE expires < NOW()");
+    }
 }

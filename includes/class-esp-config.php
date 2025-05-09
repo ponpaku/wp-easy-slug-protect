@@ -7,6 +7,13 @@ if (!defined('ABSPATH')) {
 class ESP_Config {
     const TEXT_DOMAIN = 'easy-slug-protect';
     const OPTION_KEY = 'esp_settings';
+    
+    // バージョン管理用の定数を追加
+    const VERSION_OPTION_KEY = 'esp_plugin_version';
+    // Cronフック名の定数
+    const DAILY_CLEANUP_HOOK = 'esp_daily_cleanup'; 
+    const INTEGRITY_CHECK_HOOK = 'esp_integrity_check_permalinks'; // 整合性チェック用
+
 
     const OPTION_DEFAULTS = array(
         'path' => array(),

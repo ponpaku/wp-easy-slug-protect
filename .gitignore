@@ -49,3 +49,9 @@ wp-config.php
 
 # Ignore all .zip files
 *.zip
+
+
+
+tasks.md
+
+.archive

@@ -368,3 +368,22 @@ select:focus {
 	margin: 10px 0;
 	display: none;
 }
+
+#esp-regenerate-progress-bar.green {
+	background-color: #4caf50;
+}
+#esp-regenerate-progress-bar.yellow {
+	background-color: #ffeb3b;
+	color: #333; /* 文字色調整 */
+}
+#esp-regenerate-progress-bar.red {
+	background-color: #f44336;
+}
+
+/* WordPress標準のスピナーアイコンをインラインで表示するための調整 */
+.notice-alt .spinner {
+	float: left;
+	margin-top: 0;
+	margin-right: 5px;
+	visibility: visible; /* is-activeだけだと表示されない場合があるため */
+}

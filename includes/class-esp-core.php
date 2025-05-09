@@ -38,6 +38,11 @@ class ESP_Core {
      */
     private $filter;
 
+    /**
+     * @var ESP_PATH_MATCHER パスマッチャーのインスタンス
+     */
+    private $path_matcher;
+
 
 
     /**
@@ -47,9 +52,9 @@ class ESP_Core {
         $this->auth = new ESP_Auth();
         $this->logout = new ESP_Logout();
         $this->security = new ESP_Security();
-        $this->session = ESP_Session::get_instance();
         $this->cookie = ESP_Cookie::get_instance();
         $this->filter = new ESP_Filter();
+        $this->path_matcher = new ESP_Path_Matcher();
     }
 
     /**
@@ -74,7 +79,6 @@ class ESP_Core {
         // フィルターの初期化
         add_action('wp_loaded', [$this->filter, 'init']);
     }
-
     /**
      * Cookie設定のハンドリング
      */
@@ -100,9 +104,6 @@ class ESP_Core {
      * 保護ページのチェックと制御
      */
     public function check_protected_page() {
-        global $wp;
-        global $post;
-
         // REST APIリクエストと管理画面は除外
         if ($this->is_excluded_request()) {
             return;
@@ -111,22 +112,22 @@ class ESP_Core {
         // 現在のパスを取得
         $current_path = $this->get_current_path();
 
-        // 保護対象のパスを取得
-        $protected_paths = ESP_Option::get_current_setting('path');
-
-        // 保護対象のパスかチェック
-        $target_path = $this->get_matching_protected_path($current_path, $protected_paths);
+        // パスマッチャーを使用して保護対象のパスを取得
+        $path_matcher = new ESP_Path_Matcher();
+        $target_path = $path_matcher->match($current_path);
 
         // ページ情報が取得出来ない場合終了
+        global $post;
         if (is_null($post) || !isset($post->ID)){
             return;
         }
-        // 現在のページがログインページかチェックし設定取得
-		$is_login_page = $this->is_login_page($post->ID);
+        
+        // 現在のページがログインページかチェック
+        $is_login_page = $this->is_login_page($post->ID);
 
         // POSTリクエストの場合はログイン処理を優先
         if (isset($_POST['esp_password'])) {
-            $this->handle_login_request($is_login_page);
+            $this->handle_login_request($is_login_page ?: $target_path);
             return;
         }
 
@@ -213,7 +214,7 @@ class ESP_Core {
     private function handle_login_request($path_settings) {
         // CSRFチェック
         if (!isset($_POST['esp_nonce']) || !$this->security->verify_nonce($_POST['esp_nonce'], $path_settings['id'])) {
-            $this->session->set_error(__('不正なリクエストです。', ESP_Config::TEXT_DOMAIN));
+            ESP_Message::set_error(__('不正なリクエストです。', ESP_Config::TEXT_DOMAIN));
             $this->redirect_to_login_page($path_settings);
             return;
         }
@@ -224,8 +225,6 @@ class ESP_Core {
         // ログイン処理
         $password = isset($_POST['esp_password']) ? $_POST['esp_password'] : '';
         if ($this->auth->process_login($path_settings, $password)) {
-            // エラー削除しておく
-            $this->session->del_error();
             // ログイン成功時は元のページへリダイレクト（cookieクラス使用でcookie適用させる）
             $this->cookie->do_redirect($redirect_to);
         }

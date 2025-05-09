@@ -106,15 +106,27 @@ class ESP_Cookie {
         }
 
         foreach ($this->pending_cookies as $name => $data) {
-            setcookie(
-                $name,
-                $data['value'],
-                $data['expires'],
-                COOKIEPATH,
-                COOKIE_DOMAIN,
-                is_ssl(),
-                true
-            );
+            if (version_compare(PHP_VERSION, '7.3.0', '>=')) {
+                // PHP 7.3以上ではオプション配列を使用
+                $options = $this->get_cookie_options();
+                $options['expires'] = $data['expires'];
+                setcookie(
+                    $name,
+                    $data['value'],
+                    $options
+                );
+            } else {
+                // 古いPHPバージョン用の互換性コード
+                setcookie(
+                    $name,
+                    $data['value'],
+                    $data['expires'],
+                    COOKIEPATH,
+                    COOKIE_DOMAIN,
+                    is_ssl(),
+                    true
+                );
+            }
         }
 
         $this->pending_cookies = [];
@@ -212,16 +224,24 @@ class ESP_Cookie {
     }
 
     /**
-     * Cookie設定のデフォルト値を取得
+     * Cookie設定のオプションを取得
      * 
      * @return array
      */
-    private function get_cookie_defaults() {
-        return [
+    private function get_cookie_options() {
+        $options = [
+            'expires' => 0,
             'path' => COOKIEPATH,
             'domain' => COOKIE_DOMAIN,
             'secure' => is_ssl(),
-            'httponly' => true
+            'httponly' => true,
         ];
+
+        // PHP 7.3以上では SameSite を追加
+        if (version_compare(PHP_VERSION, '7.3.0', '>=')) {
+            $options['samesite'] = 'Strict';
+        }
+
+        return $options;
     }
 }

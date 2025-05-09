@@ -314,6 +314,41 @@ class ESP_Admin_Menu {
                         </tr>
                     </table>
                 </div>
+
+
+                <div class="esp-section">
+                    <h2><?php _e('ツール', $text_domain); ?></h2>
+                    <table class="form-table">
+                        <tr>
+                            <th scope="row"><?php _e('パーマリンクパス情報', $text_domain); ?></th>
+                            <td>
+                                <button type="button" class="button button-secondary" id="esp-regenerate-permalink-paths">
+                                    <?php _e('全投稿のパーマリンクパス情報を再生成する', $text_domain); ?>
+                                </button>
+                                <p class="description">
+                                    <?php _e('投稿のパーマリンクと、プラグインが内部で保持しているパス情報との間に不整合が生じた可能性がある場合に実行してください。投稿数が多い場合は時間がかかることがあります。', $text_domain); ?>
+                                </p>
+                                <div id="esp-regenerate-progress-bar-container" style="display:none; margin-top: 10px; width: 100%; background-color: #f3f3f3; border: 1px solid #ccc;">
+                                    <div id="esp-regenerate-progress-bar" style="width: 0%; height: 20px; background-color: #4caf50; text-align: center; line-height: 20px; color: white;">0%</div>
+                                </div>
+                                <div id="esp-regenerate-status" style="margin-top: 5px;"></div>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><?php _e('保護キャッシュクリア', $text_domain); ?></th>
+                            <td>
+                                <button type="button" class="button button-secondary" id="esp-clear-protection-cache">
+                                    <?php _e('保護キャッシュをクリアする', $text_domain); ?>
+                                </button>
+                                <p class="description">
+                                    <?php _e('保護対象の投稿リストのキャッシュを強制的にクリアし、再生成を促します。通常は設定変更時や投稿更新時に自動で行われます。', $text_domain); ?>
+                                </p>
+                                <div id="esp-clear-cache-status" style="margin-top: 5px;"></div>
+                            </td>
+                        </tr>
+                    </table>
+                </div>
+                
                 <?php submit_button(); ?>
             </form>
         </div>
