@@ -170,7 +170,11 @@ class ESP_Filter {
             $processed_count++;
         }
 
-        $total_published_posts = wp_count_posts('any')->publish; // 注意: 'any'は非推奨だが、全種別を対象にするなら
+        $total_published_posts = 0;
+        foreach ( get_post_types( [ 'public' => true ], 'names' ) as $post_type ) {
+            $counts = wp_count_posts( $post_type );
+            $total_published_posts += isset( $counts->publish ) ? (int) $counts->publish : 0;
+        }   
 
         if ($is_ajax) {
             wp_send_json_success([

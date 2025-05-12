@@ -14,6 +14,8 @@ class ESP_Config {
     const DAILY_CLEANUP_HOOK = 'esp_daily_cleanup'; 
     const INTEGRITY_CHECK_HOOK = 'esp_integrity_check_permalinks'; // 整合性チェック用
 
+    // メタデータのキー
+    const PERMALINK_PATH_META_KEY = '_esp_permalink_path'; 
 
     const OPTION_DEFAULTS = array(
         'path' => array(),

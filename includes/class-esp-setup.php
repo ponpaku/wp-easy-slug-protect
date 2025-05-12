@@ -206,10 +206,4 @@ class ESP_Setup {
         update_option('esp_db_version', 1);
     }
 
-    public function deactivate() {
-        // Cronタスクの削除
-        wp_clear_scheduled_hook('esp_daily_cleanup');
-        
-        flush_rewrite_rules();
-    }
 }
