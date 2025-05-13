@@ -36,7 +36,7 @@ class ESP_Admin_Menu {
         $mail_settings =  ESP_Option::get_current_setting('mail');
 
         $text_domain = ESP_Config::TEXT_DOMAIN;
-        $option_key = ESP_Config::OPTION_KEY
+        $option_key = ESP_Config::OPTION_KEY;
 
         ?>
         <div class="wrap">

@@ -219,7 +219,7 @@ class ESP_Filter {
     /**
      * 外部からのキャッシュ更新用
      */
-    public function reset_cach(){ // メソッド名を reset_cache に変更推奨
+    public function reset_cache(){
         $this->regenerate_protected_posts_cache();
     }
 

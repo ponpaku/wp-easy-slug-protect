@@ -59,7 +59,7 @@ class ESP_Auth {
                 <input type="hidden" name="redirect_to" value="<?php echo esc_attr($redirect_to) ?>">
                 
                 <div class="esp-form-group">
-                    <input type="password" name="esp_password" id="esp-password" placeholder="<?php echo $place_holder ?>" required>
+                    <input type="password" name="esp_password" id="esp-password" placeholder="<?php echo esc_attr($place_holder) ?>" required>
                 </div>
 
                 <div class="esp-form-group">

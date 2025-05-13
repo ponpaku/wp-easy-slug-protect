@@ -63,8 +63,8 @@ class ESP_Core {
     public function init() {
         // アクションとフックの登録
         add_action('template_redirect', [$this, 'check_protected_page']);
-        add_action('wp_ajax_esp_clean_old_data', [$this, 'clean_old_data']);
-        add_action('wp_ajax_nopriv_esp_clean_old_data',[$this, 'clean_old_data']);
+        // add_action('wp_ajax_esp_clean_old_data', [$this, 'clean_old_data']);
+        // add_action('wp_ajax_nopriv_esp_clean_old_data',[$this, 'clean_old_data']);
         // スタイルの読み込み
         add_action('wp_enqueue_scripts', [$this, 'register_front_styles']);
         //  ログアウト処理のハンドリング
@@ -113,8 +113,7 @@ class ESP_Core {
         $current_path = $this->get_current_path();
 
         // パスマッチャーを使用して保護対象のパスを取得
-        $path_matcher = new ESP_Path_Matcher();
-        $target_path = $path_matcher->match($current_path);
+        $target_path = $this->path_matcher->match($current_path);
 
         // ページ情報が取得出来ない場合終了
         global $post;
@@ -123,16 +122,19 @@ class ESP_Core {
         }
         
         // 現在のページがログインページかチェック
-        $is_login_page = $this->is_login_page($post->ID);
+        $is_login_page_setting = $this->is_login_page($post->ID);
 
         // POSTリクエストの場合はログイン処理を優先
         if (isset($_POST['esp_password'])) {
-            $this->handle_login_request($is_login_page ?: $target_path);
+            $login_handling_path_setting = $is_login_page_setting ? $is_login_page_setting : $target_path;
+            if ($login_handling_path_setting) { // パス設定が存在する場合のみ処理
+                 $this->handle_login_request($login_handling_path_setting);
+            }
             return;
         }
 
         // ログインページもしくは保護対象でない場合は処理終了
-        if ($is_login_page || !$target_path) {
+        if ($is_login_page_setting || !$target_path) {
             return;
         }
 
@@ -170,41 +172,72 @@ class ESP_Core {
      */
     private function get_current_path(){
         global $wp;
+        $current_path = home_url(add_query_arg(array(), $wp->request));
         $current_path = '/' . trim($wp->request, '/') . '/';
         return $current_path;
     }
 
     /**
-     * 保護対象のパスを取得
-     * 
-     * @param string $current_path 現在のパス
-     * @param array $protected_paths 保護対象のパス一覧
-     * @return array|false マッチしたパスの設定。ない場合はfalse
+     * 指定されたページIDが「存在していて公開状態か」を返す
+     *
+     * @param int $page_id ページID。
+     * @return bool 有効な場合は true、そうでない場合は false。
      */
-    private function get_matching_protected_path($current_path, $protected_paths) {
-        foreach ($protected_paths as $path_id => $protected_path) {
-            if (strpos($current_path, $protected_path['path']) === 0) {
-                return $protected_path;
+    private function is_valid_login_page($page_id) {
+        if (empty($page_id) || !is_numeric($page_id)) { // 空または数値でないIDは無効
+            return false;
+        }
+        $page = get_post(absint($page_id)); // absint() で正の整数に
+        return $page && $page->post_status === 'publish';
+    }
+
+    // /**
+    //  * 保護対象のパスを取得
+    //  * 
+    //  * @param string $current_path 現在のパス
+    //  * @param array $protected_paths 保護対象のパス一覧
+    //  * @return array|false マッチしたパスの設定。ない場合はfalse
+    //  */
+    // private function get_matching_protected_path($current_path, $protected_paths) {
+    //     foreach ($protected_paths as $path_id => $protected_path) {
+    //         if (strpos($current_path, $protected_path['path']) === 0) {
+    //             return $protected_path;
+    //         }
+    //     }
+    //     return false;
+    // }
+
+
+    /**
+     * 指定されたページIDがいずれかの保護パスのログインページとして設定され、かつ有効であるか確認
+     *
+     * @param int $page_id ページID
+     * @return array|bool 有効なログインページである場合はパス設定、そうでない場合はfalse
+     */
+    private function is_login_page($page_id) { // 有効性チェックを追加
+        if (empty($page_id) || !is_numeric($page_id)) { // 不正なページIDの場合は早期リターン
+            return false;
+        }
+        $protected_paths = ESP_Option::get_current_setting('path');
+        if (empty($protected_paths) || !is_array($protected_paths)) { // 設定がない場合は早期リターン
+             return false;
+        }
+
+        foreach ($protected_paths as $path_id => $path_setting) {
+            // MODIFIED: 設定されたログインページIDが現在のページIDと一致し、かつそのページが有効かチェック
+            if (isset($path_setting['login_page']) && $path_setting['login_page'] == $page_id) {
+                if ($this->is_valid_login_page($path_setting['login_page'])) {
+                    return $path_setting; // 有効なログインページとして設定されている
+                } else {
+                    // 設定はされているが、ページ自体が無効（存在しない、非公開など）
+                    // この場合、このページは「ログインページではない」と扱うことでループを防ぐ
+                    return false;
+                }
             }
         }
         return false;
     }
 
-    /**
-     * 指定されたページIDがいずれかの保護パスのログインページとして設定されているか確認
-     * 
-     * @param int $page_id ページID
-     * @return array|bool ログインページである場合はパス設定、そうでない場合はfalse
-     */
-    private function is_login_page($page_id) {
-        $protected_paths = ESP_Option::get_current_setting('path');
-        foreach ($protected_paths as $path_id => $path_setting) {
-            if ($path_setting['login_page'] == $page_id) {
-                return $path_setting;
-            }
-        }
-        return false;
-    }
 
     /**
      * ログインリクエストの処理
@@ -227,10 +260,12 @@ class ESP_Core {
         if ($this->auth->process_login($path_settings, $password)) {
             // ログイン成功時は元のページへリダイレクト（cookieクラス使用でcookie適用させる）
             $this->cookie->do_redirect($redirect_to);
+            exit; 
         }
 
         // ログイン失敗時はログインページへリダイレクト
         $this->redirect_to_login_page($path_settings, $redirect_to);
+        exit;
     }
 
     /**
@@ -249,7 +284,8 @@ class ESP_Core {
         } elseif (!is_null($path_settings) && isset($path_settings['path'])) {
             $path = $path_settings['path'];
         } else {
-            return '/';
+            // フォールバック先としてホームページのパスを返す
+            return home_url('/');
         }
         
         // 整形したパスを返す   
@@ -262,24 +298,37 @@ class ESP_Core {
      * @param string $path 整形前のパス
      * @return string 整形後の安全なパス
      */
+    /**
+     * パスを安全な形式に整形する
+     *
+     * @param string $path 整形前のパス
+     * @return string 整形後の安全なパス
+     */
     private function sanitize_path($path) {
         // URLデコード（エンコードされている場合）
         $decoded_path = rawurldecode($path);
-        
+
         // プロトコルとドメインを除去
         $path_only = preg_replace('#^https?://[^/]+#', '', $decoded_path);
-        
+
         // パスを正規化
         $normalized = wp_normalize_path($path_only);
-        
-        // 先頭と末尾のスラッシュを正規化
-        $safe_path = '/' . trim($normalized, '/') . '/';
-        
+
+        // 先頭と末尾のスラッシュを正規化し、常に先頭にスラッシュを付与
+        $safe_path = '/' . trim($normalized, '/');
+        if ($safe_path === '/') { // ルートの場合、末尾のスラッシュは任意だが、ここでは統一
+             // $safe_path .= '/'; // 必要に応じて
+        } elseif (substr($safe_path, -1) !== '/' && strpos($safe_path, '?') === false && strpos($safe_path, '#') === false) {
+            // クエリやフラグメントがない場合のみ末尾にスラッシュを追加（ディレクトリ形式を期待する場合）
+            // $safe_path .= '/';
+        }
+
+
         // 危険な文字や連続したスラッシュを除去
         $safe_path = preg_replace(
             [
                 '#[<>:"\'%\{\}\(\)\[\]\^`\\\\]#',  // 危険な文字を除去
-                '#/+#'                              // 連続したスラッシュを単一のスラッシュに
+                '#//+#',                            // 連続したスラッシュを単一のスラッシュに (正規化後なので不要かも)
             ],
             [
                 '',
@@ -287,21 +336,29 @@ class ESP_Core {
             ],
             $safe_path
         );
-        
-        // 親ディレクトリへの参照（../）を除去
+
+        // 相対パス ../ を解決
         $parts = explode('/', $safe_path);
-        $safe_parts = array();
-        
+        $absolutes = array();
         foreach ($parts as $part) {
-            if ($part === '.' || $part === '..') {
-                continue;
-            }
-            if ($part !== '') {
-                $safe_parts[] = $part;
+            if ('.' == $part) continue;
+            if ('..' == $part) {
+                array_pop($absolutes);
+            } else {
+                $absolutes[] = $part;
             }
         }
-        
-        return '/' . implode('/', $safe_parts) . '/';
+        $safe_path = implode('/', $absolutes);
+
+        // ここではパス文字列のみを返す前提のため、このまま
+        if (strpos($safe_path, '/') !== 0 && !empty($safe_path)) { // 先頭にスラッシュがない場合（ありえないはずだが念のため）
+            $safe_path = '/' . $safe_path;
+        }
+        if (empty($safe_path)) { // パスが空になった場合
+            return '/';
+        }
+
+        return $safe_path;
     }
 
 
@@ -315,13 +372,23 @@ class ESP_Core {
         if (is_null($current_path)) {
             $current_path = $this->get_current_path();
         }
-        $login_url = add_query_arg(
-            array(
-                'redirect_to' => urlencode($current_path)
-            ),
-            get_permalink($path_settings['login_page'])
-        );
+
+        // ログインページの有効性チェックとフォールバック処理を追加
+        $login_page_id = isset($path_settings['login_page']) ? $path_settings['login_page'] : 0;
+
+        if ($this->is_valid_login_page($login_page_id)) {
+            $login_url = get_permalink($login_page_id);
+            if ($login_url) { // get_permalinkが失敗しないか確認
+                $login_url_with_redirect = add_query_arg(
+                    array('redirect_to' => urlencode($current_path)),
+                    $login_url
+                );
+                $this->cookie->do_redirect($login_url_with_redirect, false);
+                exit; // リダイレクト後は確実に終了
+            }
+        }
         $this->cookie->do_redirect($login_url, false);
+        exit;
     }
 
     /**
@@ -336,8 +403,8 @@ class ESP_Core {
         $atts = shortcode_atts(array(
             'path' => '',
             'path_id' => '',
-            'place_holder' => 'パスワード'
-        ), $atts);
+            'place_holder' =>  __('ログイン', ESP_Config::TEXT_DOMAIN)
+        ), $atts, 'esp_login_form');
 
         // 現在のページのパスを取得
         global $post;
@@ -351,33 +418,58 @@ class ESP_Core {
 
         // 保護パス設定から対応するパスを検索
         $protected_paths = ESP_Option::get_current_setting('path');
-        $target_path = null;
+        $target_path_setting = null;
+
+        
+        if (empty($protected_paths) || !is_array($protected_paths)) {
+            ESP_Message::set_error(__('保護設定が見つかりません。', ESP_Config::TEXT_DOMAIN));
+            return;
+        }
 
         foreach ($protected_paths as $path_id => $path) {
             // path_id属性が指定されている場合はそれを優先
             if ($lock_path_id && $path_id === $lock_path_id) {
-                $target_path = $path;
+                $target_path_setting = $path;
                 break;
             }
             // path属性が指定されている場合
             elseif ($lock_path && $path['path'] === $lock_path) {
-                $target_path = $path;
+                $target_path_setting = $path;
                 break;
             }
             // 指定がない場合は現在のページIDに基づいてパスを検索
             elseif (!$lock_path && !$lock_path_id && $path['login_page'] == $post->ID) {
-                $target_path = $path;
+                $target_path_setting = $path;
                 break;
             }
         }
 
-        if (!$target_path) {
+        if (!$target_path_setting) {
+            if ($atts['path'] || $atts['path_id']) {
+                ESP_Message::set_error(__('保護設定が見つかりません。', ESP_Config::TEXT_DOMAIN));
+                return;
+            }
             return '';
         }
 
-        // リダイレクト先の取得
-        $redirect_to = isset($_GET['redirect_to']) ? $_GET['redirect_to'] : '';
-        return $this->auth->get_login_form($target_path, $redirect_to, $atts['place_holder']);
+        // MODIFIED: ログインページの有効性をチェック
+        $login_page_id_for_form = isset($target_path_setting['login_page']) ? $target_path_setting['login_page'] : 0;
+        if (!$this->is_valid_login_page($login_page_id_for_form)) {
+            // フォームを表示しようとしているログインページ自体が無効な場合
+            // このショートコードがlogin_pageに置かれていれば、このメッセージが表示
+            SP_Message::set_error(__('このページは現在有効ではありません。', ESP_Config::TEXT_DOMAIN));
+            return;
+        }
+
+        // リダイレクト先取得
+        $redirect_to_param = isset($_GET['redirect_to']) ? $_GET['redirect_to'] : '';
+        if (empty($redirect_to_param) && isset($target_path_setting['path'])) { // redirect_to がなければ保護対象パスをセット
+            $redirect_to_param = $target_path_setting['path'];
+        }
+        // redirect_to もサニタイズした方がより安全
+        $redirect_to_param = $this->sanitize_path($redirect_to_param);
+
+        return $this->auth->get_login_form($target_path_setting, $redirect_to, $atts['place_holder']);
     }
 
     /**

@@ -125,6 +125,13 @@ class ESP_Security {
 
         // 古いレコードを削除
         $this->cleanup_old_attempts();
+
+        // ちょうど閾値に達した＝ロックが発生した瞬間だけ送信する
+        if ($attempts === (int) $settings['attempts_threshold']) {
+            if ( class_exists( 'ESP_Mail' ) ) {
+                ESP_Mail::get_instance()->notify_brute_force_attempt( $ip, $path, $attempts );
+            }
+        }
     }
 
     /**
