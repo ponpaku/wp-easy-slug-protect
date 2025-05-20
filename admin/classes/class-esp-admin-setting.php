@@ -199,7 +199,7 @@ class ESP_Settings {
 
         // 保護ページリストの更新
         $filter = new ESP_Filter;
-        $filter->reset_cach();
+        $filter->reset_cache();
     }
 
     /**
