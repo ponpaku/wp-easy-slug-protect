@@ -22,7 +22,8 @@ class ESP_Config {
         'brute' => array(
             'attempts_threshold' => 5,  // 試行回数の上限
             'time_frame' => 10,         // 試行回数のカウント期間（分）
-            'block_time_frame' => 60    // ブロック時間（分）
+            'block_time_frame' => 60,   // ブロック時間（分）
+            'whitelist_ips' => ''       // ホワイトリストIPアドレス (カンマ区切り)
         ),
         'remember' => array(
             'time_frame' => 15,         // ログイン保持期間（日）

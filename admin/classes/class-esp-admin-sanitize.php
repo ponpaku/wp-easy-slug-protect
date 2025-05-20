@@ -116,11 +116,30 @@ class ESP_Sanitize {
      * ブルートフォース対策設定のサニタイズ
      */
     public function sanitize_bruteforce_settings($settings) {
-        return array(
+        $sanitized = array(
             'attempts_threshold' => max(1, absint($settings['attempts_threshold'])),
             'time_frame' => max(1, absint($settings['time_frame'])),
-            'block_time_frame' => max(1, absint($settings['block_time_frame']))
+            'block_time_frame' => max(1, absint($settings['block_time_frame'])),
+            'whitelist_ips' => $settings['whitelist_ips'] 
         );
+
+        if (isset($settings['whitelist_ips'])) {
+            $raw_ips = explode(',', $settings['whitelist_ips']);
+            $valid_ips = [];
+            foreach ($raw_ips as $ip) {
+                $trimmed_ip = trim($ip);
+                if (!empty($trimmed_ip)) {
+                    // IPアドレス形式 (IPv4またはIPv6) を検証
+                    if (filter_var($trimmed_ip, FILTER_VALIDATE_IP)) {
+                        $valid_ips[] = $trimmed_ip;
+                   }
+                }
+            }
+            if (!empty($valid_ips)) {
+                $sanitized['whitelist_ips'] = implode(',', array_unique($valid_ips));
+            }
+        }
+        return $sanitized;
     }
 
     /**

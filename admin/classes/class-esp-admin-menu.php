@@ -210,6 +210,25 @@ class ESP_Admin_Menu {
                                 <?php _e('分', $text_domain); ?>
                             </td>
                         </tr>
+                        <tr>
+                            <th scope="row">
+                                <label for="esp-whitelist-ips">
+                                    <?php _e('ホワイトリストIPアドレス', $text_domain); ?>
+                                </label>
+                            </th>
+                            <td>
+                                <textarea id="esp-whitelist-ips"
+                                    name="<?php echo $option_key; ?>[brute][whitelist_ips]"
+                                    rows="5"
+                                    cols="50"
+                                    class="large-text"
+                                    placeholder="<?php _e('例: 192.168.1.1, 203.0.113.10, 2001:db8::1', $text_domain); ?>"
+                                ><?php echo esc_textarea(isset($bruteforce_settings['whitelist_ips']) ? $bruteforce_settings['whitelist_ips'] : ''); ?></textarea>
+                                <p class="description">
+                                    <?php _e('カンマ区切りでIPアドレスまたはCIDR表記のIPアドレス範囲を入力してください。これらのIPアドレスはブルートフォースチェックの対象外となります。', $text_domain); ?>
+                                </p>
+                            </td>
+                        </tr>
                     </table>
                 </div>
 

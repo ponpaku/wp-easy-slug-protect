@@ -53,11 +53,28 @@ class ESP_Security {
             return false;
         }
 
+
+        $brute_settings = ESP_Option::get_current_setting('brute');
+        // ホワイトリストのチェック
+        if (isset($brute_settings['whitelist_ips']) && !empty($brute_settings['whitelist_ips'])) {
+            $whitelisted_ips_raw = explode(',', $brute_settings['whitelist_ips']);
+            $whitelisted_ips = array_map('trim', $whitelisted_ips_raw);
+
+            // 大文字・小文字を区別せずにIPアドレスを比較するため、配列内のIPアドレスも現在のIPアドレスも小文字に変換する
+            // (IPv6アドレスは大文字・小文字を区別しないため)
+            $normalized_current_ip = strtolower($ip);
+            $normalized_whitelisted_ips = array_map('strtolower', $whitelisted_ips);
+
+
+            if (in_array($normalized_current_ip, $normalized_whitelisted_ips, true)) {
+                return true; // ホワイトリストに合致すれば試行許可
+            }
+        }
+
         $path = $path_settings['path'];
         $path_id = $path_settings['id'];
 
         global $wpdb;
-        $settings = ESP_Option::get_current_setting('brute');
         $table = $wpdb->prefix . ESP_Config::DB_TABLES['brute'];
 
         // 試行回数カウント期間内のレコード数を取得
@@ -69,11 +86,11 @@ class ESP_Security {
             AND time > DATE_SUB(NOW(), INTERVAL %d MINUTE)",
             $ip,
             $path_id,
-            $settings['time_frame']
+            $brute_settings['time_frame']
         ));
 
         // 試行回数が上限未満なら許可
-        if ($count < $settings['attempts_threshold']) {
+        if ($count < $brute_settings['attempts_threshold']) {
             return true;
         }
 
@@ -98,7 +115,7 @@ class ESP_Security {
             return false; // 時刻のパースに失敗した場合、安全のため試行不可
         }
         
-        $block_end_time = $latest_attempt_timestamp + ($settings['block_time_frame'] * 60);
+        $block_end_time = $latest_attempt_timestamp + ($brute_settings['block_time_frame'] * 60);
         return time() > $block_end_time;
     }
 
