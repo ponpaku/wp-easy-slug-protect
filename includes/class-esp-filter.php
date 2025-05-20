@@ -50,7 +50,17 @@ class ESP_Filter {
 
         // パーマリンク構造が変更された時
         add_action('permalink_structure_changed', [$this, 'handle_permalink_structure_change']);
+
+        // REST API フィルタリング
+        // 登録されているすべての公開投稿タイプに対してフックを追加
+        $post_types = get_post_types(['public' => true], 'names');
+        foreach ($post_types as $post_type) {
+            add_filter("rest_{$post_type}_query", [$this, 'filter_rest_post_type_query'], 10, 2);
+            add_filter("rest_prepare_{$post_type}", [$this, 'check_rest_single_post_access'], 10, 3);
+        }
     }
+
+    /*----- handler ------*/
 
     /**
      * 投稿保存時の処理 (メタデータ更新とキャッシュ再生成)
@@ -92,6 +102,49 @@ class ESP_Filter {
         $this->regenerate_protected_posts_cache();
     }
 
+    /*- ajax handler -*/
+
+    /**
+     * AJAXハンドラ: 全投稿のパーマリンクパスマークをバッチ処理で再生成
+     */
+    public function ajax_regenerate_permalink_paths_batch() {
+        // nonceチェック
+        check_ajax_referer('esp_regenerate_permalinks_nonce', 'nonce');
+
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(['message' => __('権限がありません。', 'easy-slug-protect')], 403);
+        }
+
+        $offset = isset($_POST['offset']) ? absint($_POST['offset']) : 0;
+        $limit = isset($_POST['limit']) ? absint($_POST['limit']) : 50; // 1回の処理件数
+        // $limit の上限も設けた方が良いかもしれない
+
+        // force_regenerate_all_permalink_paths_meta_batch は既に wp_send_json_success/error を呼ぶのでそのまま
+        $this->force_regenerate_all_permalink_paths_meta_batch(true, $offset, $limit);
+        // このメソッドは wp_send_json_success/error を呼び出し、wp_die() するので、これ以上の出力は不要
+    }
+
+    /**
+     * AJAXハンドラ: 保護キャッシュをクリア
+     */
+    public function ajax_clear_protection_cache() {
+        check_ajax_referer('esp_clear_cache_nonce', 'nonce');
+
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(['message' => __('権限がありません。', 'easy-slug-protect')], 403);
+        }
+
+        delete_transient(self::CACHE_KEY);
+        // 必要であれば、ここで明示的にキャッシュを再生成する regenerate_protected_posts_cache() を呼んでも良いが、
+        // 通常は次にキャッシュが必要になった際に自動生成されるため、delete_transient だけで十分な場合が多い。
+        // 今回は明示的に再生成を試みる。
+        $this->regenerate_protected_posts_cache();
+
+        wp_send_json_success(['message' => __('保護キャッシュをクリアしました。', 'easy-slug-protect')]);
+    }
+
+
+    /*----- control post_meta -----*/
 
     /**
      * 単一投稿の _esp_permalink_path メタデータを更新する
@@ -216,22 +269,7 @@ class ESP_Filter {
     }
 
 
-    /**
-     * 外部からのキャッシュ更新用
-     */
-    public function reset_cache(){
-        $this->regenerate_protected_posts_cache();
-    }
-
-    /**
-     * キャッシュの存在確認と生成
-     */
-    private function check_and_generate_cache() {
-        $cached_ids = get_transient(self::CACHE_KEY);
-        if ($cached_ids === false) {
-            $this->regenerate_protected_posts_cache();
-        }
-    }
+    /*----- seach filter -----*/ 
 
     /**
      * 保護されたページをクエリから除外
@@ -290,6 +328,99 @@ class ESP_Filter {
             }
         }
         return array_unique($result);
+    }
+
+    /*----- REST filter -----*/
+
+    /**
+     * REST APIの投稿タイプ一覧クエリをフィルタリングする
+     *
+     * @param array           $args    WP_Queryの引数配列
+     * @param WP_REST_Request $request リクエストオブジェクト
+     * @return array 修正されたWP_Queryの引数配列
+     */
+    public function filter_rest_post_type_query($args, $request) {
+        // REST APIリクエストであることを確認 (念のため)
+        if (!(defined('REST_REQUEST') && REST_REQUEST)) {
+            return $args;
+        }
+
+        // 認証済みユーザー（WordPressのログインユーザー）は保護対象外とするか検討
+        // if (current_user_can('edit_posts')) { // 例: 編集権限のあるユーザーは全て閲覧可能
+        //     return $args;
+        // }
+
+        $excluded_post_ids = $this->get_excluded_post_ids(); //
+
+        if (!empty($excluded_post_ids)) {
+            $current_excluded = isset($args['post__not_in']) ? (array) $args['post__not_in'] : [];
+            $args['post__not_in'] = array_unique(array_merge($current_excluded, $excluded_post_ids));
+        }
+        return $args;
+    }
+
+    /**
+     * REST APIで単一の投稿へのアクセスをチェックする
+     *
+     * @param WP_REST_Response $response レスポンスオブジェクト
+     * @param WP_Post          $post     投稿オブジェクト
+     * @param WP_REST_Request  $request  リクエストオブジェクト
+     * @return WP_REST_Response|WP_Error 変更されたレスポンスまたはWP_Errorオブジェクト
+     */
+    public function check_rest_single_post_access($response, $post, $request) {
+        // REST APIリクエストであることを確認
+        if (!(defined('REST_REQUEST') && REST_REQUEST)) {
+            return $response;
+        }
+
+        // $responseが既にエラーオブジェクトである場合は、そのまま返す
+        // (例: 投稿が見つからない場合など、コントローラーが既にエラーをセットしているケース)
+        if (is_wp_error($response)) {
+            return $response;
+        }
+        // WP_REST_Response オブジェクトで、かつエラーがセットされている場合も同様
+        if ($response instanceof WP_REST_Response && $response->is_error()) {
+             return $response;
+        }
+
+        $excluded_post_ids = $this->get_excluded_post_ids(); //
+
+        if (in_array($post->ID, $excluded_post_ids)) {
+            // この投稿は保護されており、現在のリクエストではアクセスできない
+            // 新しい WP_REST_Response オブジェクトを作成し、エラー情報のみを設定する
+            $error_data = [
+                'code'    => 'esp_rest_forbidden',
+                'message' => __('このコンテンツは保護されています。', ESP_Config::TEXT_DOMAIN), //
+                'data'    => ['status' => 403],
+            ];
+            // 新しいレスポンスオブジェクトをエラーデータとステータスで初期化
+            $error_response = new WP_REST_Response($error_data, 403);
+            
+            return $error_response;
+        }
+
+        return $response;
+    }
+
+
+
+    /*----- control chace ------*/
+    
+    /**
+     * 外部からのキャッシュ更新用
+     */
+    public function reset_cache(){
+        $this->regenerate_protected_posts_cache();
+    }
+
+    /**
+     * キャッシュの存在確認と生成
+     */
+    private function check_and_generate_cache() {
+        $cached_ids = get_transient(self::CACHE_KEY);
+        if ($cached_ids === false) {
+            $this->regenerate_protected_posts_cache();
+        }
     }
 
     /**
@@ -478,44 +609,5 @@ class ESP_Filter {
         
         // 次回の実行のために進捗を保存
         update_option($option_name, ['offset' => $new_offset, 'last_run_start' => $progress['last_run_start'], 'total_fixed_this_session' => $total_fixed_session]);
-    }
-
-        /**
-     * AJAXハンドラ: 全投稿のパーマリンクパスマークをバッチ処理で再生成
-     */
-    public function ajax_regenerate_permalink_paths_batch() {
-        // nonceチェック
-        check_ajax_referer('esp_regenerate_permalinks_nonce', 'nonce');
-
-        if (!current_user_can('manage_options')) {
-            wp_send_json_error(['message' => __('権限がありません。', 'easy-slug-protect')], 403);
-        }
-
-        $offset = isset($_POST['offset']) ? absint($_POST['offset']) : 0;
-        $limit = isset($_POST['limit']) ? absint($_POST['limit']) : 50; // 1回の処理件数
-        // $limit の上限も設けた方が良いかもしれない
-
-        // force_regenerate_all_permalink_paths_meta_batch は既に wp_send_json_success/error を呼ぶのでそのまま
-        $this->force_regenerate_all_permalink_paths_meta_batch(true, $offset, $limit);
-        // このメソッドは wp_send_json_success/error を呼び出し、wp_die() するので、これ以上の出力は不要
-    }
-
-    /**
-     * AJAXハンドラ: 保護キャッシュをクリア
-     */
-    public function ajax_clear_protection_cache() {
-        check_ajax_referer('esp_clear_cache_nonce', 'nonce');
-
-        if (!current_user_can('manage_options')) {
-            wp_send_json_error(['message' => __('権限がありません。', 'easy-slug-protect')], 403);
-        }
-
-        delete_transient(self::CACHE_KEY);
-        // 必要であれば、ここで明示的にキャッシュを再生成する regenerate_protected_posts_cache() を呼んでも良いが、
-        // 通常は次にキャッシュが必要になった際に自動生成されるため、delete_transient だけで十分な場合が多い。
-        // 今回は明示的に再生成を試みる。
-        $this->regenerate_protected_posts_cache();
-
-        wp_send_json_success(['message' => __('保護キャッシュをクリアしました。', 'easy-slug-protect')]);
     }
 }
