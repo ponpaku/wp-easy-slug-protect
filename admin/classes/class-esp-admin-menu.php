@@ -297,6 +297,16 @@ class ESP_Admin_Menu {
                                         <?php _e('保護パスの削除', $text_domain); ?>
                                     </label>
                                     <br>
+
+                                    <label <?php echo !$mail_settings['enable_notifications'] ? 'class="esp-disabled"' : ''; ?>>
+                                        <input type="checkbox" 
+                                            name="<?php echo $option_key; ?>[mail][notifications][brute_force]"
+                                            value="1"
+                                            <?php checked(isset($notifications['brute_force']) && $notifications['brute_force']); ?>
+                                            <?php disabled(!$mail_settings['enable_notifications']); ?>>
+                                        <?php _e('ブルートフォースブロック発生時', $text_domain); ?>
+                                    </label>
+                                    <br>
                                     
                                     <label <?php echo !$mail_settings['enable_notifications'] ? 'class="esp-disabled"' : ''; ?>>
                                         <input type="checkbox" 

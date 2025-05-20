@@ -469,7 +469,7 @@ class ESP_Core {
         // redirect_to もサニタイズした方がより安全
         $redirect_to_param = $this->sanitize_path($redirect_to_param);
 
-        return $this->auth->get_login_form($target_path_setting, $redirect_to, $atts['place_holder']);
+        return $this->auth->get_login_form($target_path_setting, $redirect_to_param, $atts['place_holder']);
     }
 
     /**

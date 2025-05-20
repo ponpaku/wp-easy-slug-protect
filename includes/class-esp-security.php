@@ -90,7 +90,15 @@ class ESP_Security {
         ));
 
         // ブロック時間が経過していれば許可
-        $block_end_time = strtotime($latest_attempt) + ($settings['block_time_frame'] * 60);
+        // strtotime は失敗すると false を返すため、エラーハンドリングを追加
+        $latest_attempt_timestamp = strtotime($latest_attempt);
+        if ($latest_attempt_timestamp === false) {
+            // 致命的エラーにしたほうがいいかどうか
+            error_log("ESP_Security: Failed to parse latest_attempt time: {$latest_attempt}");
+            return false; // 時刻のパースに失敗した場合、安全のため試行不可
+        }
+        
+        $block_end_time = $latest_attempt_timestamp + ($settings['block_time_frame'] * 60);
         return time() > $block_end_time;
     }
 
@@ -109,11 +117,14 @@ class ESP_Security {
         $path = $path_settings['path'];
         $path_id = $path_settings['id'];
 
+        $settings = ESP_Option::get_current_setting('brute');
+
         global $wpdb;
+        $table = $wpdb->prefix . ESP_Config::DB_TABLES['brute'];
 
         // 新規レコードを追加
         $result = $wpdb->insert(
-            $wpdb->prefix . ESP_Config::DB_TABLES['brute'],
+            $table,
             array(
                 'ip_address' => $ip,
                 'path' => $path,
@@ -123,15 +134,37 @@ class ESP_Security {
             array('%s', '%s', '%s', '%s')
         );
 
+        // 現在の試行回数を取得 (今回追加したものを含む)
+        $current_attempts = $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) 
+            FROM $table 
+            WHERE ip_address = %s 
+            AND path_id = %s 
+            AND time > DATE_SUB(NOW(), INTERVAL %d MINUTE)",
+            $ip,
+            $path_id,
+            $settings['time_frame']
+        ));
+
+        // 試行回数が閾値に達した場合に通知
+        if ($current_attempts == $settings['attempts_threshold']) {
+            // ESP_Mailクラスとnotify_brute_force_attemptメソッドが存在し、
+            // 適切にオートロードされるか、事前に読み込まれていることを確認してください。
+            if (class_exists('ESP_Mail') && method_exists(ESP_Mail::class, 'get_instance')) {
+                $mailer = ESP_Mail::get_instance();
+                if (method_exists($mailer, 'notify_brute_force_attempt')) {
+                    $mailer->notify_brute_force_attempt($ip, $path, $current_attempts);
+                } else {
+                    error_log('ESP_Security: ESP_Mail class does not have notify_brute_force_attempt method.');
+                }
+            } else {
+                error_log('ESP_Security: ESP_Mail class or get_instance method not found.');
+            }
+        }
+
         // 古いレコードを削除
         $this->cleanup_old_attempts();
 
-        // ちょうど閾値に達した＝ロックが発生した瞬間だけ送信する
-        if ($attempts === (int) $settings['attempts_threshold']) {
-            if ( class_exists( 'ESP_Mail' ) ) {
-                ESP_Mail::get_instance()->notify_brute_force_attempt( $ip, $path, $attempts );
-            }
-        }
     }
 
     /**
