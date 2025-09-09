@@ -1,0 +1,389 @@
+/* 全体のレイアウト */
+.wrap {
+	max-width: 1200px;
+	margin: 20px auto;
+}
+
+/* セクション共通スタイル */
+.esp-section {
+	background: #fff;
+	border: 1px solid #ccd0d4;
+	border-radius: 4px;
+	padding: 20px;
+	margin: 20px 0;
+	box-shadow: 0 1px 1px rgba(0, 0, 0, 0.04);
+}
+
+.esp-section h2 {
+	margin-top: 0;
+	padding-bottom: 12px;
+	border-bottom: 1px solid #eee;
+	font-size: 1.4em;
+	font-weight: 600;
+}
+
+/* 保護パス設定のスタイル */
+.esp-paths-container {
+	display: flex;
+	gap: 0.5em;
+	flex-wrap: wrap;
+	justify-content: space-between;
+}
+
+.esp-path-item {
+	flex: 1;
+	min-width: 38%;
+	max-width: 48%;
+	background: #f9f9f9;
+	border: 1px solid #e5e5e5;
+	border-radius: 3px;
+	transition: all 0.3s ease;
+}
+
+.esp-path-item:hover {
+	border-color: #999;
+	box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+}
+
+.esp-path-header {
+	padding: 12px 15px;
+	background: #f1f1f1;
+	border-bottom: 1px solid #e5e5e5;
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+}
+
+.esp-path-header h3 {
+	margin: 0;
+	font-size: 14px;
+	font-weight: 600;
+}
+
+.esp-path-content {
+	padding: 15px;
+}
+
+.esp-path-content p {
+	margin: 0 0 15px;
+}
+
+.esp-path-content label {
+	display: block;
+	margin-bottom: 5px;
+	font-weight: 600;
+}
+
+.esp-path-content input[type="text"],
+.esp-path-content input[type="password"],
+.esp-path-content select {
+	width: 100%;
+	max-width: 400px;
+}
+
+/* メール通知設定のスタイル */
+.esp-section fieldset {
+	margin: 0;
+	padding: 0;
+	border: none;
+}
+
+.esp-section fieldset label {
+	display: block;
+	margin-bottom: 10px;
+	color: #333;
+}
+
+.esp-section fieldset label:last-child {
+	margin-bottom: 0;
+}
+
+.esp-section fieldset label input[type="checkbox"] {
+	margin-right: 8px;
+}
+
+/* メール設定のグループ化 */
+.esp-notification-group {
+	background: #f9f9f9;
+	border: 1px solid #e5e5e5;
+	border-radius: 3px;
+	padding: 15px;
+	margin-top: 10px;
+}
+
+.esp-notification-group.disabled {
+	opacity: 0.5;
+	pointer-events: none;
+}
+
+/* メールアドレス入力欄のスタイル */
+#esp-notify-email {
+	width: 100%;
+	max-width: 400px;
+}
+
+/* メール設定の見出し */
+.esp-notification-heading {
+	font-weight: 600;
+	margin-bottom: 10px;
+	color: #1d2327;
+}
+
+/* 通知項目のスタイル */
+.esp-notification-items {
+	margin-left: 15px;
+}
+
+.esp-notification-items label {
+	display: flex;
+	align-items: center;
+	margin-bottom: 8px;
+}
+
+.esp-notification-items label input[type="checkbox"] {
+	margin-right: 8px;
+}
+
+/* メール設定の説明文 */
+.esp-mail-description {
+	color: #666;
+	font-style: italic;
+	margin: 5px 0 0;
+	font-size: 13px;
+}
+
+/* 入力ロック */
+.esp-locked-input {
+	background-color: #f0f0f1;
+	cursor: not-allowed;
+	border-color: #dcdcde;
+}
+
+.esp-path-locked-notice {
+	display: block;
+	color: #666;
+	font-style: italic;
+	margin-top: 5px;
+}
+
+/* エラー入力のスタイル */
+.esp-error-input {
+	border-color: #dc3232 !important;
+	box-shadow: 0 0 2px rgba(220, 50, 50, 0.25) !important;
+}
+
+.esp-error-input:focus {
+	border-color: #dc3232 !important;
+	box-shadow: 0 0 2px rgba(220, 50, 50, 0.5) !important;
+}
+
+/* 無効時のスタイル */
+.esp-notifications-disabled .esp-notification-items {
+	opacity: 0.5;
+	pointer-events: none;
+}
+
+/* トグルアニメーション */
+.esp-notification-items {
+	transition: opacity 0.3s ease;
+}
+
+/* レスポンシブ対応の追加 */
+@media screen and (max-width: 782px) {
+	.esp-notification-group {
+		padding: 12px;
+	}
+
+	#esp-notify-email {
+		max-width: 100%;
+	}
+
+	.esp-notification-items {
+		margin-left: 0;
+	}
+
+	.esp-notification-items label {
+		padding: 8px 0;
+	}
+}
+
+/* ボタンスタイル */
+.esp-remove-path {
+	color: #a00;
+	border-color: #a00;
+}
+
+.esp-remove-path:hover {
+	color: #dc3232;
+	border-color: #dc3232;
+	background: #f8f8f8;
+}
+
+#esp-add-path {
+	margin: 10px 0 20px;
+	padding: 4px 15px;
+	height: auto;
+	font-size: 13px;
+}
+
+/* フォーム要素のスタイル */
+.form-table th {
+	width: 200px;
+	padding: 15px 10px 15px 0;
+}
+
+.form-table td {
+	padding: 15px 10px;
+}
+
+input[type="number"] {
+	width: 100px;
+}
+
+/* 説明文のスタイル */
+.description {
+	color: #666;
+	font-style: italic;
+	margin-top: 5px;
+	display: block;
+}
+
+/* エラー表示のスタイル */
+.esp-error {
+	color: #dc3232;
+	padding: 10px;
+	border-left: 4px solid #dc3232;
+	background: #fff;
+	margin: 10px 0;
+}
+
+/* 成功メッセージのスタイル */
+.esp-success {
+	color: #46b450;
+	padding: 10px;
+	border-left: 4px solid #46b450;
+	background: #fff;
+	margin: 10px 0;
+}
+
+/* レスポンシブ対応 */
+@media screen and (max-width: 782px) {
+	.esp-section {
+		padding: 15px;
+	}
+
+	.form-table th {
+		width: 100%;
+		display: block;
+		padding-bottom: 0;
+	}
+
+	.form-table td {
+		padding-left: 0;
+		padding-right: 0;
+	}
+
+	.esp-path-content input[type="text"],
+	.esp-path-content input[type="password"],
+	.esp-path-content select {
+		max-width: 100%;
+	}
+
+	.esp-path-header {
+		flex-direction: column;
+		gap: 10px;
+	}
+
+	.esp-path-header h3 {
+		text-align: center;
+	}
+}
+
+/* アニメーション */
+.esp-path-item {
+	opacity: 1;
+	transform: translateY(0);
+	transition: opacity 0.3s ease, transform 0.3s ease;
+}
+
+.esp-path-item.removing {
+	opacity: 0;
+	transform: translateY(-10px);
+}
+
+/* ツールチップスタイル */
+.esp-tooltip {
+	position: relative;
+	display: inline-block;
+	margin-left: 5px;
+	color: #666;
+}
+
+.esp-tooltip:hover::before {
+	content: attr(data-tooltip);
+	position: absolute;
+	bottom: 100%;
+	left: 50%;
+	transform: translateX(-50%);
+	padding: 5px 10px;
+	background: #333;
+	color: #fff;
+	border-radius: 3px;
+	font-size: 12px;
+	white-space: nowrap;
+	z-index: 1000;
+}
+
+/* 設定項目の区切り */
+.form-table tr:not(:last-child) td,
+.form-table tr:not(:last-child) th {
+	border-bottom: 1px solid #f0f0f0;
+}
+
+/* プレースホルダーのスタイル */
+input::placeholder {
+	color: #999;
+	font-style: italic;
+}
+
+/* フォーカス時のスタイル */
+input:focus,
+select:focus {
+	border-color: #2271b1;
+	box-shadow: 0 0 2px rgba(34, 113, 177, 0.25);
+}
+
+/* 保存ボタンのスタイル */
+.submit {
+	margin-top: 20px;
+	padding-top: 20px;
+	border-top: 1px solid #eee;
+}
+
+/* 未保存の変更がある場合のスタイル */
+.esp-unsaved {
+	background: #fff8e5;
+	border-left: 4px solid #ffb900;
+	padding: 10px;
+	margin: 10px 0;
+	display: none;
+}
+
+#esp-regenerate-progress-bar.green {
+	background-color: #4caf50;
+}
+#esp-regenerate-progress-bar.yellow {
+	background-color: #ffeb3b;
+	color: #333; /* 文字色調整 */
+}
+#esp-regenerate-progress-bar.red {
+	background-color: #f44336;
+}
+
+/* WordPress標準のスピナーアイコンをインラインで表示するための調整 */
+.notice-alt .spinner {
+	float: left;
+	margin-top: 0;
+	margin-right: 5px;
+	visibility: visible; /* is-activeだけだと表示されない場合があるため */
+}
