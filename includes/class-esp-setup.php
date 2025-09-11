@@ -21,7 +21,6 @@ class ESP_Setup {
 
         $media_protection = new ESP_Media_Protection();
         $media_protection->update_htaccess();
-        
 
         flush_rewrite_rules();
     }
