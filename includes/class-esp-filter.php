@@ -373,6 +373,12 @@ class ESP_Filter {
             return $response;
         }
 
+        // 保存/更新/削除などの非GETは対象外（保存時に引っかからないように）
+        $method = $request->get_method();
+        if ( ! in_array( $method, ['GET','HEAD'], true ) ) {
+            return $response;
+        }
+
         // $responseが既にエラーオブジェクトである場合は、そのまま返す
         // (例: 投稿が見つからない場合など、コントローラーが既にエラーをセットしているケース)
         if (is_wp_error($response)) {
