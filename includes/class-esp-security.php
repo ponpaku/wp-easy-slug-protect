@@ -34,7 +34,7 @@ class ESP_Security {
         }
 
         // IPアドレスの検証
-        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) === false) {
+        if (filter_var($ip, FILTER_VALIDATE_IP) === false) {
             return false;
         }
 
