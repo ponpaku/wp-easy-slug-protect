@@ -375,6 +375,19 @@ class ESP_Admin_Menu {
                                 <div id="esp-clear-cache-status" style="margin-top: 5px;"></div>
                             </td>
                         </tr>
+                        <!-- メディア保護キャッシュクリア -->
+                        <tr>
+                            <th scope="row"><?php _e('メディア保護キャッシュクリア', $text_domain); ?></th>
+                            <td>
+                                <button type="button" class="button button-secondary" id="esp-clear-media-cache">
+                                    <?php _e('メディア保護キャッシュをクリアする', $text_domain); ?>
+                                </button>
+                                <p class="description">
+                                    <?php _e('保護対象のメディアファイルリストのキャッシュを強制的にクリアし、再生成します。メディアの保護設定を変更した後に問題がある場合に実行してください。', $text_domain); ?>
+                                </p>
+                                <div id="esp-clear-media-cache-status" style="margin-top: 5px;"></div>
+                            </td>
+                        </tr>
                     </table>
                 </div>
                 

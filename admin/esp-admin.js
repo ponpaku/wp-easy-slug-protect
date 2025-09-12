@@ -33,6 +33,11 @@
 					"click",
 					this.handleClearProtectionCache.bind(this)
 				);
+				// メディアキャッシュクリアボタンを追加
+				$("#esp-clear-media-cache").on(
+					"click",
+					this.handleClearMediaCache.bind(this)
+				);
 			},
 
 			/**
@@ -41,8 +46,7 @@
 			 */
 			addNewPath: function (e) {
 				e.preventDefault();
-				// 既存の addNewPath のコードはそのまま
-				const pathId = "new";
+				const pathId = "new_" + Date.now();
 				const template = `
                 <div class="esp-path-item" style="display: none;" data-path-id="${pathId}">
                     <div class="esp-path-header">
@@ -67,10 +71,7 @@
                                 placeholder="/example/"
                                 required>
                             <span class="description">
-                                ${wp.i18n.__(
-																	"例: /members/ または /private/docs/",
-																	"easy-slug-protect"
-																)}
+                                例: /members/ または /private/docs/
                             </span>
                         </p>
                         <p>
@@ -95,7 +96,7 @@
                             </span>
                         </p>
                     </div>
-                </div>`; // 閉じタグ修正
+                </div>`;
 
 				const $newPath = $(template);
 				$("#esp-paths-container").append($newPath);
@@ -109,18 +110,16 @@
 			 * @returns {string} セレクトボックスのHTML
 			 */
 			getPageSelectHTML: function (pathId) {
-				// 既存の getPageSelectHTML のコードはそのまま
 				return `<select name="${espAdminData.optionKey}[path][${pathId}][login_page]" required>
                 <option value="">${espAdminData.i18n.selectPage}</option>
                 ${espAdminData.pages_list}
-                </select>`; // 閉じタグ修正
+                </select>`;
 			},
 
 			/**
 			 * 既存のパスを変更できないようにする
 			 */
 			lockExistingPaths: function () {
-				// 既存の lockExistingPaths のコードはそのまま
 				$(".esp-path-item").each(function () {
 					const $pathInput = $(this).find('input[data-input-lock="true"]');
 					const currentValue = $pathInput.val();
@@ -138,7 +137,6 @@
 			 * @param {Event} e イベントオブジェクト
 			 */
 			removePath: function (e) {
-				// 既存の removePath のコードはそのまま
 				e.preventDefault();
 				const $pathItem = $(e.target).closest(".esp-path-item");
 				if (confirm(espAdminData.i18n.confirmDelete)) {
@@ -153,7 +151,6 @@
 			 * パスワード表示切り替えの設定
 			 */
 			setupPasswordToggle: function () {
-				// 既存の setupPasswordToggle のコードはそのまま
 				$(document).on("click", ".esp-toggle-password", function (e) {
 					const $button = $(this);
 					const $input = $button.siblings("input");
@@ -171,7 +168,6 @@
 			 * メール通知設定の制御
 			 */
 			setupMailNotifications: function () {
-				// 既存の setupMailNotifications のコードはそのまま
 				const $enableNotifications = $("#esp-enable-notifications");
 				const $notificationItems = $(".esp-notification-items");
 				function toggleNotificationOptions() {
@@ -198,39 +194,40 @@
 			 * フォームバリデーションの設定
 			 */
 			setupFormValidation: function () {
-				// 既存の setupFormValidation のコードはそのまま
 				$("#esp-settings-form").on("submit", function (e) {
 					const $form = $(this);
 					let isValid = true;
+
 					if (!this.checkValidity()) {
 						e.preventDefault();
 						return false;
 					}
+
 					const numericalInputs = {
 						attempts_threshold: { min: 1, max: 100 },
 						time_frame: { min: 1, max: 1440 },
 						block_time_frame: { min: 1, max: 10080 },
 						remember_time: { min: 1, max: 365 },
 					};
+
 					$.each(numericalInputs, function (name, range) {
 						const $input = $form.find(`[name*="${name}"]`);
 						const value = parseInt($input.val(), 10);
 						if (value < range.min || value > range.max) {
 							isValid = false;
 							alert(
-								wp.i18n.__(
-									`${name}は${range.min}から${range.max}の間で設定してください`,
-									"easy-slug-protect"
-								)
+								`${name}は${range.min}から${range.max}の間で設定してください`
 							);
 							$input.focus();
 							return false;
 						}
 					});
+
 					if (!isValid) {
 						e.preventDefault();
 						return false;
 					}
+
 					let hasPathModification = false;
 					$(".esp-locked-input").each(function () {
 						const $input = $(this);
@@ -239,14 +236,17 @@
 							$input.addClass("esp-error-input");
 						}
 					});
+
 					if (hasPathModification) {
 						alert(espAdminData.i18n.alertCantChengePath);
 						e.preventDefault();
 						return false;
 					}
+
 					const paths = new Map();
 					const loginPages = new Map();
 					let hasPathDuplicate = false;
+
 					$(".esp-path-input").each(function () {
 						let $input = $(this);
 						let path = $input.val().trim();
@@ -266,11 +266,13 @@
 						}
 						paths.set(path, $input);
 					});
+
 					if (hasPathDuplicate) {
 						alert(espAdminData.i18n.alertDuplicatePath);
 						e.preventDefault();
 						return false;
 					}
+
 					let hasLoginPageDuplicate = false;
 					$('.esp-path-content select[name*="[login_page]"]').each(function () {
 						const $select = $(this);
@@ -284,18 +286,22 @@
 						}
 						loginPages.set(loginPage, $select);
 					});
+
 					if (hasLoginPageDuplicate) {
 						alert(espAdminData.i18n.alertDuplicateLoginPage);
 						e.preventDefault();
 						return false;
 					}
+
 					$(document).on("input change", ".esp-error-input", function () {
 						$(this).removeClass("esp-error-input");
 					});
+
 					if (!isValid) {
 						e.preventDefault();
 						return false;
 					}
+
 					if (!confirm(espAdminData.i18n.confirmSave)) {
 						e.preventDefault();
 						return false;
@@ -307,7 +313,6 @@
 			 * 未保存の変更がある場合の警告設定
 			 */
 			setupUnsavedChangesWarning: function () {
-				// 既存の setupUnsavedChangesWarning のコードはそのまま
 				let hasUnsavedChanges = false;
 				$("#esp-settings-form").on("change", "input, select", function () {
 					hasUnsavedChanges = true;
@@ -328,11 +333,8 @@
 			 * フォームを未保存状態としてマーク
 			 */
 			markFormAsUnsaved: function () {
-				// 既存の markFormAsUnsaved のコードはそのまま
 				$("#esp-settings-form").trigger("change");
 			},
-
-			// --- ここから新しいメソッド ---
 
 			/**
 			 * 「パーマリンクパス情報 再生成」ボタンのハンドラ
@@ -362,17 +364,17 @@
 					.text(espAdminData.i18n.regenerating || "再生成中...");
 				$statusContainer
 					.html("")
-					.removeClass("notice-success notice-error notice-warning"); // notice-warningもクリア
+					.removeClass("notice-success notice-error notice-warning");
 				$progressBarContainer.show();
 				$statusBar
 					.css("width", "0%")
 					.text("0%")
-					.removeClass("green yellow red"); // 色クラスもリセット
+					.removeClass("green yellow red");
 
 				let offset = 0;
-				const limit = 50; // PHP側のデフォルトと合わせるか、ここで指定
-				let totalPosts = 0; // 初回レスポンスで取得予定
-				let G_i18n = espAdminData.i18n; // i18n文字列へのショートカット
+				const limit = 50;
+				let totalPosts = 0;
+				let G_i18n = espAdminData.i18n;
 
 				function processBatch() {
 					$.ajax({
@@ -393,14 +395,12 @@
 								);
 
 								if (response.data.total && totalPosts === 0) {
-									// 初回のみtotalPostsを設定
 									totalPosts = parseInt(response.data.total, 10);
 								}
 
 								if (totalPosts > 0) {
-									let currentProcessed = response.data.offset || offset; // offsetは次の開始位置なので、ここまでの処理済みを使う
+									let currentProcessed = response.data.offset || offset;
 									if (response.data.status === "completed") {
-										// 完了時はoffsetが次のバッチ開始位置ではなく総数になっている可能性
 										currentProcessed = totalPosts;
 									}
 									const progress = Math.min(
@@ -423,7 +423,7 @@
 									response.data.processed > 0
 								) {
 									offset = response.data.offset;
-									setTimeout(processBatch, 300); // 少し間隔を空けて次のバッチを処理
+									setTimeout(processBatch, 300);
 								} else if (response.data.status === "completed") {
 									$button
 										.prop("disabled", false)
@@ -439,58 +439,8 @@
 									setTimeout(function () {
 										$progressBarContainer.hide();
 									}, 3000);
-								} else if (
-									response.data.status === "processing" &&
-									response.data.processed === 0 &&
-									offset >= totalPosts &&
-									totalPosts > 0
-								) {
-									// 全件処理したが、最後のバッチで処理対象が0だった場合
-									$button
-										.prop("disabled", false)
-										.text(
-											G_i18n.regeneratePermalinksButton ||
-												"全投稿のパーマリンクパス情報を再生成する"
-										);
-									$statusContainer.html(
-										'<p class="notice notice-success is-dismissible">' +
-											(G_i18n.regenerateCompleteNoItems ||
-												"全ての処理が完了しました。") +
-											"</p>"
-									);
-									$statusBar
-										.css("width", "100%")
-										.text("100%")
-										.addClass("green");
-									setTimeout(function () {
-										$progressBarContainer.hide();
-									}, 3000);
-								} else if (
-									response.data.status === "processing" &&
-									response.data.processed === 0 &&
-									totalPosts === 0 &&
-									offset === 0
-								) {
-									// 初回から処理対象がなかった場合
-									$button
-										.prop("disabled", false)
-										.text(
-											G_i18n.regeneratePermalinksButton ||
-												"全投稿のパーマリンクパス情報を再生成する"
-										);
-									$statusContainer.html(
-										'<p class="notice notice-warning is-dismissible">' +
-											(G_i18n.regenerateCompleteNoItems ||
-												"処理対象の投稿がありませんでした。") +
-											"</p>"
-									);
-									$statusBar.css("width", "0%").text("0%");
-									setTimeout(function () {
-										$progressBarContainer.hide();
-									}, 3000);
 								}
 							} else {
-								// response.success が false の場合
 								$button
 									.prop("disabled", false)
 									.text(
@@ -530,7 +480,7 @@
 						},
 					});
 				}
-				processBatch(); // 最初のバッチ処理を開始
+				processBatch();
 			},
 
 			/**
@@ -539,7 +489,7 @@
 			handleClearProtectionCache: function () {
 				const $button = $("#esp-clear-protection-cache");
 				const $statusContainer = $("#esp-clear-cache-status");
-				let G_i18n = espAdminData.i18n; // i18n文字列へのショートカット
+				let G_i18n = espAdminData.i18n;
 
 				if ($button.prop("disabled")) {
 					return;
@@ -598,6 +548,96 @@
 								" - " +
 								errorThrown +
 								"</p>"
+						);
+					},
+				});
+			},
+
+			/**
+			 * 「メディア保護キャッシュクリア」ボタンのハンドラ（新規追加）
+			 */
+			handleClearMediaCache: function () {
+				const $button = $("#esp-clear-media-cache");
+				const $statusContainer = $("#esp-clear-media-cache-status");
+				let G_i18n = espAdminData.i18n;
+
+				if ($button.prop("disabled")) {
+					return;
+				}
+
+				const confirmClear = confirm(
+					G_i18n.confirmClearMediaCache ||
+						"メディア保護キャッシュをクリアします。よろしいですか？"
+				);
+				if (!confirmClear) return;
+
+				$button
+					.prop("disabled", true)
+					.text(G_i18n.clearingMediaCache || "メディアキャッシュをクリア中...");
+				$statusContainer
+					.html(
+						'<span class="spinner is-active" style="float: none; margin: 0;"></span>'
+					)
+					.removeClass("notice-success notice-error notice-warning");
+
+				$.ajax({
+					url: ajaxurl,
+					type: "POST",
+					data: {
+						action: "esp_clear_media_cache",
+						nonce: espAdminData.clearMediaCacheNonce,
+					},
+					success: function (response) {
+						$button
+							.prop("disabled", false)
+							.text(
+								G_i18n.clearMediaCacheButton ||
+									"メディア保護キャッシュをクリアする"
+							);
+						if (response.success) {
+							$statusContainer.html(
+								'<div class="notice notice-success inline" style="margin: 5px 0; padding: 10px;">' +
+									"<p>" +
+									response.data.message +
+									"</p>" +
+									"</div>"
+							);
+							// 3秒後にメッセージを消す
+							setTimeout(function () {
+								$statusContainer.fadeOut("slow", function () {
+									$statusContainer.empty().show();
+								});
+							}, 3000);
+						} else {
+							const errorMessage =
+								response.data && response.data.message
+									? response.data.message
+									: G_i18n.clearMediaCacheError ||
+									  "メディアキャッシュのクリア中にエラーが発生しました。";
+							$statusContainer.html(
+								'<div class="notice notice-error inline" style="margin: 5px 0; padding: 10px;">' +
+									"<p>" +
+									errorMessage +
+									"</p>" +
+									"</div>"
+							);
+						}
+					},
+					error: function (jqXHR, textStatus, errorThrown) {
+						$button
+							.prop("disabled", false)
+							.text(
+								G_i18n.clearMediaCacheButton ||
+									"メディア保護キャッシュをクリアする"
+							);
+						console.error("Media cache clear error:", textStatus, errorThrown);
+						$statusContainer.html(
+							'<div class="notice notice-error inline" style="margin: 5px 0; padding: 10px;">' +
+								"<p>" +
+								(G_i18n.ajaxError || "AJAXリクエストに失敗しました: ") +
+								textStatus +
+								"</p>" +
+								"</div>"
 						);
 					},
 				});

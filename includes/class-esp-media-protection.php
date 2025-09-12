@@ -5,7 +5,7 @@ if (!defined('ABSPATH')) {
 }
 
 /**
- * メディアファイルの保護機能を管理するクラス
+ * メディアファイルの保護機能を管理するクラス（キャッシュ機能付き）
  */
 class ESP_Media_Protection {
     /**
@@ -19,14 +19,19 @@ class ESP_Media_Protection {
     private $cookie;
 
     /**
-     * @var ESP_Core コアクラスのインスタンス
-     */
-    private $core;
-
-    /**
      * @var string メディア保護用メタキー
      */
     const META_KEY_PROTECTED_PATH = '_esp_media_protected_path_id';
+
+    /**
+     * @var string メディアキャッシュのトランジェントキー
+     */
+    const MEDIA_CACHE_KEY = 'esp_protected_media';
+
+    /**
+     * @var int キャッシュの有効期間（秒）
+     */
+    const MEDIA_CACHE_DURATION = DAY_IN_SECONDS;
 
     /**
      * @var string リライトルールのエンドポイント
@@ -55,9 +60,6 @@ class ESP_Media_Protection {
      * コンストラクタ
      */
     public function __construct() {
-        
-        // フックの登録
-        // add_action('init', [$this, 'init']);
         $this->init();
     }
 
@@ -65,6 +67,9 @@ class ESP_Media_Protection {
      * 初期化処理
      */
     public function init() {
+        // キャッシュの初期チェック
+        $this->check_and_generate_cache();
+
         // 管理画面の場合
         if (is_admin()) {
             // メディアライブラリのカスタムフィールドを追加
@@ -79,6 +84,9 @@ class ESP_Media_Protection {
             add_filter('bulk_actions-upload', [$this, 'add_bulk_actions']);
             add_filter('handle_bulk_actions-upload', [$this, 'handle_bulk_actions'], 10, 3);
 
+            // AJAX ハンドラーの登録
+            add_action('wp_ajax_esp_clear_media_cache', [$this, 'ajax_clear_media_cache']);
+
             $this->auth = new ESP_Auth();
             $this->cookie = ESP_Cookie::get_instance();
             add_action('template_redirect', [$this, 'handle_media_access'], 1);
@@ -89,15 +97,208 @@ class ESP_Media_Protection {
             add_action('template_redirect', [$this, 'handle_media_access'], 1);
         }
 
+        // REST API フィルタリング
+        add_filter('rest_attachment_query', [$this, 'filter_rest_media_query'], 10, 2);
+        add_filter('rest_prepare_attachment', [$this, 'check_rest_media_access'], 10, 3);
+
         // リライトルールの追加
         add_action('init', [$this, 'add_rewrite_rules']);
         
         // アップロード時の自動保護設定
         add_action('add_attachment', [$this, 'auto_protect_on_upload']);
         
+        // メディアの削除時にキャッシュを更新
+        add_action('delete_attachment', [$this, 'regenerate_media_cache']);
+        
         // 保護パス削除時の処理
         add_action('update_option_' . ESP_Config::OPTION_KEY, [$this, 'handle_path_deletion'], 10, 2);
     }
+
+    /*----- キャッシュ管理 -----*/
+
+    /**
+     * キャッシュの存在確認と生成
+     */
+    private function check_and_generate_cache() {
+        $cached_data = get_transient(self::MEDIA_CACHE_KEY);
+        if ($cached_data === false) {
+            $this->regenerate_media_cache();
+        }
+    }
+
+    /**
+     * 保護されたメディアのキャッシュを再生成
+     */
+    public function regenerate_media_cache() {
+        global $wpdb;
+        
+        $protected_paths = ESP_Option::get_current_setting('path');
+        if (empty($protected_paths)) {
+            delete_transient(self::MEDIA_CACHE_KEY);
+            return;
+        }
+        
+        // パスIDごとのメディアIDをグループ化
+        $media_by_path = [];
+        
+        $protected_media = $wpdb->get_results($wpdb->prepare(
+            "SELECT post_id, meta_value as path_id 
+             FROM {$wpdb->postmeta} 
+             WHERE meta_key = %s",
+            self::META_KEY_PROTECTED_PATH
+        ));
+        
+        foreach ($protected_media as $media) {
+            if (isset($protected_paths[$media->path_id])) {
+                if (!isset($media_by_path[$media->path_id])) {
+                    $media_by_path[$media->path_id] = [];
+                }
+                $media_by_path[$media->path_id][] = (int) $media->post_id;
+            }
+        }
+        
+        set_transient(self::MEDIA_CACHE_KEY, $media_by_path, self::MEDIA_CACHE_DURATION);
+        
+        // デバッグログ（必要に応じて）
+        // error_log('ESP_Media_Protection: Media cache regenerated. Found ' . count($media_by_path) . ' protected path groups.');
+    }
+
+    /**
+     * 外部からのキャッシュ更新用
+     */
+    public function reset_cache() {
+        $this->regenerate_media_cache();
+    }
+
+    /**
+     * 現在のユーザーがアクセスできない保護されたメディアIDを取得（キャッシュ利用）
+     *
+     * @return array 除外すべきメディアIDの配列
+     */
+    private function get_protected_media_ids_for_current_user() {
+        $cached_data = get_transient(self::MEDIA_CACHE_KEY);
+        
+        if ($cached_data === false) {
+            $this->regenerate_media_cache();
+            $cached_data = get_transient(self::MEDIA_CACHE_KEY);
+        }
+        
+        if (!is_array($cached_data)) {
+            return [];
+        }
+        
+        $excluded_ids = [];
+        $protected_paths = ESP_Option::get_current_setting('path');
+        
+        foreach ($cached_data as $path_id => $media_ids) {
+            if (isset($protected_paths[$path_id]) && !$this->auth->is_logged_in($protected_paths[$path_id])) {
+                $excluded_ids = array_merge($excluded_ids, $media_ids);
+            }
+        }
+        
+        return array_unique($excluded_ids);
+    }
+
+    /*----- AJAX ハンドラー -----*/
+
+    /**
+     * AJAXハンドラ: メディアキャッシュをクリア
+     */
+    public function ajax_clear_media_cache() {
+        check_ajax_referer('esp_clear_media_cache_nonce', 'nonce');
+
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(['message' => __('権限がありません。', ESP_Config::TEXT_DOMAIN)], 403);
+        }
+
+        delete_transient(self::MEDIA_CACHE_KEY);
+        $this->regenerate_media_cache();
+
+        wp_send_json_success(['message' => __('メディア保護キャッシュをクリアしました。', ESP_Config::TEXT_DOMAIN)]);
+    }
+
+    /*----- REST API フィルタリング -----*/
+
+    /**
+     * REST APIのメディア一覧クエリをフィルタリング
+     *
+     * @param array           $args    WP_Queryの引数配列
+     * @param WP_REST_Request $request リクエストオブジェクト
+     * @return array 修正されたWP_Queryの引数配列
+     */
+    public function filter_rest_media_query($args, $request) {
+        // REST APIリクエストであることを確認
+        if (!(defined('REST_REQUEST') && REST_REQUEST)) {
+            return $args;
+        }
+        
+        // 管理者権限がある場合はスキップ
+        if (current_user_can('upload_files')) {
+            return $args;
+        }
+        
+        // 保護されたメディアIDを取得（キャッシュ利用）
+        $excluded_media_ids = $this->get_protected_media_ids_for_current_user();
+        
+        if (!empty($excluded_media_ids)) {
+            $current_excluded = isset($args['post__not_in']) ? (array) $args['post__not_in'] : [];
+            $args['post__not_in'] = array_unique(array_merge($current_excluded, $excluded_media_ids));
+        }
+        
+        return $args;
+    }
+
+    /**
+     * REST APIで単一のメディアへのアクセスをチェック
+     *
+     * @param WP_REST_Response $response レスポンスオブジェクト
+     * @param WP_Post          $post     投稿（メディア）オブジェクト
+     * @param WP_REST_Request  $request  リクエストオブジェクト
+     * @return WP_REST_Response|WP_Error 変更されたレスポンスまたはエラー
+     */
+    public function check_rest_media_access($response, $post, $request) {
+        // REST APIリクエストであることを確認
+        if (!(defined('REST_REQUEST') && REST_REQUEST)) {
+            return $response;
+        }
+        
+        // 保存/更新/削除などの非GETリクエストは対象外
+        $method = $request->get_method();
+        if (!in_array($method, ['GET', 'HEAD'], true)) {
+            return $response;
+        }
+        
+        // 既にエラーの場合はそのまま返す
+        if (is_wp_error($response)) {
+            return $response;
+        }
+        if ($response instanceof WP_REST_Response && $response->is_error()) {
+            return $response;
+        }
+        
+        // 管理者権限がある場合はスキップ
+        if (current_user_can('upload_files')) {
+            return $response;
+        }
+        
+        // キャッシュから保護されたメディアIDを取得して確認
+        $excluded_media_ids = $this->get_protected_media_ids_for_current_user();
+        
+        if (in_array($post->ID, $excluded_media_ids)) {
+            // 未認証の場合はエラーレスポンスを返す
+            $error_data = [
+                'code'    => 'esp_rest_media_forbidden',
+                'message' => __('このメディアは保護されています。', ESP_Config::TEXT_DOMAIN),
+                'data'    => ['status' => 403],
+            ];
+            
+            return new WP_REST_Response($error_data, 403);
+        }
+        
+        return $response;
+    }
+
+    /*----- メディア編集画面の機能 -----*/
 
     /**
      * メディア編集画面に保護パス選択フィールドを追加
@@ -133,7 +334,7 @@ class ESP_Media_Protection {
     }
 
     /**
-     * メディア保護設定を保存
+     * メディア保護設定を保存（キャッシュ更新付き）
      *
      * @param array $post 添付ファイルのデータ
      * @param array $attachment 添付ファイルの入力データ
@@ -146,6 +347,9 @@ class ESP_Media_Protection {
             } else {
                 update_post_meta($post['ID'], self::META_KEY_PROTECTED_PATH, sanitize_text_field($attachment['esp_protected_path']));
             }
+            
+            // キャッシュを再生成
+            $this->regenerate_media_cache();
         }
         
         return $post;
@@ -201,7 +405,7 @@ class ESP_Media_Protection {
     }
 
     /**
-     * 一括操作を処理
+     * 一括操作を処理（キャッシュ更新付き）
      *
      * @param string $redirect_to リダイレクト先URL
      * @param string $doaction 実行されたアクション
@@ -214,11 +418,16 @@ class ESP_Media_Protection {
                 delete_post_meta($post_id, self::META_KEY_PROTECTED_PATH);
             }
             
+            // キャッシュを再生成
+            $this->regenerate_media_cache();
+            
             $redirect_to = add_query_arg('esp_unprotected', count($post_ids), $redirect_to);
         }
         
         return $redirect_to;
     }
+
+    /*----- メディアファイルアクセス制御 -----*/
 
     /**
      * リライトルールを追加
@@ -229,8 +438,11 @@ class ESP_Media_Protection {
         $upload_path = trim($upload_path, '/');
         
         // wp-content/uploads/以下のファイルへのアクセスをキャッチ
+        // 保護された拡張子のみを対象にする
+        $extensions_pattern = implode('|', array_map('preg_quote', $this->protected_extensions));
+        
         add_rewrite_rule(
-            '^' . $upload_path . '/(.+)$',
+            '^' . $upload_path . '/(.+\.(' . $extensions_pattern . '))$',
             'index.php?' . self::REWRITE_ENDPOINT . '=$matches[1]',
             'top'
         );
@@ -241,7 +453,6 @@ class ESP_Media_Protection {
             return $vars;
         });
     }
-
     /**
      * メディアファイルへのアクセスを処理
      */
@@ -266,8 +477,8 @@ class ESP_Media_Protection {
         }
 
         // ファイルアップ権限者スキップ
-        if ( current_user_can( 'upload_files' ) ) {
-            $this->deliver_file( $file_path );
+        if (current_user_can('upload_files')) {
+            $this->deliver_file($file_path);
             return;
         }
         
@@ -307,8 +518,7 @@ class ESP_Media_Protection {
         
         // 認証チェック
         if (!$this->auth->is_logged_in($path_settings)) {
-            // 未認証の場合はログインページへリダイレクト
-            // redirect_to_loginでは$home_pathを含めるようになっているので、リダイレクト先に$home_pathを含むとだめ。
+            // 未認証の場合はログインページへリダイレクト（URLを修正）
             $this->redirect_to_login($path_settings, $requested_file);
             return;
         }
@@ -392,8 +602,15 @@ class ESP_Media_Protection {
             return;
         }
         
+        // 正しいURLパスを構築
+        $upload_dir = wp_upload_dir();
+        $upload_path = str_replace(home_url(), '', $upload_dir['baseurl']);
+        
+        // リダイレクト後の戻り先URLを正しく構築
+        // esp-media/... ではなく /wp-content/uploads/... を使用
+        $current_url = home_url($upload_path . '/' . $requested_file);
+        
         $login_url = get_permalink($login_page_id);
-        $current_url = home_url(self::REWRITE_ENDPOINT . '/' . $requested_file);
         $login_url = add_query_arg('redirect_to', urlencode($current_url), $login_url);
         
         // ESP_Cookieを使用してリダイレクト
@@ -421,14 +638,26 @@ class ESP_Media_Protection {
             // 通常の配信
             header('Content-Type: ' . $mime_type);
             header('Content-Length: ' . $file_size);
-            header('Content-Disposition: inline; filename="' . basename($file_path) . '"');
+            
+            // インライン表示か添付ファイルとしてダウンロードかを判定
+            $disposition = $this->should_inline($mime_type) ? 'inline' : 'attachment';
+            header('Content-Disposition: ' . $disposition . '; filename="' . basename($file_path) . '"');
             
             // キャッシュヘッダー
             $this->set_cache_headers($mime_type);
             
-            // X-Sendfileが利用可能な場合は使用
+            // X-Sendfile/X-Accel-Redirectが利用可能な場合は使用
             if ($this->is_x_sendfile_available()) {
                 header('X-Sendfile: ' . $file_path);
+            } elseif ($this->is_x_accel_redirect_available()) {
+                // Nginx用のX-Accel-Redirect
+                $internal_path = $this->get_nginx_internal_path($file_path);
+                if ($internal_path) {
+                    header('X-Accel-Redirect: ' . $internal_path);
+                } else {
+                    // フォールバック: PHP経由でファイルを出力
+                    $this->readfile_chunked($file_path);
+                }
             } else {
                 // PHP経由でファイルを出力
                 $this->readfile_chunked($file_path);
@@ -436,6 +665,22 @@ class ESP_Media_Protection {
         }
         
         exit;
+    }
+
+    /**
+    * ファイルをインライン表示すべきかどうかを判定
+    *
+    * @param string $mime_type MIMEタイプ
+    * @return bool インライン表示する場合true
+    */
+    private function should_inline($mime_type) {
+        $inline_types = [
+            'image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml',
+            'text/plain', 'text/html', 'text/css', 'application/javascript',
+            'application/pdf', 'video/mp4', 'audio/mpeg', 'audio/mp3'
+        ];
+        
+        return in_array($mime_type, $inline_types, true);
     }
 
     /**
@@ -565,6 +810,36 @@ class ESP_Media_Protection {
     }
 
     /**
+    * X-Accel-Redirect（Nginx）が利用可能か確認
+    *
+    * @return bool
+    */
+    private function is_x_accel_redirect_available() {
+        // Nginxの検出
+        $software = $_SERVER['SERVER_SOFTWARE'] ?? '';
+        return stripos($software, 'nginx') !== false;
+    }
+
+    
+    /**
+    * Nginx用の内部パスを取得
+    *
+    * @param string $file_path ファイルパス
+    * @return string|false 内部パス、取得できない場合はfalse
+    */
+    private function get_nginx_internal_path($file_path) {
+        // Nginxの内部リダイレクトパスを構築
+        // この設定はNginxの設定と合わせる必要があります
+        $upload_dir = wp_upload_dir();
+        if (strpos($file_path, $upload_dir['basedir']) === 0) {
+            $relative_path = str_replace($upload_dir['basedir'], '', $file_path);
+            // Nginxの内部ロケーション（例: /protected-uploads/）
+            return '/protected-uploads' . $relative_path;
+        }
+        return false;
+    }
+
+    /**
      * 404エラーを送信
      */
     private function send_404() {
@@ -599,6 +874,9 @@ class ESP_Media_Protection {
         
         if (!empty($auto_protect_path_id)) {
             update_post_meta($attachment_id, self::META_KEY_PROTECTED_PATH, $auto_protect_path_id);
+            
+            // キャッシュを再生成
+            $this->regenerate_media_cache();
         }
     }
 
@@ -639,6 +917,9 @@ class ESP_Media_Protection {
             foreach ($orphaned_media as $media_id) {
                 delete_post_meta($media_id, self::META_KEY_PROTECTED_PATH);
             }
+            
+            // キャッシュを再生成
+            $this->regenerate_media_cache();
         }
     }
 
@@ -720,6 +1001,8 @@ class ESP_Media_Protection {
         } else {
             $new_rules = $current_rules;
         }
+
+        error_log($new_rules);
         
         // .htaccessを更新
         return file_put_contents($htaccess_file, $new_rules) !== false;
@@ -734,7 +1017,13 @@ class ESP_Media_Protection {
         $home_path = parse_url(home_url(), PHP_URL_PATH);
         $home_path = $home_path ? trailingslashit($home_path) : '/';
         
+        // wp-content/uploads/のパスを取得
+        $upload_dir = wp_upload_dir();
+        $upload_path = str_replace(ABSPATH, '', $upload_dir['basedir']);
+        $upload_path = str_replace('\\', '/', $upload_path); // Windows対応
+        
         $rules = "# BEGIN ESP Media Protection\n";
+        $rules .= "# 保護されたメディアファイルへの直接アクセスをWordPress経由にリダイレクト\n";
         $rules .= "<IfModule mod_rewrite.c>\n";
         $rules .= "RewriteEngine On\n";
         $rules .= "RewriteBase {$home_path}\n";
@@ -742,27 +1031,58 @@ class ESP_Media_Protection {
         // 保護対象の拡張子パターンを生成
         $extensions_pattern = implode('|', array_map('preg_quote', $this->protected_extensions));
         
-        $rules .= "RewriteCond %{REQUEST_FILENAME} -f\n";
-        $rules .= "RewriteRule ^(.+\.({$extensions_pattern}))$ {$home_path}index.php?" . self::REWRITE_ENDPOINT . "=$1 [L]\n";
+        // 保護されたメディアが存在する場合のみルールを適用
+        if ($this->has_protected_media()) {
+            $rules .= "# 保護されたファイル拡張子へのアクセスをWordPress経由に\n";
+            $rules .= "RewriteCond %{REQUEST_FILENAME} -f\n";
+            $rules .= "RewriteCond %{REQUEST_URI} ^.*\\.({$extensions_pattern})$ [NC]\n";
+            $rules .= "RewriteRule ^(.+)$ {$home_path}index.php?" . self::REWRITE_ENDPOINT . "=$1 [L]\n";
+        }
+        
         $rules .= "</IfModule>\n";
         $rules .= "# END ESP Media Protection\n";
         
         return $rules;
     }
-
     /**
      * Apache 互換サーバー（Apache / LiteSpeed）か確認
      *
      * @return bool
      */
-    private function is_apache()
-    {
+    private function is_apache() {
         // $_SERVER['SERVER_SOFTWARE'] が未定義でもエラーにならないように
         $software = $_SERVER['SERVER_SOFTWARE'] ?? '';
 
         // Apache または LiteSpeed(OpenLiteSpeed を含む) なら true
         return stripos($software, 'Apache') !== false
             || stripos($software, 'LiteSpeed') !== false;
+    }
+
+    /**
+    * メディアファイルのURLを保護されたエンドポイントに変換
+    * （REST APIレスポンス用）
+    *
+    * @param int $attachment_id 添付ファイルID
+    * @param string $size サイズ名（オプション）
+    * @return string 保護されたURL
+    */
+    private function get_protected_media_url($attachment_id, $size = 'full') {
+        // 通常のメディアURLを取得
+        if ($size === 'full') {
+            $url = wp_get_attachment_url($attachment_id);
+        } else {
+            $image_src = wp_get_attachment_image_src($attachment_id, $size);
+            $url = $image_src ? $image_src[0] : '';
+        }
+        
+        if (empty($url)) {
+            return '';
+        }
+        
+        // URLはそのまま返す（リライトルールで自動的に処理される）
+        // クライアント側では /wp-content/uploads/... のままアクセスし、
+        // サーバー側のリライトルールで必要に応じて保護処理が行われる
+        return $url;
     }
 
     /**
@@ -785,10 +1105,21 @@ class ESP_Media_Protection {
      * 設定保存時に呼び出される処理
      */
     public function on_settings_save() {
+        // キャッシュを再生成
+        $this->regenerate_media_cache();
+        
         // .htaccessを更新
         $this->update_htaccess();
         
         // リライトルールをフラッシュ
         flush_rewrite_rules();
+    }
+
+    /**
+     * Cronタスクからの定期的なキャッシュ更新
+     */
+    public static function cron_regenerate_media_cache() {
+        $instance = new self();
+        $instance->regenerate_media_cache();
     }
 }

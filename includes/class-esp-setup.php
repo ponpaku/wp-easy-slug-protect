@@ -19,8 +19,19 @@ class ESP_Setup {
         $this->create_options();
         $this->schedule_cron_jobs();
 
-        $media_protection = new ESP_Media_Protection();
-        $media_protection->update_htaccess();
+        // メディア保護の初期設定
+        if (class_exists('ESP_Media_Protection')) {
+            $media_protection = new ESP_Media_Protection();
+            $media_protection->update_htaccess();
+            // 初回のメディアキャッシュ生成
+            $media_protection->regenerate_media_cache();
+        }
+
+        // 投稿フィルターの初期キャッシュ生成
+        if (class_exists('ESP_Filter')) {
+            $filter = new ESP_Filter();
+            $filter->regenerate_protected_posts_cache();
+        }
 
         flush_rewrite_rules();
     }
@@ -34,12 +45,22 @@ class ESP_Setup {
             wp_schedule_event(time(), 'daily', ESP_Config::DAILY_CLEANUP_HOOK);
         }
 
-        // パーマリンク整合性チェックジョブ (例: 1日1回)
-        // 実行頻度はサイトの規模や更新頻度に応じて調整 (例: 'hourly', 'twicedaily', 'daily')
-        // あまり頻繁すぎると負荷になるため注意
+        // パーマリンク整合性チェックジョブ
         if (!wp_next_scheduled(ESP_Config::INTEGRITY_CHECK_HOOK)) {
-            // 毎日深夜3時など、アクセスの少ない時間帯を狙う例
+            // 毎日深夜3時など、アクセスの少ない時間帯を狙う
             wp_schedule_event(strtotime('tomorrow 3:00am'), 'daily', ESP_Config::INTEGRITY_CHECK_HOOK);
+        }
+
+        // メディアキャッシュ更新ジョブ
+        if (!wp_next_scheduled('esp_media_cache_refresh')) {
+            // 1日2回（12時間ごと）にメディアキャッシュを更新
+            wp_schedule_event(time(), 'twicedaily', 'esp_media_cache_refresh');
+        }
+
+        // 全キャッシュの定期更新ジョブ
+        if (!wp_next_scheduled('esp_all_cache_refresh')) {
+            // 週1回、日曜日の深夜に全キャッシュを更新
+            wp_schedule_event(strtotime('next sunday 2:00am'), 'weekly', 'esp_all_cache_refresh');
         }
     }
 
@@ -47,17 +68,51 @@ class ESP_Setup {
      * クリーンアップタスクの実行 (既存のメソッド)
      */
     public static function run_cleanup_tasks() {
-        // ESP_Security クラスの存在確認を追加するとより堅牢
         if (class_exists('ESP_Security')) {
             ESP_Security::cron_cleanup_brute();
             ESP_Security::cron_cleanup_remember();
         }
     }
 
+    /**
+     * メディアキャッシュ更新タスク
+     */
+    public static function run_media_cache_refresh() {
+        if (class_exists('ESP_Media_Protection')) {
+            ESP_Media_Protection::cron_regenerate_media_cache();
+        }
+    }
+
+    /**
+     * 全キャッシュ更新タスク
+     */
+    public static function run_all_cache_refresh() {
+        // 投稿保護キャッシュの更新
+        if (class_exists('ESP_Filter')) {
+            $filter = new ESP_Filter();
+            $filter->regenerate_protected_posts_cache();
+        }
+
+        // メディア保護キャッシュの更新
+        if (class_exists('ESP_Media_Protection')) {
+            $media_protection = new ESP_Media_Protection();
+            $media_protection->regenerate_media_cache();
+        }
+
+        // ログ出力
+        // error_log('ESP: All caches refreshed at ' . current_time('mysql'));
+    }
+
     public function deactivate() {
         // Cronタスクの削除
         wp_clear_scheduled_hook(ESP_Config::DAILY_CLEANUP_HOOK);
         wp_clear_scheduled_hook(ESP_Config::INTEGRITY_CHECK_HOOK);
+        wp_clear_scheduled_hook('esp_media_cache_refresh');
+        wp_clear_scheduled_hook('esp_all_cache_refresh');
+        
+        // キャッシュのクリア
+        delete_transient('esp_protected_posts');
+        delete_transient('esp_protected_media');
         
         // .htaccessからESPルールを削除
         if (class_exists('ESP_Media_Protection')) {
@@ -106,7 +161,7 @@ class ESP_Setup {
         dbDelta($sql1);
         dbDelta($sql2);
 
-        // エラーチェック（オプショナル）
+        // エラーチェック
         if ($wpdb->last_error) {
             error_log('ESP Table Creation Error: ' . $wpdb->last_error);
         }

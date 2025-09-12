@@ -36,6 +36,10 @@ class ESP_Admin_Assets {
             'clearingCache' => __('クリア中...', $plugin_name),
             'clearCacheButton' => __('保護キャッシュをクリアする', $plugin_name),
             'clearCacheError' => __('キャッシュのクリア中にエラーが発生しました。', $plugin_name),
+            'confirmClearMediaCache' => __('メディア保護キャッシュをクリアします。よろしいですか？', $plugin_name),
+            'clearingMediaCache' => __('メディアキャッシュをクリア中...', $plugin_name),
+            'clearMediaCacheButton' => __('メディア保護キャッシュをクリアする', $plugin_name),
+            'clearMediaCacheError' => __('メディアキャッシュのクリア中にエラーが発生しました。', $plugin_name),
             'ajaxError' => __('AJAXリクエストに失敗しました:', $plugin_name),
         );
     }
@@ -82,7 +86,8 @@ class ESP_Admin_Assets {
                 'currentSettings' => $current_settings,
                 'settingsNonce' => wp_create_nonce('esp_settings_group-options'),
                 'regenerateNonce' => wp_create_nonce('esp_regenerate_permalinks_nonce'), // メタデータ再生成用Nonce
-                'clearCacheNonce' => wp_create_nonce('esp_clear_cache_nonce'),         // キャッシュクリア用Nonce
+                'clearCacheNonce' => wp_create_nonce('esp_clear_cache_nonce'),// キャッシュクリア用Nonce
+                'clearMediaCacheNonce' => wp_create_nonce('esp_clear_media_cache_nonce'),// メディア保護キャッシュ用
                 'i18n' => $this::localize_data()
             )
         );
