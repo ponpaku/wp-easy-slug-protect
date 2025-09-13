@@ -29,9 +29,9 @@ class ESP_Media_Protection {
     const MEDIA_CACHE_KEY = 'esp_protected_media';
 
     /**
-     * @var int キャッシュの有効期間（秒）
+     * @var int キャッシュの有効期間（秒）- 7日間に延長
      */
-    const MEDIA_CACHE_DURATION = DAY_IN_SECONDS;
+    const MEDIA_CACHE_DURATION = WEEK_IN_SECONDS;
 
     /**
      * @var string リライトルールのエンドポイント
@@ -566,20 +566,17 @@ class ESP_Media_Protection {
         
         // realpathが失敗した場合
         if ($file_path === false) {
-            error_log('realpathが失敗した場合');
             return false;
         }
         
         // アップロードディレクトリ内のファイルかチェック
         $upload_basedir = realpath($upload_dir['basedir']);
         if (strpos($file_path, $upload_basedir) !== 0) {
-            error_log("アップロードディレクトリ内のファイルかチェック");
             return false;
         }
         
         // ファイルが存在するかチェック
         if (!file_exists($file_path) || !is_file($file_path)) {
-            error_log('存在しない');
             return false;
         }
         
@@ -644,39 +641,28 @@ class ESP_Media_Protection {
      * @param string $file_path ファイルパス
      */
     private function deliver_file($file_path) {
-
-        error_log('ESP_Media_Protection: Starting deliver_file for: ' . $file_path);
-        error_log('ESP_Media_Protection: Output buffer level before cleanup: ' . ob_get_level());
-        
         // 出力バッファリングをクリア
         $buffer_cleared = 0;
         while (ob_get_level()) {
             ob_end_clean();
             $buffer_cleared++;
         }
-        error_log('ESP_Media_Protection: Cleared ' . $buffer_cleared . ' output buffers');
         
         // ヘッダーが既に送信されているかチェック
         if (headers_sent($file, $line)) {
-            error_log('ESP_Media_Protection: Headers already sent at ' . $file . ':' . $line);
             return false;
         }
 
         $mime_type = wp_check_filetype($file_path);
         $mime_type = $mime_type['type'] ?: 'application/octet-stream';
-
-        error_log($mime_type);
         
         // ファイルサイズ
         $file_size = filesize($file_path);
-
-        error_log($file_size);
         
         // Rangeヘッダーの処理（部分的なダウンロード対応）
         $range = isset($_SERVER['HTTP_RANGE']) ? $_SERVER['HTTP_RANGE'] : '';
         
         if ($range) {
-            error_log('range is true:' . $range);
             $this->deliver_file_with_range($file_path, $file_size, $mime_type, $range);
         } else {
             // 通常の配信
@@ -798,7 +784,6 @@ class ESP_Media_Protection {
      */
     private function readfile_chunked($file_path, $chunk_size = 1048576) {
         $handle = fopen($file_path, 'rb');
-        error_log('readfile_chunked');
         if ($handle === false) {
             return false;
         }
@@ -1045,8 +1030,6 @@ class ESP_Media_Protection {
         } else {
             $new_rules = $current_rules;
         }
-
-        error_log($new_rules);
         
         // .htaccessを更新
         return file_put_contents($htaccess_file, $new_rules) !== false;
@@ -1103,33 +1086,6 @@ class ESP_Media_Protection {
     }
 
     /**
-    * メディアファイルのURLを保護されたエンドポイントに変換
-    * （REST APIレスポンス用）
-    *
-    * @param int $attachment_id 添付ファイルID
-    * @param string $size サイズ名（オプション）
-    * @return string 保護されたURL
-    */
-    private function get_protected_media_url($attachment_id, $size = 'full') {
-        // 通常のメディアURLを取得
-        if ($size === 'full') {
-            $url = wp_get_attachment_url($attachment_id);
-        } else {
-            $image_src = wp_get_attachment_image_src($attachment_id, $size);
-            $url = $image_src ? $image_src[0] : '';
-        }
-        
-        if (empty($url)) {
-            return '';
-        }
-        
-        // URLはそのまま返す（リライトルールで自動的に処理される）
-        // クライアント側では /wp-content/uploads/... のままアクセスし、
-        // サーバー側のリライトルールで必要に応じて保護処理が行われる
-        return $url;
-    }
-
-    /**
      * 保護されたメディアが存在するか確認
      *
      * @return bool
@@ -1161,6 +1117,7 @@ class ESP_Media_Protection {
 
     /**
      * Cronタスクからの定期的なキャッシュ更新
+     * ESP_Setupから呼び出される静的メソッド
      */
     public static function cron_regenerate_media_cache() {
         $instance = new self();
