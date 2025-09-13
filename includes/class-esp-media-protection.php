@@ -453,12 +453,40 @@ class ESP_Media_Protection {
             return $vars;
         });
     }
-    /**
-     * メディアファイルへのアクセスを処理
-     */
-    public function handle_media_access() {
-        $requested_file = get_query_var(self::REWRITE_ENDPOINT);
 
+    /**
+    * メディアファイルへのアクセスを処理（クリーンアップ版）
+    */
+    public function handle_media_access() {
+        // リクエストURIから直接判定
+        $request_uri = $_SERVER['REQUEST_URI'] ?? '';
+        $is_media_request = false;
+        
+        // 保護拡張子のパターンマッチング
+        $extensions_pattern = implode('|', array_map('preg_quote', $this->protected_extensions));
+        if (preg_match('/wp-content\/uploads\/.*\.(' . $extensions_pattern . ')$/i', $request_uri)) {
+            $is_media_request = true;
+        }
+        
+        // 404状態をリセット（メディアリクエストの場合）
+        if ($is_media_request && is_404()) {
+            global $wp_query;
+            $wp_query->is_404 = false;
+            $wp_query->is_page = false;
+            $wp_query->is_single = false;
+            $wp_query->is_home = false;
+            status_header(200);
+        }
+        
+        $requested_file = get_query_var(self::REWRITE_ENDPOINT);
+        
+        // リライトルールが機能していない場合の代替処理
+        if (empty($requested_file) && $is_media_request) {
+            if (preg_match('/wp-content\/uploads\/(.+)$/', $request_uri, $matches)) {
+                $requested_file = $matches[1];
+            }
+        }
+        
         if (empty($requested_file)) {
             return;
         }
@@ -470,14 +498,8 @@ class ESP_Media_Protection {
             return;
         }
 
-        // 管理画面スキップ
-        if (is_admin()) {
-            $this->deliver_file($file_path);
-            return;
-        }
-
-        // ファイルアップ権限者スキップ
-        if (current_user_can('upload_files')) {
+        // 管理画面またはアップロード権限者はスキップ
+        if (is_admin() || current_user_can('upload_files')) {
             $this->deliver_file($file_path);
             return;
         }
@@ -485,7 +507,6 @@ class ESP_Media_Protection {
         // ファイル拡張子の確認
         $extension = strtolower(pathinfo($file_path, PATHINFO_EXTENSION));
         if (!in_array($extension, $this->protected_extensions, true)) {
-            // 保護対象外の拡張子の場合は通常通りファイルを配信
             $this->deliver_file($file_path);
             return;
         }
@@ -501,7 +522,6 @@ class ESP_Media_Protection {
         // 保護設定を確認
         $protected_path_id = get_post_meta($attachment_id, self::META_KEY_PROTECTED_PATH, true);
         if (empty($protected_path_id)) {
-            // 保護されていないファイルは通常配信
             $this->deliver_file($file_path);
             return;
         }
@@ -509,7 +529,6 @@ class ESP_Media_Protection {
         // 保護パス設定を取得
         $protected_paths = ESP_Option::get_current_setting('path');
         if (!isset($protected_paths[$protected_path_id])) {
-            // 無効な保護設定の場合は通常配信
             $this->deliver_file($file_path);
             return;
         }
@@ -518,7 +537,6 @@ class ESP_Media_Protection {
         
         // 認証チェック
         if (!$this->auth->is_logged_in($path_settings)) {
-            // 未認証の場合はログインページへリダイレクト（URLを修正）
             $this->redirect_to_login($path_settings, $requested_file);
             return;
         }
@@ -548,17 +566,20 @@ class ESP_Media_Protection {
         
         // realpathが失敗した場合
         if ($file_path === false) {
+            error_log('realpathが失敗した場合');
             return false;
         }
         
         // アップロードディレクトリ内のファイルかチェック
         $upload_basedir = realpath($upload_dir['basedir']);
         if (strpos($file_path, $upload_basedir) !== 0) {
+            error_log("アップロードディレクトリ内のファイルかチェック");
             return false;
         }
         
         // ファイルが存在するかチェック
         if (!file_exists($file_path) || !is_file($file_path)) {
+            error_log('存在しない');
             return false;
         }
         
@@ -623,16 +644,39 @@ class ESP_Media_Protection {
      * @param string $file_path ファイルパス
      */
     private function deliver_file($file_path) {
+
+        error_log('ESP_Media_Protection: Starting deliver_file for: ' . $file_path);
+        error_log('ESP_Media_Protection: Output buffer level before cleanup: ' . ob_get_level());
+        
+        // 出力バッファリングをクリア
+        $buffer_cleared = 0;
+        while (ob_get_level()) {
+            ob_end_clean();
+            $buffer_cleared++;
+        }
+        error_log('ESP_Media_Protection: Cleared ' . $buffer_cleared . ' output buffers');
+        
+        // ヘッダーが既に送信されているかチェック
+        if (headers_sent($file, $line)) {
+            error_log('ESP_Media_Protection: Headers already sent at ' . $file . ':' . $line);
+            return false;
+        }
+
         $mime_type = wp_check_filetype($file_path);
         $mime_type = $mime_type['type'] ?: 'application/octet-stream';
+
+        error_log($mime_type);
         
         // ファイルサイズ
         $file_size = filesize($file_path);
+
+        error_log($file_size);
         
         // Rangeヘッダーの処理（部分的なダウンロード対応）
         $range = isset($_SERVER['HTTP_RANGE']) ? $_SERVER['HTTP_RANGE'] : '';
         
         if ($range) {
+            error_log('range is true:' . $range);
             $this->deliver_file_with_range($file_path, $file_size, $mime_type, $range);
         } else {
             // 通常の配信
@@ -754,7 +798,7 @@ class ESP_Media_Protection {
      */
     private function readfile_chunked($file_path, $chunk_size = 1048576) {
         $handle = fopen($file_path, 'rb');
-        
+        error_log('readfile_chunked');
         if ($handle === false) {
             return false;
         }
