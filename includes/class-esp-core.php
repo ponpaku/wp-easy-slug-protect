@@ -19,11 +19,6 @@ class ESP_Core {
     private $security;
 
     /**
-     * @var ESP_Session セッション管理クラスのインスタンス
-     */
-    private $session;
-
-    /**
      * @var ESP_Logout ログアウト処理クラスのインスタンス
      */
     private $logout;
