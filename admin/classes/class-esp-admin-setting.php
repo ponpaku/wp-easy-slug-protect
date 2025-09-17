@@ -155,45 +155,13 @@ class ESP_Settings {
             }
         }
 
-        // メール通知用の一時データを取得
-        $raw_passwords = get_transient('esp_raw_passwords');
-        delete_transient('esp_raw_passwords'); // 取得後削除
-
-        if (!is_array($raw_passwords)) {
-            $raw_passwords = array();
-        }
-
         $current_paths = array();
-        // 新規追加と更新の処理
+        // 削除されたパスの検出
         foreach ($new_value as $path_id => $new_path) {
             if (!isset($new_path['path'])) {
                 continue;
             }
-
             $current_paths[] = $path_id;
-            $path_key = $new_path['path'];
-
-            // 平文パスワードの取得
-            if (!isset($raw_passwords[$path_key])) {
-                continue; // パスワード変更がない場合はスキップ
-            }
-
-            $raw_password = $raw_passwords[$path_key];
-
-            // 既存のパスかチェック
-            if (isset($old_paths_map[$path_id])) {
-                // パスワードが変更された場合のみ通知
-                $this->mail->notify_password_change(
-                    $path_key,
-                    $raw_password
-                );
-            } else {
-                // 新規パスの処理
-                $this->mail->notify_new_protected_path(
-                    $path_key,
-                    $raw_password
-                );
-            }
         }
 
         // 削除されたパスの検出と通知

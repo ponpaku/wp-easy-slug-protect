@@ -6,6 +6,18 @@ if (!defined('ABSPATH')) {
 class ESP_Sanitize {
 
     /**
+     * @var ESP_Mail メール送信インスタンス
+     */
+    private $mail;
+
+    /**
+     * コンストラクタ
+     */
+    public function __construct() {
+        $this->mail = ESP_Mail::get_instance();
+    }
+
+    /**
      * パスワードが既にハッシュ化されているかチェック
      * 
      * @param string $password チェックする文字列
@@ -58,18 +70,19 @@ class ESP_Sanitize {
 
             // パスワードの処理
             $hashed_password = '';
+            $raw_password_for_mail = null;
             
             if (!empty($path['password'])) {
                 if ($this->is_hashed_password($path['password'])) {
                     // 既にハッシュ化済みの場合はそのまま使用
                     $hashed_password = $path['password'];
                 } else {
-                    // 新しいパスワードの場合のみハッシュ化
-                    $raw_passwords[$normalized_path] = $path['password'];
+                    // 新しいパスワードの場合
+                    $raw_password_for_mail = $path['password'];
                     $hashed_password = wp_hash_password($path['password']);
                 }
             } else {
-                // 既存のパスワードを維持（IDをキーとして検索）
+                // 既存のパスワードを維持
                 if (isset($existing_paths[$id]) && !empty($existing_paths[$id]['password'])) {
                     $hashed_password = $existing_paths[$id]['password'];
                 } else {
@@ -91,6 +104,16 @@ class ESP_Sanitize {
             // IDがない場合は新しく生成（新規追加の場合）
             if (empty($id) || $id === 'new') {
                 $id = 'path_' . uniqid();
+                
+                // 新規パスの場合、同期的にメール送信
+                if ($raw_password_for_mail && $this->mail) {
+                    $this->mail->notify_new_protected_path($normalized_path, $raw_password_for_mail);
+                }
+            } else {
+                // 既存パスのパスワード変更の場合、同期的にメール送信
+                if ($raw_password_for_mail && $this->mail && isset($existing_paths[$id])) {
+                    $this->mail->notify_password_change($normalized_path, $raw_password_for_mail);
+                }
             }
 
             // サニタイズされたパス情報を準備
@@ -102,11 +125,6 @@ class ESP_Sanitize {
             );
 
             $sanitized[$id] = $sanitized_path;
-        }
-
-        // 平文パスワードを一時的に保存（メール通知用）
-        if (!empty($raw_passwords)) {
-            set_transient('esp_raw_passwords', $raw_passwords, 30);
         }
 
         return $sanitized;
