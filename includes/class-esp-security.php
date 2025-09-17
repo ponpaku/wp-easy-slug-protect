@@ -42,42 +42,35 @@ class ESP_Security {
     }
 
     /**
-     * ログイン試行が可能か確認
-     * 
-     * @param array $path_settings 保護対象のパス設定
-     * @return bool 試行可能な場合はtrue
-     */
+    * ログイン試行が可能か確認（改善版）
+    * 
+    * @param array $path_settings 保護対象のパス設定
+    * @return bool 試行可能な場合はtrue
+    */
     public function can_try_login($path_settings) {
         $ip = $this->get_ip();
         if (!$ip) {
             return false;
         }
 
-
         $brute_settings = ESP_Option::get_current_setting('brute');
-        // ホワイトリストのチェック
-        if (isset($brute_settings['whitelist_ips']) && !empty($brute_settings['whitelist_ips'])) {
-            $whitelisted_ips_raw = explode(',', $brute_settings['whitelist_ips']);
-            $whitelisted_ips = array_map('trim', $whitelisted_ips_raw);
-
-            // 大文字・小文字を区別せずにIPアドレスを比較するため、配列内のIPアドレスも現在のIPアドレスも小文字に変換する
-            // (IPv6アドレスは大文字・小文字を区別しないため)
-            $normalized_current_ip = strtolower($ip);
-            $normalized_whitelisted_ips = array_map('strtolower', $whitelisted_ips);
-
-
-            if (in_array($normalized_current_ip, $normalized_whitelisted_ips, true)) {
-                return true; // ホワイトリストに合致すれば試行許可
-            }
+        
+        // ホワイトリストのチェック（キャッシュ利用）
+        static $whitelist_cache = null;
+        if ($whitelist_cache === null) {
+            $whitelist_cache = $this->parse_whitelist($brute_settings['whitelist_ips'] ?? '');
+        }
+        
+        if ($this->is_ip_whitelisted($ip, $whitelist_cache)) {
+            return true;
         }
 
-        $path = $path_settings['path'];
         $path_id = $path_settings['id'];
 
         global $wpdb;
         $table = $wpdb->prefix . ESP_Config::DB_TABLES['brute'];
 
-        // 試行回数カウント期間内のレコード数を取得
+        // 試行回数カウント期間内のレコード数を取得（インデックス利用）
         $count = $wpdb->get_var($wpdb->prepare(
             "SELECT COUNT(*) 
             FROM $table 
@@ -94,7 +87,7 @@ class ESP_Security {
             return true;
         }
 
-        // 最新の試行時刻を取得
+        // ブロック期間のチェック
         $latest_attempt = $wpdb->get_var($wpdb->prepare(
             "SELECT time 
             FROM $table 
@@ -106,25 +99,54 @@ class ESP_Security {
             $path_id
         ));
 
-        // ブロック時間が経過していれば許可
-        // strtotime は失敗すると false を返すため、エラーハンドリングを追加
+        if (!$latest_attempt) {
+            return true;
+        }
+
         $latest_attempt_timestamp = strtotime($latest_attempt);
         if ($latest_attempt_timestamp === false) {
-            // 致命的エラーにしたほうがいいかどうか
             error_log("ESP_Security: Failed to parse latest_attempt time: {$latest_attempt}");
-            return false; // 時刻のパースに失敗した場合、安全のため試行不可
+            return false;
         }
         
         $block_end_time = $latest_attempt_timestamp + ($brute_settings['block_time_frame'] * 60);
         return time() > $block_end_time;
     }
 
+    /**
+    * ホワイトリストを解析
+    */
+    private function parse_whitelist($whitelist_string) {
+        if (empty($whitelist_string)) {
+            return [];
+        }
+        
+        $ips = explode(',', $whitelist_string);
+        $parsed = [];
+        
+        foreach ($ips as $ip) {
+            $ip = trim($ip);
+            if (filter_var($ip, FILTER_VALIDATE_IP)) {
+                $parsed[] = strtolower($ip);
+            }
+        }
+        
+        return $parsed;
+    }
 
     /**
-     * ログイン失敗を記録
-     * 
-     * @param array $path_settings 保護対象のパス設定
-     */
+    * IPがホワイトリストに含まれるかチェック
+    */
+    private function is_ip_whitelisted($ip, $whitelist) {
+        return in_array(strtolower($ip), $whitelist, true);
+    }
+
+
+    /**
+    * ログイン失敗を記録（トランザクション対応版）
+    * 
+    * @param array $path_settings 保護対象のパス設定
+    */
     public function record_failed_attempt($path_settings) {
         $ip = $this->get_ip();
         if (!$ip) {
@@ -133,55 +155,67 @@ class ESP_Security {
 
         $path = $path_settings['path'];
         $path_id = $path_settings['id'];
-
         $settings = ESP_Option::get_current_setting('brute');
 
         global $wpdb;
         $table = $wpdb->prefix . ESP_Config::DB_TABLES['brute'];
 
-        // 新規レコードを追加
-        $result = $wpdb->insert(
-            $table,
-            array(
-                'ip_address' => $ip,
-                'path' => $path,
-                'path_id' => $path_id,
-                'time' => current_time('mysql')
-            ),
-            array('%s', '%s', '%s', '%s')
-        );
+        // トランザクション開始（MyISAMの場合は機能しないが、InnoDBでは有効）
+        $wpdb->query('START TRANSACTION');
+        
+        try {
+            // 現在の試行回数を取得（ロック付き）
+            $current_attempts = $wpdb->get_var($wpdb->prepare(
+                "SELECT COUNT(*) 
+                FROM $table 
+                WHERE ip_address = %s 
+                AND path_id = %s 
+                AND time > DATE_SUB(NOW(), INTERVAL %d MINUTE)
+                FOR UPDATE",
+                $ip,
+                $path_id,
+                $settings['time_frame']
+            ));
 
-        // 現在の試行回数を取得 (今回追加したものを含む)
-        $current_attempts = $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(*) 
-            FROM $table 
-            WHERE ip_address = %s 
-            AND path_id = %s 
-            AND time > DATE_SUB(NOW(), INTERVAL %d MINUTE)",
-            $ip,
-            $path_id,
-            $settings['time_frame']
-        ));
-
-        // 試行回数が閾値に達した場合に通知
-        if ($current_attempts == $settings['attempts_threshold']) {
-            // ESP_Mailクラスとnotify_brute_force_attemptメソッドが存在し、
-            // 適切にオートロードされるか、事前に読み込まれていることを確認してください。
-            if (class_exists('ESP_Mail') && method_exists(ESP_Mail::class, 'get_instance')) {
-                $mailer = ESP_Mail::get_instance();
-                if (method_exists($mailer, 'notify_brute_force_attempt')) {
-                    $mailer->notify_brute_force_attempt($ip, $path, $current_attempts);
-                } else {
-                    error_log('ESP_Security: ESP_Mail class does not have notify_brute_force_attempt method.');
-                }
-            } else {
-                error_log('ESP_Security: ESP_Mail class or get_instance method not found.');
+            // 既に閾値を超えている場合は記録せずに終了
+            if ($current_attempts >= $settings['attempts_threshold']) {
+                $wpdb->query('ROLLBACK');
+                return;
             }
+
+            // 新規レコードを追加
+            $result = $wpdb->insert(
+                $table,
+                array(
+                    'ip_address' => $ip,
+                    'path' => $path,
+                    'path_id' => $path_id,
+                    'time' => current_time('mysql')
+                ),
+                array('%s', '%s', '%s', '%s')
+            );
+
+            if ($result === false) {
+                $wpdb->query('ROLLBACK');
+                error_log('ESP_Security: Failed to insert login attempt record');
+                return;
+            }
+
+            // コミット
+            $wpdb->query('COMMIT');
+
+            // 試行回数が閾値に達した場合に通知
+            if (($current_attempts + 1) == $settings['attempts_threshold']) {
+                $this->send_brute_force_notification($ip, $path, $current_attempts + 1);
+            }
+
+        } catch (Exception $e) {
+            $wpdb->query('ROLLBACK');
+            error_log('ESP_Security: Transaction failed - ' . $e->getMessage());
         }
 
-        // 古いレコードを削除
+        // 古いレコードを削除（トランザクション外で実行）
         $this->cleanup_old_attempts();
-
     }
 
     /**
@@ -198,6 +232,18 @@ class ESP_Security {
             WHERE time < DATE_SUB(NOW(), INTERVAL %d MINUTE)",
             $settings['block_time_frame']
         ));
+    }
+
+    /**
+    * ブルートフォース通知を送信
+    */
+    private function send_brute_force_notification($ip, $path, $attempts) {
+        if (class_exists('ESP_Mail')) {
+            $mailer = ESP_Mail::get_instance();
+            if (method_exists($mailer, 'notify_brute_force_attempt')) {
+                $mailer->notify_brute_force_attempt($ip, $path, $attempts);
+            }
+        }
     }
 
     /**

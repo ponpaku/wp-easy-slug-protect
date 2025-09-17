@@ -137,7 +137,7 @@ class ESP_Media_Protection {
             delete_transient(self::MEDIA_CACHE_KEY);
             return;
         }
-        
+
         // パスIDごとのメディアIDをグループ化
         $media_by_path = [];
         
@@ -158,9 +158,9 @@ class ESP_Media_Protection {
         }
         
         set_transient(self::MEDIA_CACHE_KEY, $media_by_path, self::MEDIA_CACHE_DURATION);
-        
-        // デバッグログ（必要に応じて）
-        // error_log('ESP_Media_Protection: Media cache regenerated. Found ' . count($media_by_path) . ' protected path groups.');
+
+        // デバッグ
+        // error_log(print_r($media_by_path, true));
     }
 
     /**
@@ -546,22 +546,53 @@ class ESP_Media_Protection {
     }
 
     /**
-     * ファイルパスの検証とサニタイズ
-     *
-     * @param string $requested_file リクエストされたファイルパス
-     * @return string|false 検証済みのファイルパス、無効な場合はfalse
-     */
+    * ファイルパスの検証とサニタイズ
+    *
+    * @param string $requested_file リクエストされたファイルパス
+    * @return string|false 検証済みのファイルパス、無効な場合はfalse
+    */
     private function validate_file_path($requested_file) {
-        // ディレクトリトラバーサル対策
-        $requested_file = str_replace(['../', '..\\'], '', $requested_file);
-        $requested_file = trim($requested_file, '/\\');
+        // nullバイト攻撃対策
+        $requested_file = str_replace("\0", '', $requested_file);
         
+        // URLエンコードされた文字をデコード（複数回）
+        $max_decode = 3;
+        for ($i = 0; $i < $max_decode; $i++) {
+            $decoded = rawurldecode($requested_file);
+            if ($decoded === $requested_file) break;
+            $requested_file = $decoded;
+        }
+        
+        // ディレクトリトラバーサル対策（強化版）
+        // 様々なパターンの相対パス指定を除去
+        $patterns = [
+            '#(\.\.+[/\\\\])#',           // ../ または ..\
+            '#([/\\\\]\.\.+)#',           // /.. または \..
+            '#(\.\.+)#',                  // 連続した..
+            '#^[/\\\\]+#',                // 先頭のスラッシュ
+            '#[/\\\\]+$#',                // 末尾のスラッシュ
+            '#[/\\\\]{2,}#'               // 連続したスラッシュ
+        ];
+        
+        foreach ($patterns as $pattern) {
+            $requested_file = preg_replace($pattern, '', $requested_file);
+        }
+        
+        // 空文字になった場合は無効
         if (empty($requested_file)) {
             return false;
         }
         
+        // 安全なパス構築
         $upload_dir = wp_upload_dir();
-        $file_path = $upload_dir['basedir'] . '/' . $requested_file;
+        $base_path = realpath($upload_dir['basedir']);
+        
+        if ($base_path === false) {
+            return false;
+        }
+        
+        // ファイルパスを構築
+        $file_path = $base_path . DIRECTORY_SEPARATOR . $requested_file;
         $file_path = realpath($file_path);
         
         // realpathが失敗した場合
@@ -569,14 +600,13 @@ class ESP_Media_Protection {
             return false;
         }
         
-        // アップロードディレクトリ内のファイルかチェック
-        $upload_basedir = realpath($upload_dir['basedir']);
-        if (strpos($file_path, $upload_basedir) !== 0) {
+        // ベースディレクトリ外へのアクセスを防ぐ
+        if (strpos($file_path, $base_path) !== 0) {
             return false;
         }
         
-        // ファイルが存在するかチェック
-        if (!file_exists($file_path) || !is_file($file_path)) {
+        // ファイルが存在し、通常ファイルであることを確認
+        if (!file_exists($file_path) || !is_file($file_path) || is_link($file_path)) {
             return false;
         }
         
@@ -641,15 +671,18 @@ class ESP_Media_Protection {
      * @param string $file_path ファイルパス
      */
     private function deliver_file($file_path) {
-        // 出力バッファリングをクリア
-        $buffer_cleared = 0;
-        while (ob_get_level()) {
+        // 現在のバッファレベルを記録
+        $initial_ob_level = ob_get_level();
+        
+        // ESP専用のバッファのみクリア（WordPressのバッファは維持）
+        // 通常WordPressは1-2レベルのバッファを使用
+        while (ob_get_level() > max(0, $initial_ob_level - 1)) {
             ob_end_clean();
-            $buffer_cleared++;
         }
         
         // ヘッダーが既に送信されているかチェック
         if (headers_sent($file, $line)) {
+            error_log("ESP: Headers already sent in $file on line $line");
             return false;
         }
 
@@ -760,18 +793,31 @@ class ESP_Media_Protection {
         
         $this->set_cache_headers($mime_type);
         
-        $fp = fopen($file_path, 'rb');
-        fseek($fp, $c_start);
-        
-        $bytes_send = 0;
-        while (!feof($fp) && (!connection_aborted()) && ($bytes_send < $length)) {
-            $buffer = fread($fp, min(1024 * 16, $length - $bytes_send));
-            echo $buffer;
-            flush();
-            $bytes_send += strlen($buffer);
+        // ファイルハンドルのリーク対策
+        $fp = @fopen($file_path, 'rb');
+        if ($fp === false) {
+            $this->send_404();
+            return;
         }
         
-        fclose($fp);
+        try {
+            fseek($fp, $c_start);
+            
+            $bytes_send = 0;
+            while (!feof($fp) && !connection_aborted() && ($bytes_send < $length)) {
+                $buffer = fread($fp, min(1024 * 16, $length - $bytes_send));
+                if ($buffer === false) {
+                    break;
+                }
+                echo $buffer;
+                flush();
+                $bytes_send += strlen($buffer);
+            }
+        } finally {
+            // finallyでファイルハンドルを確実にクローズ
+            fclose($fp);
+        }
+        
         exit;
     }
 
@@ -953,20 +999,42 @@ class ESP_Media_Protection {
     }
 
     /**
-     * 指定されたパスIDに関連付けられたメディアを取得
-     *
-     * @param array $path_ids パスIDの配列
-     * @return array メディアIDの配列
-     */
+    * 指定されたパスIDに関連付けられたメディアを取得
+    *
+    * @param array $path_ids パスIDの配列
+    * @return array メディアIDの配列
+    */
     private function get_media_by_path_ids($path_ids) {
         global $wpdb;
         
-        $placeholders = array_fill(0, count($path_ids), '%s');
+        if (empty($path_ids) || !is_array($path_ids)) {
+            return [];
+        }
+        
+        // パスIDをサニタイズ
+        $sanitized_path_ids = array();
+        foreach ($path_ids as $path_id) {
+            // パスIDの形式を検証（英数字とアンダースコアのみ許可）
+            if (preg_match('/^[a-zA-Z0-9_]+$/', $path_id)) {
+                $sanitized_path_ids[] = $path_id;
+            }
+        }
+        
+        if (empty($sanitized_path_ids)) {
+            return [];
+        }
+        
+        // wpdbのprepareを使用して安全にクエリを構築
+        $placeholders = implode(', ', array_fill(0, count($sanitized_path_ids), '%s'));
+        
         $query = $wpdb->prepare(
             "SELECT post_id FROM {$wpdb->postmeta} 
             WHERE meta_key = %s 
-            AND meta_value IN (" . implode(',', $placeholders) . ")",
-            array_merge([self::META_KEY_PROTECTED_PATH], $path_ids)
+            AND meta_value IN ($placeholders)",
+            array_merge(
+                array(self::META_KEY_PROTECTED_PATH),
+                $sanitized_path_ids
+            )
         );
         
         return $wpdb->get_col($query);

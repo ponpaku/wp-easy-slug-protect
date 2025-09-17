@@ -369,17 +369,17 @@ class ESP_Core {
 
 
     /**
-     * ログインページへのリダイレクト
-     * 
-     * @param array $path_settings パスの設定
-     * @param string $current_url 現在のURL
-     */
+    * ログインページへのリダイレクト
+    * 
+    * @param array $path_settings パスの設定
+    * @param string $current_url 現在のURL
+    */
     private function redirect_to_login_page($path_settings, $current_path = null) {
         if (is_null($current_path)) {
             $current_path = $this->get_current_path();
         }
 
-        // ログインページの有効性チェックとフォールバック処理を追加
+        // ログインページの有効性チェックとフォールバック処理
         $login_page_id = isset($path_settings['login_page']) ? $path_settings['login_page'] : 0;
 
         if ($this->is_valid_login_page($login_page_id)) {
@@ -393,7 +393,11 @@ class ESP_Core {
                 exit; // リダイレクト後は確実に終了
             }
         }
-        $this->cookie->do_redirect($login_url, false);
+        
+        // フォールバック：ログインページが無効な場合はホームページへリダイレクト
+        // エラーメッセージを設定
+        ESP_Message::set_error(__('ログインページが見つかりません。管理者にお問い合わせください。', ESP_Config::TEXT_DOMAIN));
+        $this->cookie->do_redirect(home_url('/'), false);
         exit;
     }
 

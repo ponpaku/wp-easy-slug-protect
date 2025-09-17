@@ -430,88 +430,199 @@ class ESP_Filter {
     }
 
     /**
-     * 保護された投稿のキャッシュを再生成 (メタデータ利用版)
-     */
+    * 保護された投稿のキャッシュを再生成（バッチ処理版）
+    */
     public function regenerate_protected_posts_cache() {
         if (wp_doing_cron() && !defined('ESP_DOING_CRON_INTEGRITY_CHECK')) {
-             // 通常のCronジョブ（整合性チェック以外）では、重いキャッシュ再生成をスキップすることも検討
-             // return;
+            // 通常のCronジョブではスキップ可能
+            return;
         }
 
         $protected_paths_settings = ESP_Option::get_current_setting('path');
         if (empty($protected_paths_settings)) {
             delete_transient(self::CACHE_KEY);
-            // error_log('ESP_Filter: No protected paths found, cache cleared.'); // ログレベル検討
             return;
         }
 
-        $all_published_post_ids = get_posts([
-            'post_type'      => 'any',
-            'post_status'    => 'publish',
-            'numberposts'    => -1,
-            'fields'         => 'ids',
-        ]);
-
-        if (empty($all_published_post_ids)) {
-            delete_transient(self::CACHE_KEY);
-            // error_log('ESP_Filter: No published posts found to build cache.');
-            return;
-        }
+        $all_protected_posts_map = [];
+        $batch_size = 500; // バッチサイズ
+        $offset = 0;
         
-        // 全公開投稿の _esp_permalink_path メタデータを一括取得 (ただし、投稿数が多いとこれ自体も負荷になる可能性)
-        // 投稿数に応じて、get_post_meta をループ内で使うか、ここで一括取得するかを選択。
-        // ここではループ内で get_post_meta を使うアプローチを示し、フォールバックもそこで行う。
+        // メモリ使用量の監視
+        $memory_limit = $this->get_memory_limit();
+        $memory_threshold = $memory_limit * 0.8; // 80%で警告
         
-        $all_protected_posts_map = []; // path_id => [post_id, post_id, ...]
-
-        // サイトのサブディレクトリパスを取得（一度だけ）
-        $home_url_path_parsed = parse_url(home_url(), PHP_URL_PATH);
-        $site_path_prefix = $home_url_path_parsed ? trailingslashit(untrailingslashit($home_url_path_parsed)) : '';
-        if ($site_path_prefix === '/') $site_path_prefix = ''; // ルートの場合は空文字に
-
-        foreach ($protected_paths_settings as $path_id => $path_setting) {
-            if (empty($path_setting['path'])) continue;
-
-            // 保護対象として設定されたパスを正規化
-            $configured_protection_path = '/' . trim($path_setting['path'], '/') . '/';
-            if ($configured_protection_path === '//') $configured_protection_path = '/';
-
-            $current_path_protected_ids = [];
-
-            foreach ($all_published_post_ids as $post_id) {
-                $post_permalink_meta_path = get_post_meta($post_id, ESP_Config::PERMALINK_PATH_META_KEY, true);
-
-                if (empty($post_permalink_meta_path)) {
-                    // メタデータが存在しない場合、その場で生成・保存し、それを使用
-                    if ($this->update_single_post_permalink_path_meta($post_id)) {
-                        $post_permalink_meta_path = get_post_meta($post_id, ESP_Config::PERMALINK_PATH_META_KEY, true);
-                    }
-                }
-
-                if (!empty($post_permalink_meta_path)) {
-                    // メタデータのパスは既にサイトルート相対＆正規化済みと仮定
-                    // (update_single_post_permalink_path_meta でそのように保存しているため)
+        while (true) {
+            // メモリチェック
+            if (memory_get_usage(true) > $memory_threshold) {
+                error_log('ESP_Filter: Memory usage high, stopping batch processing');
+                break;
+            }
+            
+            // バッチで投稿を取得
+            $post_ids = get_posts([
+                'post_type'      => 'any',
+                'post_status'    => 'publish',
+                'posts_per_page' => $batch_size,
+                'offset'         => $offset,
+                'fields'         => 'ids',
+                'orderby'        => 'ID',
+                'order'          => 'ASC',
+            ]);
+            
+            if (empty($post_ids)) {
+                break;
+            }
+            
+            // メタデータを一括取得（N+1クエリ解消）
+            $meta_data = $this->get_post_meta_batch($post_ids, ESP_Config::PERMALINK_PATH_META_KEY);
+            
+            // 各保護パスに対してマッチング処理
+            foreach ($protected_paths_settings as $path_id => $path_setting) {
+                if (empty($path_setting['path'])) continue;
+                
+                $configured_protection_path = '/' . trim($path_setting['path'], '/') . '/';
+                if ($configured_protection_path === '//') $configured_protection_path = '/';
+                
+                $current_path_protected_ids = [];
+                
+                foreach ($post_ids as $post_id) {
+                    $post_permalink_meta_path = isset($meta_data[$post_id]) ? $meta_data[$post_id] : '';
                     
-                    // パスプレフィックスで比較
+                    // メタデータが存在しない場合、遅延生成
+                    if (empty($post_permalink_meta_path)) {
+                        // バッチ更新用にマーク
+                        $this->mark_for_meta_update($post_id);
+                        continue;
+                    }
+                    
+                    // パスマッチング
                     if (strpos($post_permalink_meta_path, $configured_protection_path) === 0) {
-                        // 特殊ケースハンドリング: 保護パスがルート('/')の場合
-                        if ($configured_protection_path === '/') {
-                            // ルート保護の場合、全てのパスが対象になる (strposの挙動通り)
-                            // もしフロントページのみを対象としたい場合は、$post_permalink_meta_path === '/' のチェックが必要
-                             $current_path_protected_ids[] = $post_id;
-                        } else {
-                            $current_path_protected_ids[] = $post_id;
-                        }
+                        $current_path_protected_ids[] = $post_id;
                     }
                 }
+                
+                if (!empty($current_path_protected_ids)) {
+                    if (!isset($all_protected_posts_map[$path_id])) {
+                        $all_protected_posts_map[$path_id] = [];
+                    }
+                    $all_protected_posts_map[$path_id] = array_merge(
+                        $all_protected_posts_map[$path_id],
+                        $current_path_protected_ids
+                    );
+                }
             }
-            if (!empty($current_path_protected_ids)) {
-                $all_protected_posts_map[$path_id] = array_unique($current_path_protected_ids);
+            
+            $offset += $batch_size;
+            
+            // メモリ解放
+            wp_cache_flush();
+            unset($post_ids, $meta_data);
+        }
+        
+        // 遅延メタ更新を実行
+        $this->process_pending_meta_updates();
+        
+        // 重複を除去して保存
+        foreach ($all_protected_posts_map as $path_id => &$post_ids) {
+            $post_ids = array_unique($post_ids);
+        }
+        
+        set_transient(self::CACHE_KEY, $all_protected_posts_map, self::CACHE_DURATION);
+    }
+
+    /**
+    * 投稿メタデータをバッチで取得
+    *
+    * @param array $post_ids 投稿IDの配列
+    * @param string $meta_key メタキー
+    * @return array post_id => meta_value の連想配列
+    */
+    private function get_post_meta_batch($post_ids, $meta_key) {
+        global $wpdb;
+        
+        if (empty($post_ids)) {
+            return [];
+        }
+        
+        // IDをサニタイズ
+        $post_ids = array_map('intval', $post_ids);
+        $placeholders = implode(',', array_fill(0, count($post_ids), '%d'));
+        
+        $query = $wpdb->prepare(
+            "SELECT post_id, meta_value 
+            FROM {$wpdb->postmeta} 
+            WHERE post_id IN ($placeholders) 
+            AND meta_key = %s",
+            array_merge($post_ids, [$meta_key])
+        );
+        
+        $results = $wpdb->get_results($query, ARRAY_A);
+        
+        $meta_data = [];
+        foreach ($results as $row) {
+            $meta_data[$row['post_id']] = $row['meta_value'];
+        }
+        
+        return $meta_data;
+    }
+
+    /**
+    * メモリ制限を取得（バイト単位）
+    */
+    private function get_memory_limit() {
+        $memory_limit = ini_get('memory_limit');
+        
+        if (preg_match('/^(\d+)(.)$/', $memory_limit, $matches)) {
+            $value = $matches[1];
+            switch (strtoupper($matches[2])) {
+                case 'G':
+                    $value *= 1024;
+                case 'M':
+                    $value *= 1024;
+                case 'K':
+                    $value *= 1024;
+            }
+            return $value;
+        }
+        
+        return 128 * 1024 * 1024; // デフォルト128MB
+    }
+
+    /**
+    * メタ更新が必要な投稿をマーク
+    */
+    private $pending_meta_updates = [];
+
+    private function mark_for_meta_update($post_id) {
+        $this->pending_meta_updates[] = $post_id;
+    }
+
+    /**
+    * 保留中のメタ更新を処理
+    */
+    private function process_pending_meta_updates() {
+        if (empty($this->pending_meta_updates)) {
+            return;
+        }
+        
+        $batch_size = 50;
+        $chunks = array_chunk($this->pending_meta_updates, $batch_size);
+        
+        foreach ($chunks as $chunk) {
+            foreach ($chunk as $post_id) {
+                $this->update_single_post_permalink_path_meta($post_id);
+            }
+            
+            // バッチ間で少し待機
+            if (count($chunks) > 1) {
+                usleep(100000); // 0.1秒
             }
         }
-        set_transient(self::CACHE_KEY, $all_protected_posts_map, self::CACHE_DURATION);
-        // error_log('ESP_Filter: Protected posts cache regenerated using meta data. Found ' . count($all_protected_posts_map) . ' protected path groups.');
+        
+        $this->pending_meta_updates = [];
     }
+
 
     /**
      * 定期的な整合性チェックと修正 (WP-Cronから呼び出される)
