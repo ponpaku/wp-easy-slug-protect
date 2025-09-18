@@ -272,4 +272,13 @@ class ESP_Security {
         $table = $wpdb->prefix . ESP_Config::DB_TABLES['remember'];
         $wpdb->query("DELETE FROM {$table} WHERE expires < NOW()");
     }
+
+    /**
+     * Cron用の通常ログインセッションクリーンアップ
+     */
+    public static function cron_cleanup_sessions() {
+        global $wpdb;
+        $table = $wpdb->prefix . ESP_Config::DB_TABLES['session'];
+        $wpdb->query("DELETE FROM {$table} WHERE expires < NOW()");
+    }
 }

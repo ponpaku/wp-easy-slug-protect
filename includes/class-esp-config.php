@@ -39,12 +39,13 @@ class ESP_Config {
                 'critical_error' => true
             )
         ),
-        'db_version' => 1 // DBバージョン
+        'db_version' => 2 // DBバージョン
 
     );
 
     const DB_TABLES = array(
         'remember' => 'esp_login_remember',
-        'brute' => 'esp_login_attempts'
+        'brute' => 'esp_login_attempts',
+        'session' => 'esp_login_session'
     );
 }
