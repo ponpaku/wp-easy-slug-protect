@@ -46,7 +46,7 @@
 			 */
 			addNewPath: function (e) {
 				e.preventDefault();
-				const pathId = "new_" + Date.now();
+				const pathId = "path_" + Date.now();
 				const template = `
                 <div class="esp-path-item" style="display: none;" data-path-id="${pathId}">
                     <div class="esp-path-header">
