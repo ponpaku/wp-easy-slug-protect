@@ -54,15 +54,29 @@
 
 /* エラーメッセージ */
 .esp-error {
-	/* color: #dc3232; */
-	padding: 10px;
-	margin-bottom: 1.5em;
-	/* border-left: 4px solid #dc3232; */
-	/* background: #fff; */
-	font-weight: bold;
-	color: #fff;
-	background-color: #dc3232;
-	border-radius: 10px;
+        /* color: #dc3232; */
+        padding: 10px;
+        margin-bottom: 1.5em;
+        /* border-left: 4px solid #dc3232; */
+        /* background: #fff; */
+        font-weight: bold;
+        color: #fff;
+        background-color: #dc3232;
+        border-radius: 10px;
+}
+
+.esp-notice {
+        padding: 10px;
+        margin-bottom: 1.5em;
+        font-weight: bold;
+        color: #1d2327;
+        background-color: #e5f4ff;
+        border-radius: 10px;
+}
+
+.esp-notice--warning {
+        color: #1d2327;
+        background-color: #ffb900;
 }
 
 /* ログアウトボタン */

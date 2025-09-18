@@ -149,6 +149,7 @@ class ESP_Setup {
             `id` bigint(20) UNSIGNED NOT NULL AUTO_INCREMENT,
             `path` varchar(255) NOT NULL,
             `path_id` varchar(50) NOT NULL,
+            `password_version` int(10) UNSIGNED NOT NULL DEFAULT 0,
             `user_id` varchar(32) NOT NULL,
             `token` varchar(64) NOT NULL,
             `created` datetime NOT NULL,
@@ -231,6 +232,9 @@ class ESP_Setup {
         if ($from < 2 && $to >= 2) {
             $this->migrate_to_version_2();
         }
+        if ($from < 3 && $to >= 3) {
+            $this->migrate_to_version_3();
+        }
         // 将来的に処理をここに追加
     }
 
@@ -312,6 +316,43 @@ class ESP_Setup {
         dbDelta($sql);
 
         update_option('esp_db_version', 2);
+    }
+
+    /**
+     * バージョン3へのマイグレーション（password_version列の追加など）
+     */
+    private function migrate_to_version_3() {
+        global $wpdb;
+
+        $remember_table = $wpdb->prefix . ESP_Config::DB_TABLES['remember'];
+        $column_exists = $wpdb->get_var($wpdb->prepare(
+            "SHOW COLUMNS FROM `{$remember_table}` LIKE %s",
+            'password_version'
+        ));
+
+        if (!$column_exists) {
+            // まだ列が無ければ追加
+            $wpdb->query("ALTER TABLE `{$remember_table}` ADD COLUMN `password_version` int(10) UNSIGNED NOT NULL DEFAULT 0 AFTER `path_id`");
+        }
+
+        $settings = ESP_Option::get_all_settings();
+        $needs_update = false;
+
+        if (isset($settings['path']) && is_array($settings['path'])) {
+            foreach ($settings['path'] as $key => $path_setting) {
+                if (!isset($path_setting['password_version'])) {
+                    // 既存設定には初期値を補う
+                    $settings['path'][$key]['password_version'] = 0;
+                    $needs_update = true;
+                }
+            }
+        }
+
+        if ($needs_update) {
+            ESP_Option::update_settings($settings);
+        }
+
+        update_option('esp_db_version', 3);
     }
 
 }
