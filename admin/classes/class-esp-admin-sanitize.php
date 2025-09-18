@@ -144,7 +144,9 @@ class ESP_Sanitize {
 
             $sanitized[$id] = $sanitized_path;
         }
-
+        
+        // passをメモリから削除
+        $raw_password_for_mail = null;
         return $sanitized;
     }
 
