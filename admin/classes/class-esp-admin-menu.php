@@ -388,9 +388,21 @@ class ESP_Admin_Menu {
                                 <div id="esp-clear-media-cache-status" style="margin-top: 5px;"></div>
                             </td>
                         </tr>
+                        <tr>
+                            <th scope="row"><?php _e('.htaccessルール再設定', $text_domain); ?></th>
+                            <td>
+                                <button type="button" class="button button-secondary" id="esp-reset-htaccess-rules">
+                                    <?php _e('.htaccessのルールを再設定する', $text_domain); ?>
+                                </button>
+                                <p class="description">
+                                    <?php _e('アップロードディレクトリの.htaccessルールを再生成します。Apache/LiteSpeed環境でメディア保護に問題がある場合に使用してください。', $text_domain); ?>
+                                </p>
+                                <div id="esp-reset-htaccess-status" style="margin-top: 5px;"></div>
+                            </td>
+                        </tr>
                     </table>
                 </div>
-                
+
                 <?php submit_button(); ?>
             </form>
         </div>
