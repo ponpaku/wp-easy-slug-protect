@@ -8,36 +8,39 @@ if (!defined('ABSPATH')) {
  * セキュリティ関連の処理を管理するクラス
  */
 class ESP_Security {
+
     /**
-     * IPアドレスの取得
+     * IPアドレスの取得（SiteGuard方式）
+     * 保守性・反複雑化を最優先し、REMOTE_ADDRのみを使用
      * 
      * @return string|false IPアドレス。取得できない場合はfalse
      */
     private function get_ip() {
-        $ip = false;
-
-        // Cloudflare経由の場合
-        if (isset($_SERVER['HTTP_CF_CONNECTING_IP'])) {
-            $ip = $_SERVER['HTTP_CF_CONNECTING_IP'];
-        }
-        // 通常のアクセスの場合
-        elseif (isset($_SERVER['REMOTE_ADDR'])) {
-            $ip = $_SERVER['REMOTE_ADDR'];
-            // プロキシ経由の場合は実IPを取得
-            if (preg_match('/^(?:127|10)\.0\.0\.[12]?\d{1,2}$/', $ip)) {
-                if (isset($_SERVER['HTTP_X_REAL_IP'])) {
-                    $ip = $_SERVER['HTTP_X_REAL_IP'];
-                } elseif (isset($_SERVER['HTTP_X_FORWARDED_FOR'])) {
-                    $ip = $_SERVER['HTTP_X_FORWARDED_FOR'];
-                }
-            }
-        }
-
-        // IPアドレスの検証
-        if (filter_var($ip, FILTER_VALIDATE_IP) === false) {
+        // REMOTE_ADDRの存在チェック
+        if (!isset($_SERVER['REMOTE_ADDR']) || 
+            !is_string($_SERVER['REMOTE_ADDR']) || 
+            $_SERVER['REMOTE_ADDR'] === '') {
+            
+            // サーバー設定の問題として記録
+            error_log('ESP_Security: Webserver misconfigured - REMOTE_ADDR not set');
             return false;
         }
-
+        
+        $ip = $_SERVER['REMOTE_ADDR'];
+        
+        // IPアドレスの妥当性検証（IPv4とIPv6両対応）
+        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4 | FILTER_FLAG_IPV6) === false) {
+            error_log('ESP_Security: Invalid IP address format: ' . $ip);
+            return false;
+        }
+        
+        // 追加の検証：予約済みアドレスのチェック（オプション）
+        // 0.0.0.0 や ::0 などの無効なアドレスを除外
+        if ($ip === '0.0.0.0' || $ip === '::' || $ip === '::0') {
+            error_log('ESP_Security: Reserved or invalid IP address: ' . $ip);
+            return false;
+        }
+        
         return $ip;
     }
 
