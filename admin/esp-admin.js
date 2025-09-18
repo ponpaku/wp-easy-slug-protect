@@ -34,10 +34,14 @@
 					this.handleClearProtectionCache.bind(this)
 				);
 				// メディアキャッシュクリアボタンを追加
-				$("#esp-clear-media-cache").on(
-					"click",
-					this.handleClearMediaCache.bind(this)
-				);
+                                $("#esp-clear-media-cache").on(
+                                        "click",
+                                        this.handleClearMediaCache.bind(this)
+                                );
+                                $("#esp-reset-htaccess-rules").on(
+                                        "click",
+                                        this.handleResetHtaccessRules.bind(this)
+                                );
 			},
 
 			/**
@@ -556,10 +560,10 @@
 			/**
 			 * 「メディア保護キャッシュクリア」ボタンのハンドラ（新規追加）
 			 */
-			handleClearMediaCache: function () {
-				const $button = $("#esp-clear-media-cache");
-				const $statusContainer = $("#esp-clear-media-cache-status");
-				let G_i18n = espAdminData.i18n;
+                        handleClearMediaCache: function () {
+                                const $button = $("#esp-clear-media-cache");
+                                const $statusContainer = $("#esp-clear-media-cache-status");
+                                let G_i18n = espAdminData.i18n;
 
 				if ($button.prop("disabled")) {
 					return;
@@ -640,9 +644,98 @@
 								"</div>"
 						);
 					},
-				});
-			},
-		}; // ESP_Admin オブジェクトここまで
+                                });
+                        },
+
+                        /**
+                         * 「.htaccessルール再設定」ボタンのハンドラ
+                         */
+                        handleResetHtaccessRules: function () {
+                                const $button = $("#esp-reset-htaccess-rules");
+                                const $statusContainer = $("#esp-reset-htaccess-status");
+                                const i18n = espAdminData.i18n;
+
+                                if ($button.prop("disabled")) {
+                                        return;
+                                }
+
+                                const confirmReset = window.confirm(
+                                        i18n.confirmResetHtaccess ||
+                                                ".htaccessルールを再設定します。よろしいですか？"
+                                );
+                                if (!confirmReset) return;
+
+                                const defaultLabel = i18n.resetHtaccessButton || ".htaccessのルールを再設定する";
+                                const renderNotice = function (type, message) {
+                                        // 管理画面通知スタイルを活用
+                                        $statusContainer.html(
+                                                '<div class="notice ' +
+                                                        type +
+                                                        ' inline" style="margin: 5px 0; padding: 10px;">' +
+                                                        "<p>" +
+                                                        message +
+                                                        "</p>" +
+                                                        "</div>"
+                                        );
+                                };
+
+                                // スピナー表示で処理中を明示
+                                $button.prop("disabled", true).text(i18n.resettingHtaccess || "再設定中...");
+                                $statusContainer
+                                        .html(
+                                                '<span class="spinner is-active" style="float: none; margin: 0;"></span>'
+                                        )
+                                        .removeClass("notice-success notice-error notice-warning");
+
+                                $.ajax({
+                                        url: ajaxurl,
+                                        type: "POST",
+                                        data: {
+                                                action: "esp_reset_htaccess_rules",
+                                                nonce: espAdminData.resetHtaccessNonce,
+                                        },
+                                        success: function (response) {
+                                                $button.prop("disabled", false).text(defaultLabel);
+
+                                                if (response.success) {
+                                                        renderNotice(
+                                                                "notice-success",
+                                                                response.data && response.data.message
+                                                                        ? response.data.message
+                                                                        : i18n.resetHtaccessSuccess ||
+                                                                                  ".htaccessのルールを再設定しました。"
+                                                        );
+
+                                                        setTimeout(function () {
+                                                                $statusContainer.fadeOut("slow", function () {
+                                                                        $statusContainer.empty().show();
+                                                                });
+                                                        }, 3000);
+                                                        return;
+                                                }
+
+                                                const errorMessage =
+                                                        response.data && response.data.message
+                                                                ? response.data.message
+                                                                : i18n.resetHtaccessError ||
+                                                                  ".htaccessの再設定中にエラーが発生しました。";
+                                                renderNotice("notice-error", errorMessage);
+                                        },
+                                        error: function (jqXHR, textStatus, errorThrown) {
+                                                $button.prop("disabled", false).text(defaultLabel);
+                                                console.error(
+                                                        ".htaccess reset error:",
+                                                        textStatus,
+                                                        errorThrown
+                                                );
+                                                renderNotice(
+                                                        "notice-error",
+                                                        (i18n.ajaxError || "AJAXリクエストに失敗しました: ") + textStatus
+                                                );
+                                        },
+                                });
+                        },
+                }; // ESP_Admin オブジェクトここまで
 
 		// 初期化実行
 		ESP_Admin.init();

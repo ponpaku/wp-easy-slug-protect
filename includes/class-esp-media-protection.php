@@ -86,6 +86,7 @@ class ESP_Media_Protection {
 
             // AJAX ハンドラーの登録
             add_action('wp_ajax_esp_clear_media_cache', [$this, 'ajax_clear_media_cache']);
+            add_action('wp_ajax_esp_reset_htaccess_rules', [$this, 'ajax_reset_htaccess_rules']);
 
             $this->auth = new ESP_Auth();
             $this->cookie = ESP_Cookie::get_instance();
@@ -215,6 +216,42 @@ class ESP_Media_Protection {
         $this->regenerate_media_cache();
 
         wp_send_json_success(['message' => __('メディア保護キャッシュをクリアしました。', ESP_Config::TEXT_DOMAIN)]);
+    }
+
+    /**
+     * AJAXハンドラ: .htaccessルールを再設定
+     */
+    public function ajax_reset_htaccess_rules() {
+        check_ajax_referer('esp_reset_htaccess_nonce', 'nonce');
+
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(['message' => __('権限がありません。', ESP_Config::TEXT_DOMAIN)], 403);
+        }
+
+        if (!$this->is_apache()) {
+            wp_send_json_error([
+                'message' => __('この機能はApacheまたはLiteSpeed環境でのみ利用できます。', ESP_Config::TEXT_DOMAIN)
+            ], 400);
+        }
+
+        // 実際の書き込み結果を取得（WP_Errorの可能性あり）
+        $result = $this->update_htaccess();
+
+        if ($result === true) {
+            wp_send_json_success([
+                'message' => __('.htaccessのルールを再設定しました。', ESP_Config::TEXT_DOMAIN)
+            ]);
+        }
+
+        if (is_wp_error($result)) {
+            wp_send_json_error([
+                'message' => $result->get_error_message()
+            ]);
+        }
+
+        wp_send_json_error([
+            'message' => __('.htaccessの再設定に失敗しました。書き込み権限を確認してください。', ESP_Config::TEXT_DOMAIN)
+        ]);
     }
 
     /*----- REST API フィルタリング -----*/
@@ -1096,31 +1133,67 @@ class ESP_Media_Protection {
      */
     public function update_htaccess() {
         if (!$this->is_apache()) {
-            return false;
+            return new WP_Error('esp_htaccess_unsupported', __('ApacheまたはLiteSpeed環境でのみ利用できます。', ESP_Config::TEXT_DOMAIN));
         }
-        
+
         $upload_dir = wp_upload_dir();
-        $htaccess_file = $upload_dir['basedir'] . '/.htaccess';
-        
-        // 既存の.htaccessを読み込み
-        $current_rules = file_exists($htaccess_file) ? file_get_contents($htaccess_file) : '';
-        
+
+        if (!empty($upload_dir['error'])) {
+            return new WP_Error('esp_htaccess_upload_dir', sprintf(__('アップロードディレクトリを取得できません: %s', ESP_Config::TEXT_DOMAIN), $upload_dir['error']));
+        }
+
+        $htaccess_file = trailingslashit($upload_dir['basedir']) . '.htaccess';
+
+        // 既存の.htaccessを読み込み（失敗した場合は空文字で継続）
+        $current_rules = '';
+        if (file_exists($htaccess_file)) {
+            $contents = file_get_contents($htaccess_file);
+            if ($contents === false) {
+                return new WP_Error('esp_htaccess_read_failed', __('既存の.htaccessを読み込めませんでした。ファイル権限を確認してください。', ESP_Config::TEXT_DOMAIN));
+            }
+            $current_rules = $contents;
+        }
+
         // ESP用のルールを定義
         $esp_rules = $this->get_htaccess_rules();
-        
+
         // 既存のESPルールを削除
         $pattern = '/# BEGIN ESP Media Protection.*?# END ESP Media Protection\s*/s';
         $current_rules = preg_replace($pattern, '', $current_rules);
-        
+
         // 保護が有効な場合は新しいルールを追加
-        if ($this->has_protected_media()) {
-            $new_rules = $esp_rules . "\n" . $current_rules;
-        } else {
-            $new_rules = $current_rules;
+        $new_rules = $this->has_protected_media() ? $esp_rules . "\n" . ltrim($current_rules) : ltrim($current_rules);
+
+        // WP_Filesystemを優先的に使用
+        if (!function_exists('WP_Filesystem')) {
+            require_once ABSPATH . 'wp-admin/includes/file.php';
         }
-        
-        // .htaccessを更新
-        return file_put_contents($htaccess_file, $new_rules) !== false;
+
+        global $wp_filesystem;
+
+        if (!is_object($wp_filesystem)) {
+            WP_Filesystem();
+        }
+
+        // 書き込み処理を共通化
+        $write_success = false;
+
+        if (is_object($wp_filesystem) && $wp_filesystem instanceof WP_Filesystem_Base) {
+            // WP_Filesystem経由で書き込み
+            $write_success = $wp_filesystem->put_contents($htaccess_file, $new_rules, FS_CHMOD_FILE);
+        }
+
+        if (!$write_success) {
+            // フォールバックで直接書き込み
+            $bytes = @file_put_contents($htaccess_file, $new_rules);
+            $write_success = ($bytes !== false);
+        }
+
+        if (!$write_success) {
+            return new WP_Error('esp_htaccess_write_failed', __('.htaccessを書き込めませんでした。ファイル/ディレクトリの権限を確認してください。', ESP_Config::TEXT_DOMAIN));
+        }
+
+        return true;
     }
 
     /**

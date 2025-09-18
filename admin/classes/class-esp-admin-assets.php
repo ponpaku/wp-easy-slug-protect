@@ -40,6 +40,11 @@ class ESP_Admin_Assets {
             'clearingMediaCache' => __('メディアキャッシュをクリア中...', $plugin_name),
             'clearMediaCacheButton' => __('メディア保護キャッシュをクリアする', $plugin_name),
             'clearMediaCacheError' => __('メディアキャッシュのクリア中にエラーが発生しました。', $plugin_name),
+            'confirmResetHtaccess' => __('.htaccessルールを再設定します。よろしいですか？', $plugin_name),
+            'resettingHtaccess' => __('再設定中...', $plugin_name),
+            'resetHtaccessButton' => __('.htaccessのルールを再設定する', $plugin_name),
+            'resetHtaccessSuccess' => __('.htaccessのルールを再設定しました。', $plugin_name),
+            'resetHtaccessError' => __('.htaccessの再設定中にエラーが発生しました。', $plugin_name),
             'ajaxError' => __('AJAXリクエストに失敗しました:', $plugin_name),
         );
     }
@@ -88,6 +93,7 @@ class ESP_Admin_Assets {
                 'regenerateNonce' => wp_create_nonce('esp_regenerate_permalinks_nonce'), // メタデータ再生成用Nonce
                 'clearCacheNonce' => wp_create_nonce('esp_clear_cache_nonce'),// キャッシュクリア用Nonce
                 'clearMediaCacheNonce' => wp_create_nonce('esp_clear_media_cache_nonce'),// メディア保護キャッシュ用
+                'resetHtaccessNonce' => wp_create_nonce('esp_reset_htaccess_nonce'),// .htaccessルール再設定用Nonce
                 'i18n' => $this::localize_data()
             )
         );
