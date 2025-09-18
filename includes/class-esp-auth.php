@@ -304,7 +304,7 @@ class ESP_Auth {
             }
 
             // バージョンが古いので失効させる
-            ESP_Message::set_message('warning', __('セキュリティ要件が更新されました。再度ログインしてください。', $this->text_domain));
+            ESP_Message::set_message('warning', __('パスワードが変更されました。再度ログインしてください。', $this->text_domain));
             $this->cookie->clear_remember_cookies_for_path($path_settings);
             $wpdb->delete(
                 $table,
