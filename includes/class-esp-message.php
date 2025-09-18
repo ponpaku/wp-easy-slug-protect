@@ -119,7 +119,7 @@ class ESP_Message {
         }
         
         // メッセージを取得したらトランジェントを削除（1回だけ表示）
-//         delete_transient(self::TRANSIENT_PREFIX . $id);
+        delete_transient(self::TRANSIENT_PREFIX . $id);
         
         // クッキーも削除（可能な場合）
         self::clear_cookie();
