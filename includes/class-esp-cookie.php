@@ -68,10 +68,13 @@ class ESP_Cookie {
      * @param string $path_id パスID
      * @param string $token トークン
      */
-    public function prepare_session_cookie($path_id, $token) {
+    public function prepare_session_cookie($path_id, $token, $expires = null) {
+        if ($expires === null) {
+            $expires = time() + DAY_IN_SECONDS;
+        }
         $this->pending_cookies['esp_auth_' . $path_id] = [
             'value' => $token,
-            'expires' => time() + DAY_IN_SECONDS
+            'expires' => $expires
         ];
     }
 

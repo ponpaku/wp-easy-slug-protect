@@ -108,9 +108,15 @@ class ESP_Auth {
         // ログイン成功時の処理
         $remember = isset($_POST['esp_remember']) && $_POST['esp_remember'];
         if ($remember) {
-            $this->set_remember_login($path_settings);
+            if (!$this->set_remember_login($path_settings)) {
+                ESP_Message::set_error(__('ログイン情報の保存に失敗しました。時間をおいて再度お試しください。', $this->text_domain));
+                return false;
+            }
         } else {
-            $this->set_cookie_login($path_settings);
+            if (!$this->set_cookie_login($path_settings)) {
+                ESP_Message::set_error(__('ログイン情報の保存に失敗しました。時間をおいて再度お試しください。', $this->text_domain));
+                return false;
+            }
         }
 
         return true;
@@ -121,11 +127,33 @@ class ESP_Auth {
      * Cookieベースのログイン情報を設定
      */
     private function set_cookie_login($path_settings) {
+        global $wpdb;
+
         $path_id = $path_settings['id'];
         $token = wp_generate_password(64, false);
-        
+        $token_hash = hash_hmac('sha256', $token, AUTH_SALT);
+        $expires = time() + DAY_IN_SECONDS;
+
+        $result = $wpdb->insert(
+            $wpdb->prefix . ESP_Config::DB_TABLES['session'],
+            array(
+                'path_id' => $path_id,
+                'token' => $token_hash,
+                'created' => current_time('mysql'),
+                'expires' => date('Y-m-d H:i:s', $expires)
+            ),
+            array('%s', '%s', '%s', '%s')
+        );
+
+        if ($result === false) {
+            error_log('ESP_Auth: Failed to store session token for path ' . $path_id);
+            return false;
+        }
+
         // Cookie設定を一時保存
-        $this->cookie->prepare_session_cookie($path_id, $token);
+        $this->cookie->prepare_session_cookie($path_id, $token, $expires);
+
+        return true;
     }
 
 
@@ -146,7 +174,7 @@ class ESP_Auth {
         $expires = time() + (DAY_IN_SECONDS * $remember_settings['time_frame']);
 
         // DBに保存
-        $wpdb->insert(
+        $result = $wpdb->insert(
             $wpdb->prefix . ESP_Config::DB_TABLES['remember'],
             array(
                 'path' => $path_settings['path'],
@@ -159,8 +187,15 @@ class ESP_Auth {
             array('%s', '%s', '%s', '%s', '%s', '%s')
         );
 
+        if ($result === false) {
+            error_log('ESP_Auth: Failed to store remember token for path ' . $path_settings['id']);
+            return false;
+        }
+
         // Cookie設定を準備（Cookieにはプレーンテキストのトークン）
         $this->cookie->prepare_remember_cookies($path_settings, $user_id, $token, $expires);
+
+        return true;
     }
 
 
@@ -174,13 +209,40 @@ class ESP_Auth {
         $path_id = $path_settings['id'];
         
         // Cookieトークンチェック
-        $cookie_token = $this->cookie->get_session_cookie($path_id);
-        if ($cookie_token) {
+        if ($this->check_session_login($path_settings)) {
             return true;
         }
 
         // 永続的ログインのチェック
         return $this->check_remember_login($path_settings);
+    }
+
+
+    /**
+     * 通常ログインのチェック
+     */
+    private function check_session_login($path_settings) {
+        global $wpdb;
+
+        $path_id = $path_settings['id'];
+        $cookie_token = $this->cookie->get_session_cookie($path_id);
+        if (!$cookie_token) {
+            return false;
+        }
+
+        $token_hash = hash_hmac('sha256', $cookie_token, AUTH_SALT);
+        $table = $wpdb->prefix . ESP_Config::DB_TABLES['session'];
+
+        $session = $wpdb->get_row($wpdb->prepare(
+            "SELECT path_id FROM $table WHERE token = %s AND expires > NOW()",
+            $token_hash
+        ));
+
+        if (!$session) {
+            return false;
+        }
+
+        return hash_equals($session->path_id, $path_id);
     }
 
  

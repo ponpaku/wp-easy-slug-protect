@@ -71,6 +71,7 @@ class ESP_Setup {
         if (class_exists('ESP_Security')) {
             ESP_Security::cron_cleanup_brute();
             ESP_Security::cron_cleanup_remember();
+            ESP_Security::cron_cleanup_sessions();
         }
     }
 
@@ -129,6 +130,7 @@ class ESP_Setup {
 
         $table_brute = $wpdb->prefix . ESP_Config::DB_TABLES['brute'];
         $table_remember = $wpdb->prefix . ESP_Config::DB_TABLES['remember'];
+        $table_session = $wpdb->prefix . ESP_Config::DB_TABLES['session'];
 
         // ブルートフォース対策用テーブル
         $sql1 = "CREATE TABLE IF NOT EXISTS `{$table_brute}` (
@@ -157,9 +159,23 @@ class ESP_Setup {
             KEY `path_id` (`path_id`)
         ) {$charset_collate};";
 
+        // 通常ログインセッション用テーブル
+        $sql3 = "CREATE TABLE IF NOT EXISTS `{$table_session}` (
+            `id` bigint(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+            `path_id` varchar(50) NOT NULL,
+            `token` varchar(64) NOT NULL,
+            `created` datetime NOT NULL,
+            `expires` datetime NOT NULL,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `token_unique` (`token`),
+            KEY `path_id` (`path_id`),
+            KEY `expires` (`expires`)
+        ) {$charset_collate};";
+
         require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
         dbDelta($sql1);
         dbDelta($sql2);
+        dbDelta($sql3);
 
         // エラーチェック
         if ($wpdb->last_error) {
@@ -211,6 +227,9 @@ class ESP_Setup {
     private function migrate_to_version($from, $to) {
         if ($from < 1 && $to >= 1) {
             $this->migrate_to_version_1();
+        }
+        if ($from < 2 && $to >= 2) {
+            $this->migrate_to_version_2();
         }
         // 将来的に処理をここに追加
     }
@@ -267,6 +286,32 @@ class ESP_Setup {
         
         // DBバージョンを更新
         update_option('esp_db_version', 1);
+    }
+
+    /**
+     * バージョン2へのマイグレーション（通常ログインセッションテーブルの作成）
+     */
+    private function migrate_to_version_2() {
+        global $wpdb;
+        $charset_collate = $wpdb->get_charset_collate();
+        $session_table = $wpdb->prefix . ESP_Config::DB_TABLES['session'];
+
+        $sql = "CREATE TABLE IF NOT EXISTS `{$session_table}` (
+            `id` bigint(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+            `path_id` varchar(50) NOT NULL,
+            `token` varchar(64) NOT NULL,
+            `created` datetime NOT NULL,
+            `expires` datetime NOT NULL,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `token_unique` (`token`),
+            KEY `path_id` (`path_id`),
+            KEY `expires` (`expires`)
+        ) {$charset_collate};";
+
+        require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+        dbDelta($sql);
+
+        update_option('esp_db_version', 2);
     }
 
 }

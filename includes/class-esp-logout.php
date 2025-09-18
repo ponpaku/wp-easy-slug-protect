@@ -153,6 +153,7 @@ class ESP_Logout {
         $path_id = $path_settings['id'];
         
         // DBデータのクリア
+        $session_token = $this->cookie->get_session_cookie($path_id);
         $cookie_data = $this->cookie->get_remember_cookies_for_path($path_settings);
         if ($cookie_data) {
             global $wpdb;
@@ -165,7 +166,19 @@ class ESP_Logout {
                 array('%s', '%s')
             );
         }
-        
+
+        if ($session_token) {
+            global $wpdb;
+            $wpdb->delete(
+                $wpdb->prefix . ESP_Config::DB_TABLES['session'],
+                array(
+                    'token' => hash_hmac('sha256', $session_token, AUTH_SALT),
+                    'path_id' => $path_id
+                ),
+                array('%s', '%s')
+            );
+        }
+
         // Cookieのクリア
         $this->cookie->clear_all_cookies_for_path($path_settings);
     }
