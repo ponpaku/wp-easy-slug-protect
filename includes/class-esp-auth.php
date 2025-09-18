@@ -42,14 +42,30 @@ class ESP_Auth {
         // CSRFトークンの生成
         $nonce = wp_create_nonce('esp_login_' . $path_settings['id']);
         
-        // エラーメッセージの取得（セッション不使用版）
-        $error = ESP_Message::get_error();
-        
+        // メッセージの取得（セッション不使用版）
+        $notice_data = ESP_Message::get_message();
+        $notice_message = null;
+        $notice_class = '';
+
+        if ($notice_data && !empty($notice_data['message'])) {
+            $notice_message = $notice_data['message'];
+            $notice_type = isset($notice_data['type']) ? $notice_data['type'] : '';
+
+            if ($notice_type === 'error') {
+                $notice_class = 'esp-error';
+            } else {
+                $notice_class = 'esp-notice';
+                if (!empty($notice_type)) {
+                    $notice_class .= ' esp-notice--' . sanitize_html_class($notice_type);
+                }
+            }
+        }
+
         ob_start();
         ?>
         <div class="esp-login-form">
-            <?php if ($error): ?>
-                <div class="esp-error"><?php echo esc_html($error); ?></div>
+            <?php if ($notice_message): ?>
+                <div class="<?php echo esc_attr($notice_class); ?>"><?php echo esc_html($notice_message); ?></div>
             <?php endif; ?>
 
             <form method="post" action="">
@@ -170,6 +186,7 @@ class ESP_Auth {
         // トークンハッシュ
         $token_hash = hash_hmac('sha256', $token, AUTH_SALT);
         
+        // 設定から有効期限を参照
         $remember_settings = ESP_Option::get_current_setting('remember');
         $expires = time() + (DAY_IN_SECONDS * $remember_settings['time_frame']);
 
@@ -179,12 +196,14 @@ class ESP_Auth {
             array(
                 'path' => $path_settings['path'],
                 'path_id' => $path_settings['id'],
+                // パスワードバージョンも保存
+                'password_version' => isset($path_settings['password_version']) ? intval($path_settings['password_version']) : 0,
                 'token' => $token_hash, // ハッシュ化されたトークンを保存
                 'user_id' => $user_id,
                 'created' => current_time('mysql'),
                 'expires' => date('Y-m-d H:i:s', $expires)
             ),
-            array('%s', '%s', '%s', '%s', '%s', '%s')
+            array('%s', '%s', '%d', '%s', '%s', '%s', '%s')
         );
 
         if ($result === false) {
@@ -275,8 +294,23 @@ class ESP_Auth {
         ));
 
         if ($login_info) {
-            $this->refresh_remember_login($path_settings, $login_info->id, $cookie_data['id'], $cookie_data['token']);
-            return true;
+            $current_version = isset($path_settings['password_version']) ? intval($path_settings['password_version']) : 0;
+            $token_version = isset($login_info->password_version) ? intval($login_info->password_version) : 0;
+
+            if ($current_version === $token_version) {
+                // 有効なトークンなので延長
+                $this->refresh_remember_login($path_settings, $login_info->id, $cookie_data['id'], $cookie_data['token']);
+                return true;
+            }
+
+            // バージョンが古いので失効させる
+            ESP_Message::set_message('warning', __('セキュリティ要件が更新されました。再度ログインしてください。', $this->text_domain));
+            $this->cookie->clear_remember_cookies_for_path($path_settings);
+            $wpdb->delete(
+                $table,
+                array('id' => $login_info->id),
+                array('%d')
+            );
         }
 
         return false;
@@ -293,6 +327,7 @@ class ESP_Auth {
     private function refresh_remember_login($path_settings, $id, $user_id, $token) {
         global $wpdb;
         
+        // 期限を再計算
         $remember_settings = ESP_Option::get_current_setting('remember');
         $expires = time() + (DAY_IN_SECONDS * $remember_settings['time_frame']);
 

@@ -72,6 +72,9 @@ class ESP_Sanitize {
             $hashed_password = '';
             $raw_password_for_mail = null;
             
+            // 既存バージョンを取得
+            $current_version = isset($existing_paths[$id]['password_version']) ? intval($existing_paths[$id]['password_version']) : 0;
+
             if (!empty($path['password'])) {
                 if ($this->is_hashed_password($path['password'])) {
                     // 既にハッシュ化済みの場合はそのまま使用
@@ -104,7 +107,8 @@ class ESP_Sanitize {
             // IDがない場合は新しく生成（新規追加の場合）
             if (empty($id) || $id === 'new') {
                 $id = 'path_' . uniqid();
-                
+                $current_version = 0;
+
                 // 新規パスの場合、同期的にメール送信
                 if ($raw_password_for_mail && $this->mail) {
                     $this->mail->notify_new_protected_path($normalized_path, $raw_password_for_mail);
@@ -116,12 +120,26 @@ class ESP_Sanitize {
                 }
             }
 
+            // パスワードバージョンを決定
+            $password_version = $current_version;
+            if ($raw_password_for_mail && isset($existing_paths[$id])) {
+                // パスワード変更時はバージョンを更新
+                $password_version = $current_version + 1;
+            } elseif (
+                isset($existing_paths[$id]['password']) &&
+                $existing_paths[$id]['password'] !== $hashed_password
+            ) {
+                // 差分があれば安全のため加算
+                $password_version = $current_version + 1;
+            }
+
             // サニタイズされたパス情報を準備
             $sanitized_path = array(
                 'id' => $id,
                 'path' => $normalized_path,
                 'login_page' => $login_page_id,
-                'password' => $hashed_password
+                'password' => $hashed_password,
+                'password_version' => max(0, $password_version)
             );
 
             $sanitized[$id] = $sanitized_path;
