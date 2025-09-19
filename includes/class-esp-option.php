@@ -17,7 +17,22 @@ class ESP_Option {
      */
     public static function get_current_setting($section) {
         $settings = self::get_all_settings();
-        return isset($settings[$section]) ? $settings[$section] : ESP_Config::OPTION_DEFAULTS[$section];
+        $defaults = isset(ESP_Config::OPTION_DEFAULTS[$section]) ? ESP_Config::OPTION_DEFAULTS[$section] : array();
+        if (!isset($settings[$section])) {
+            return $defaults;
+        }
+
+        $current = $settings[$section];
+
+        if (is_array($defaults)) {
+            if (!is_array($current)) {
+                $current = array();
+            }
+
+            return self::parse_args_deep($current, $defaults);
+        }
+
+        return $current;
     }
 
     /**
@@ -34,6 +49,30 @@ class ESP_Option {
         $settings = self::get_all_settings();
         $settings[$section] = $value;
         return self::update_settings($settings);
+    }
+
+    /**
+     * 配列を再帰的にマージし、デフォルト値を補完する
+     *
+     * @param array $args 現在の設定値
+     * @param array $defaults デフォルト値
+     * @return array マージ後の設定値
+     */
+    private static function parse_args_deep($args, $defaults) {
+        $args = (array) $args;
+        $defaults = (array) $defaults;
+
+        $result = $defaults;
+
+        foreach ($args as $key => $value) {
+            if (is_array($value) && isset($defaults[$key]) && is_array($defaults[$key])) {
+                $result[$key] = self::parse_args_deep($value, $defaults[$key]);
+            } else {
+                $result[$key] = $value;
+            }
+        }
+
+        return $result;
     }
 
 }

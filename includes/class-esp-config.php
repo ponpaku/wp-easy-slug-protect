@@ -31,6 +31,7 @@ class ESP_Config {
         ),
         'mail' => array(
             'enable_notifications' => true,
+            'include_password' => true,
             'notifications' => array(
                 'new_path' => true,
                 'password_change' => true,
