@@ -12,7 +12,56 @@ class ESP_Admin_Menu {
 
     public function __construct() {
         add_action('admin_menu', [$this, 'add_admin_menu']);
+        add_action('wp_dashboard_setup', [$this, 'register_dashboard_widget']);
         $this->settings = ESP_Settings::get_instance();
+    }
+
+    /**
+     * コアダッシュボードにログイン数ウィジェットを登録
+     */
+    public function register_dashboard_widget() {
+        if (!current_user_can('manage_options')) {
+            return;
+        }
+
+        wp_add_dashboard_widget(
+            'esp_login_counts',
+            __('Easy Slug Protect ログイン数', ESP_Config::TEXT_DOMAIN),
+            [$this, 'render_dashboard_widget']
+        );
+    }
+
+    /**
+     * コアダッシュボードに表示するログイン数ウィジェットを描画
+     */
+    public function render_dashboard_widget() {
+        $text_domain = ESP_Config::TEXT_DOMAIN;
+        $protected_paths = ESP_Option::get_current_setting('path');
+        $login_counts = $this->get_login_counts($protected_paths);
+
+        if (empty($login_counts)) {
+            echo '<p>' . esc_html__('表示できるログイン数がありません。保護パスを追加すると表示されます。', $text_domain) . '</p>';
+            return;
+        }
+
+        echo '<table class="widefat striped">';
+        echo '<thead><tr>';
+        echo '<th scope="col">' . esc_html__('パス', $text_domain) . '</th>';
+        echo '<th scope="col">' . esc_html__('セッションログイン', $text_domain) . '</th>';
+        echo '<th scope="col">' . esc_html__('ログイン保持', $text_domain) . '</th>';
+        echo '</tr></thead>';
+        echo '<tbody>';
+
+        foreach ($login_counts as $count_data) {
+            echo '<tr>';
+            echo '<td>' . esc_html($count_data['path']) . '</td>';
+            echo '<td>' . esc_html(number_format_i18n((int) $count_data['session'])) . '</td>';
+            echo '<td>' . esc_html(number_format_i18n((int) $count_data['remember'])) . '</td>';
+            echo '</tr>';
+        }
+
+        echo '</tbody>';
+        echo '</table>';
     }
 
     public function add_admin_menu() {
@@ -431,5 +480,69 @@ class ESP_Admin_Menu {
             </form>
         </div>
         <?php
+    }
+
+    /**
+     * 取得した保護パスごとのログイン数を返す
+     *
+     * @param array $protected_paths 保護パス設定
+     * @return array
+     */
+    private function get_login_counts($protected_paths) {
+        global $wpdb;
+
+        if (empty($protected_paths) || !is_array($protected_paths)) {
+            return array();
+        }
+
+        $counts = array();
+        foreach ($protected_paths as $path_id => $path_settings) {
+            if (!is_array($path_settings) || !isset($path_settings['path'])) {
+                continue;
+            }
+
+            $counts[$path_id] = array(
+                'path' => $path_settings['path'],
+                'session' => 0,
+                'remember' => 0,
+            );
+        }
+
+        if (empty($counts)) {
+            return array();
+        }
+
+        $session_table = $wpdb->prefix . ESP_Config::DB_TABLES['session'];
+        $remember_table = $wpdb->prefix . ESP_Config::DB_TABLES['remember'];
+
+        $session_results = $wpdb->get_results(
+            "SELECT path_id, COUNT(*) AS count FROM {$session_table} GROUP BY path_id",
+            ARRAY_A
+        );
+
+        if (!empty($session_results)) {
+            foreach ($session_results as $row) {
+                $path_id = isset($row['path_id']) ? $row['path_id'] : '';
+                if ($path_id !== '' && isset($counts[$path_id])) {
+                    $counts[$path_id]['session'] = (int) $row['count'];
+                }
+            }
+        }
+
+        $remember_results = $wpdb->get_results(
+            "SELECT path_id, COUNT(*) AS count FROM {$remember_table} GROUP BY path_id",
+            ARRAY_A
+        );
+
+        if (!empty($remember_results)) {
+            foreach ($remember_results as $row) {
+                $path_id = isset($row['path_id']) ? $row['path_id'] : '';
+                if ($path_id !== '' && isset($counts[$path_id])) {
+                    $counts[$path_id]['remember'] = (int) $row['count'];
+                }
+            }
+        }
+
+        return $counts;
     }
 }
