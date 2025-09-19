@@ -31,6 +31,7 @@ class ESP_Admin_Menu {
 
         // 現在の設定値を取得
         $protected_paths = ESP_Option::get_current_setting('path');
+        $login_counts = $this->get_login_counts($protected_paths);
         $bruteforce_settings = ESP_Option::get_current_setting('brute');
         $remember_settings = ESP_Option::get_current_setting('remember');
         $mail_settings =  ESP_Option::get_current_setting('mail');
@@ -85,6 +86,32 @@ class ESP_Admin_Menu {
                         <?php _e('path="" : ログアウトするパスを指定できます。（未設定の場合ボタンが配置されているパス）', $text_domain); ?>
                     </li>
                 </ul>
+            </div>
+
+            <div class="esp-section">
+                <h2><?php _e('ログイン数', $text_domain); ?></h2>
+                <?php if (!empty($login_counts)) : ?>
+                    <table class="widefat striped">
+                        <thead>
+                            <tr>
+                                <th scope="col"><?php _e('パス', $text_domain); ?></th>
+                                <th scope="col"><?php _e('セッションログイン', $text_domain); ?></th>
+                                <th scope="col"><?php _e('ログイン保持', $text_domain); ?></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php foreach ($login_counts as $path_id => $count_data) : ?>
+                                <tr>
+                                    <td><?php echo esc_html($count_data['path']); ?></td>
+                                    <td><?php echo esc_html(number_format_i18n((int) $count_data['session'])); ?></td>
+                                    <td><?php echo esc_html(number_format_i18n((int) $count_data['remember'])); ?></td>
+                                </tr>
+                            <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                <?php else : ?>
+                    <p><?php _e('表示できるログイン数がありません。保護パスを追加すると表示されます。', $text_domain); ?></p>
+                <?php endif; ?>
             </div>
 
             <form method="post" action="options.php" id="esp-settings-form">
@@ -431,5 +458,69 @@ class ESP_Admin_Menu {
             </form>
         </div>
         <?php
+    }
+
+    /**
+     * 取得した保護パスごとのログイン数を返す
+     *
+     * @param array $protected_paths 保護パス設定
+     * @return array
+     */
+    private function get_login_counts($protected_paths) {
+        global $wpdb;
+
+        if (empty($protected_paths) || !is_array($protected_paths)) {
+            return array();
+        }
+
+        $counts = array();
+        foreach ($protected_paths as $path_id => $path_settings) {
+            if (!is_array($path_settings) || !isset($path_settings['path'])) {
+                continue;
+            }
+
+            $counts[$path_id] = array(
+                'path' => $path_settings['path'],
+                'session' => 0,
+                'remember' => 0,
+            );
+        }
+
+        if (empty($counts)) {
+            return array();
+        }
+
+        $session_table = $wpdb->prefix . ESP_Config::DB_TABLES['session'];
+        $remember_table = $wpdb->prefix . ESP_Config::DB_TABLES['remember'];
+
+        $session_results = $wpdb->get_results(
+            "SELECT path_id, COUNT(*) AS count FROM {$session_table} GROUP BY path_id",
+            ARRAY_A
+        );
+
+        if (!empty($session_results)) {
+            foreach ($session_results as $row) {
+                $path_id = isset($row['path_id']) ? $row['path_id'] : '';
+                if ($path_id !== '' && isset($counts[$path_id])) {
+                    $counts[$path_id]['session'] = (int) $row['count'];
+                }
+            }
+        }
+
+        $remember_results = $wpdb->get_results(
+            "SELECT path_id, COUNT(*) AS count FROM {$remember_table} GROUP BY path_id",
+            ARRAY_A
+        );
+
+        if (!empty($remember_results)) {
+            foreach ($remember_results as $row) {
+                $path_id = isset($row['path_id']) ? $row['path_id'] : '';
+                if ($path_id !== '' && isset($counts[$path_id])) {
+                    $counts[$path_id]['remember'] = (int) $row['count'];
+                }
+            }
+        }
+
+        return $counts;
     }
 }
