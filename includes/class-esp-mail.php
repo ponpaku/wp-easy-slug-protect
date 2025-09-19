@@ -62,6 +62,16 @@ class ESP_Mail {
     }
 
     /**
+     * メールにパスワードを含めるかどうかを判定
+     *
+     * @return bool
+     */
+    private function should_include_password_in_email() {
+        $settings = ESP_Option::get_current_setting('mail');
+        return !empty($settings['include_password']);
+    }
+
+    /**
      * メール送信のラッパー関数
      * 
      * @param string $subject 件名
@@ -117,7 +127,12 @@ class ESP_Mail {
 
         $message = "新しい保護パスが追加されました。\n\n";
         $message .= "保護パス: {$path}\n";
-        $message .= "パスワード: {$password}\n\n";
+
+        if ($this->should_include_password_in_email()) {
+            $message .= "パスワード: {$password}\n\n";
+        } else {
+            $message .= "パスワードはこのメールには含まれていません。管理画面でご確認ください。\n\n";
+        }
         $message .= "このメールは " . home_url() . " より自動送信されています。";
 
         return $this->send_mail($subject, $message);
@@ -141,7 +156,12 @@ class ESP_Mail {
 
         $message = "保護パスのパスワードが変更されました。\n\n";
         $message .= "保護パス: {$path}\n";
-        $message .= "新しいパスワード: {$new_password}\n\n";
+
+        if ($this->should_include_password_in_email()) {
+            $message .= "新しいパスワード: {$new_password}\n\n";
+        } else {
+            $message .= "新しいパスワードはこのメールには含まれていません。管理画面でご確認ください。\n\n";
+        }
         $message .= "このメールは " . home_url() . " より自動送信されています。";
 
         return $this->send_mail($subject, $message);

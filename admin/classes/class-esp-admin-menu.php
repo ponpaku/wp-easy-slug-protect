@@ -285,7 +285,10 @@ class ESP_Admin_Menu {
                             <td>
                                 <fieldset class="esp-notification-items">
                                     <!-- デフォルトで通知項目配列が存在することを保証 -->
-                                    <?php $notifications = isset($mail_settings['notifications']) ? $mail_settings['notifications'] : array(); ?>
+                                    <?php
+                                        $notifications = isset($mail_settings['notifications']) ? $mail_settings['notifications'] : array();
+                                        $include_password = !empty($mail_settings['include_password']);
+                                    ?>
                                     
                                     <label <?php echo !$mail_settings['enable_notifications'] ? 'class="esp-disabled"' : ''; ?>>
                                         <input type="checkbox" 
@@ -338,6 +341,27 @@ class ESP_Admin_Menu {
                                 </fieldset>
                                 <p class="description">
                                     <?php _e('通知メールは管理者権限を持つすべてのユーザーに送信されます。', $text_domain); ?>
+                                </p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row">
+                                <label for="esp-include-password-in-email">
+                                    <?php _e('通知メールのパスワード', $text_domain); ?>
+                                </label>
+                            </th>
+                            <td>
+                                <label <?php echo !$mail_settings['enable_notifications'] ? 'class="esp-disabled"' : ''; ?>>
+                                    <input type="checkbox"
+                                        id="esp-include-password-in-email"
+                                        name="<?php echo $option_key; ?>[mail][include_password]"
+                                        value="1"
+                                        <?php checked($include_password); ?>
+                                        <?php disabled(!$mail_settings['enable_notifications']); ?>>
+                                    <?php _e('通知メールにパスワードを含める', $text_domain); ?>
+                                </label>
+                                <p class="description">
+                                    <?php _e('セキュリティ上の理由でパスワードをメールに含めたくない場合はチェックを外してください。', $text_domain); ?>
                                 </p>
                             </td>
                         </tr>

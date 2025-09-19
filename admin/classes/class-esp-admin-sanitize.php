@@ -210,6 +210,9 @@ class ESP_Sanitize {
             $sanitized_settings['notifications'][$key] = !empty($settings['notifications'][$key]) ? true : false;
         }
 
+        // パスワードをメールに含めるかどうか
+        $sanitized_settings['include_password'] = !empty($settings['include_password']) ? true : false;
+
         return $sanitized_settings;
     }
 }
