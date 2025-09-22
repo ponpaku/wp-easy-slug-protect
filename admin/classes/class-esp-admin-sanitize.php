@@ -41,10 +41,19 @@ class ESP_Sanitize {
         $login_pages = array();  // login_pageの重複チェック用
         $raw_passwords = array(); // 平文パスワード一時保存用
 
-        foreach ($paths as $id => $path) {
+        foreach ($paths as $_index => $path) {
             if (empty($path['path']) || empty($path['login_page'])) {
                 continue;
             }
+
+            $submitted_id = '';
+            if (isset($path['id'])) {
+                $submitted_id = sanitize_text_field($path['id']);
+            }
+
+            $is_existing = ($submitted_id !== '') && isset($existing_paths[$submitted_id]);
+            $current_id = $is_existing ? $submitted_id : 'path_' . uniqid();
+            $existing_path_data = $is_existing ? $existing_paths[$current_id] : null;
 
             // パスの正規化と重複チェック
             $normalized_path = '/' . trim(sanitize_text_field($path['path']), '/') . '/';
@@ -73,7 +82,7 @@ class ESP_Sanitize {
             $raw_password_for_mail = null;
             
             // 既存バージョンを取得
-            $current_version = isset($existing_paths[$id]['password_version']) ? intval($existing_paths[$id]['password_version']) : 0;
+            $current_version = $existing_path_data ? intval($existing_path_data['password_version']) : 0;
 
             if (!empty($path['password'])) {
                 if ($this->is_hashed_password($path['password'])) {
@@ -86,8 +95,8 @@ class ESP_Sanitize {
                 }
             } else {
                 // 既存のパスワードを維持
-                if (isset($existing_paths[$id]) && !empty($existing_paths[$id]['password'])) {
-                    $hashed_password = $existing_paths[$id]['password'];
+                if ($existing_path_data && !empty($existing_path_data['password'])) {
+                    $hashed_password = $existing_path_data['password'];
                 } else {
                     // 新規追加で既存のIDがないか、元々パスワードがない場合
                     foreach ($existing_paths as $existing_id => $existing_path) {
@@ -104,45 +113,39 @@ class ESP_Sanitize {
                 continue;
             }
 
-            // IDがない場合は新しく生成（新規追加の場合）
-            if (empty($id) || $id === 'new') {
-                $id = 'path_' . uniqid();
-                $current_version = 0;
-
-                // 新規パスの場合、同期的にメール送信
-                if ($raw_password_for_mail && $this->mail) {
-                    $this->mail->notify_new_protected_path($normalized_path, $raw_password_for_mail);
-                }
-            } else {
-                // 既存パスのパスワード変更の場合、同期的にメール送信
-                if ($raw_password_for_mail && $this->mail && isset($existing_paths[$id])) {
+            if ($raw_password_for_mail && $this->mail) {
+                if ($is_existing) {
                     $this->mail->notify_password_change($normalized_path, $raw_password_for_mail);
+                } else {
+                    $this->mail->notify_new_protected_path($normalized_path, $raw_password_for_mail);
                 }
             }
 
             // パスワードバージョンを決定
             $password_version = $current_version;
-            if ($raw_password_for_mail && isset($existing_paths[$id])) {
-                // パスワード変更時はバージョンを更新
-                $password_version = $current_version + 1;
-            } elseif (
-                isset($existing_paths[$id]['password']) &&
-                $existing_paths[$id]['password'] !== $hashed_password
-            ) {
-                // 差分があれば安全のため加算
-                $password_version = $current_version + 1;
+            if ($is_existing) {
+                if ($raw_password_for_mail) {
+                    // パスワード変更時はバージョンを更新
+                    $password_version = $current_version + 1;
+                } elseif (
+                    isset($existing_path_data['password']) &&
+                    $existing_path_data['password'] !== $hashed_password
+                ) {
+                    // 差分があれば安全のため加算
+                    $password_version = $current_version + 1;
+                }
             }
 
             // サニタイズされたパス情報を準備
             $sanitized_path = array(
-                'id' => $id,
+                'id' => $current_id,
                 'path' => $normalized_path,
                 'login_page' => $login_page_id,
                 'password' => $hashed_password,
                 'password_version' => max(0, $password_version)
             );
 
-            $sanitized[$id] = $sanitized_path;
+            $sanitized[$current_id] = $sanitized_path;
         }
         
         // passをメモリから削除
