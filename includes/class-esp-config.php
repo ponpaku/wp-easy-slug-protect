@@ -40,7 +40,7 @@ class ESP_Config {
                 'critical_error' => true
             )
         ),
-        'db_version' => 3 // DBバージョン
+        'db_version' => 4 // DBバージョン
 
     );
 

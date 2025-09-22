@@ -164,6 +164,7 @@ class ESP_Setup {
         $sql3 = "CREATE TABLE IF NOT EXISTS `{$table_session}` (
             `id` bigint(20) UNSIGNED NOT NULL AUTO_INCREMENT,
             `path_id` varchar(50) NOT NULL,
+            `password_version` int(10) UNSIGNED NOT NULL DEFAULT 0,
             `token` varchar(64) NOT NULL,
             `created` datetime NOT NULL,
             `expires` datetime NOT NULL,
@@ -235,6 +236,9 @@ class ESP_Setup {
         if ($from < 3 && $to >= 3) {
             $this->migrate_to_version_3();
         }
+        if ($from < 4 && $to >= 4) {
+            $this->migrate_to_version_4();
+        }
         // 将来的に処理をここに追加
     }
 
@@ -303,6 +307,7 @@ class ESP_Setup {
         $sql = "CREATE TABLE IF NOT EXISTS `{$session_table}` (
             `id` bigint(20) UNSIGNED NOT NULL AUTO_INCREMENT,
             `path_id` varchar(50) NOT NULL,
+            `password_version` int(10) UNSIGNED NOT NULL DEFAULT 0,
             `token` varchar(64) NOT NULL,
             `created` datetime NOT NULL,
             `expires` datetime NOT NULL,
@@ -353,6 +358,25 @@ class ESP_Setup {
         }
 
         update_option('esp_db_version', 3);
+    }
+
+    /**
+     * バージョン4へのマイグレーション（通常ログインセッションにpassword_version列を追加）
+     */
+    private function migrate_to_version_4() {
+        global $wpdb;
+
+        $session_table = $wpdb->prefix . ESP_Config::DB_TABLES['session'];
+        $column_exists = $wpdb->get_var($wpdb->prepare(
+            "SHOW COLUMNS FROM `{$session_table}` LIKE %s",
+            'password_version'
+        ));
+
+        if (!$column_exists) {
+            $wpdb->query("ALTER TABLE `{$session_table}` ADD COLUMN `password_version` int(10) UNSIGNED NOT NULL DEFAULT 0 AFTER `path_id`");
+        }
+
+        update_option('esp_db_version', 4);
     }
 
 }
