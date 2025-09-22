@@ -50,9 +50,10 @@
 			 */
 			addNewPath: function (e) {
 				e.preventDefault();
-				const pathId = "path_" + Date.now();
+				const newIndex = this.pathCount;
+                                this.pathCount += 1;
 				const template = `
-                <div class="esp-path-item" style="display: none;" data-path-id="${pathId}">
+                <div class="esp-path-item" style="display: none;">
                     <div class="esp-path-header">
                         <h3>${espAdminData.i18n.newProtectedPath}</h3>
                         <button type="button" class="button esp-remove-path">
@@ -63,14 +64,14 @@
                         <input type="hidden" 
                             name="${
 															espAdminData.optionKey
-														}[path][${pathId}][id]" 
-                            value="${pathId}">
+														}[path][${newIndex}][id]" 
+                            value="">
                         <p>
                             <label>${espAdminData.i18n.path}</label>
                             <input type="text" 
                                 name="${
 																	espAdminData.optionKey
-																}[path][${pathId}][path]" 
+																}[path][${newIndex}][path]" 
                                 class="esp-path-input regular-text"
                                 placeholder="/example/"
                                 required>
@@ -84,7 +85,7 @@
                                 <input type="password" 
                                     name="${
 																			espAdminData.optionKey
-																		}[path][${pathId}][password]" 
+																		}[path][${newIndex}][password]" 
                                     class="regular-text"
                                     required>
                                 <button type="button" class="button esp-toggle-password">
@@ -94,7 +95,7 @@
                         </p>
                         <p>
                             <label>${espAdminData.i18n.loginPage}</label>
-                            ${this.getPageSelectHTML(pathId)}
+                            ${this.getPageSelectHTML(newIndex)}
                             <span class="description">
                                 ${espAdminData.i18n.shortcodeNotice}
                             </span>
@@ -110,11 +111,11 @@
 
 			/**
 			 * ページ選択のセレクトボックスHTML生成
-			 * @param {string} pathId パスID
+			 * @param {number} index インデックス
 			 * @returns {string} セレクトボックスのHTML
 			 */
-			getPageSelectHTML: function (pathId) {
-				return `<select name="${espAdminData.optionKey}[path][${pathId}][login_page]" required>
+			getPageSelectHTML: function (index) {
+				return `<select name="${espAdminData.optionKey}[path][${index}][login_page]" required>
                 <option value="">${espAdminData.i18n.selectPage}</option>
                 ${espAdminData.pages_list}
                 </select>`;
