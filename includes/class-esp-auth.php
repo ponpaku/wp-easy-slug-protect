@@ -150,15 +150,18 @@ class ESP_Auth {
         $token_hash = hash_hmac('sha256', $token, AUTH_SALT);
         $expires = time() + DAY_IN_SECONDS;
 
+        $password_version = isset($path_settings['password_version']) ? intval($path_settings['password_version']) : 0;
+
         $result = $wpdb->insert(
             $wpdb->prefix . ESP_Config::DB_TABLES['session'],
             array(
                 'path_id' => $path_id,
+                'password_version' => $password_version,
                 'token' => $token_hash,
                 'created' => current_time('mysql'),
                 'expires' => date('Y-m-d H:i:s', $expires)
             ),
-            array('%s', '%s', '%s', '%s')
+            array('%s', '%d', '%s', '%s', '%s')
         );
 
         if ($result === false) {
@@ -253,7 +256,7 @@ class ESP_Auth {
         $table = $wpdb->prefix . ESP_Config::DB_TABLES['session'];
 
         $session = $wpdb->get_row($wpdb->prepare(
-            "SELECT path_id FROM $table WHERE token = %s AND expires > NOW()",
+            "SELECT id, path_id, password_version FROM $table WHERE token = %s AND expires > NOW()",
             $token_hash
         ));
 
@@ -261,7 +264,25 @@ class ESP_Auth {
             return false;
         }
 
-        return hash_equals($session->path_id, $path_id);
+        if (!hash_equals(strval($session->path_id), strval($path_id))) {
+            return false;
+        }
+
+        $current_version = isset($path_settings['password_version']) ? intval($path_settings['password_version']) : 0;
+        $token_version = isset($session->password_version) ? intval($session->password_version) : 0;
+
+        if ($current_version !== $token_version) {
+            ESP_Message::set_message('warning', __('パスワードが変更されました。再度ログインしてください。', $this->text_domain));
+            $this->cookie->clear_session_cookie($path_id);
+            $wpdb->delete(
+                $table,
+                array('id' => $session->id),
+                array('%d')
+            );
+            return false;
+        }
+
+        return true;
     }
 
  
