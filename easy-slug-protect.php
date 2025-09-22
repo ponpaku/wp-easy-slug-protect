@@ -72,12 +72,12 @@ class Easy_Slug_Protect {
      * プラグインの初期化
      */
     private function init() {
+        // バージョンチェックと更新は常に実行
+        $this->setup->check_plugin_version();
+
         if (is_admin()) {
             // 管理画面の初期化
             new ESP_Admin_page();
-
-            // バージョンチェックと更新
-            add_action('admin_init', [$this->setup, 'check_plugin_version']);
         } else {
             // コア機能の初期化
             $core = new ESP_Core();
