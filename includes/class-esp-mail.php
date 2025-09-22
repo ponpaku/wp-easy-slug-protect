@@ -131,7 +131,7 @@ class ESP_Mail {
         if ($this->should_include_password_in_email()) {
             $message .= "パスワード: {$password}\n\n";
         } else {
-            $message .= "パスワードはこのメールには含まれていません。管理画面でご確認ください。\n\n";
+            $message .= "設定によりパスワードはこのメールには含まれていません。\n\n";
         }
         $message .= "このメールは " . home_url() . " より自動送信されています。";
 
@@ -160,7 +160,7 @@ class ESP_Mail {
         if ($this->should_include_password_in_email()) {
             $message .= "新しいパスワード: {$new_password}\n\n";
         } else {
-            $message .= "新しいパスワードはこのメールには含まれていません。管理画面でご確認ください。\n\n";
+            $message .= "設定により新しいパスワードはこのメールには含まれていません。\n\n";
         }
         $message .= "このメールは " . home_url() . " より自動送信されています。";
 
