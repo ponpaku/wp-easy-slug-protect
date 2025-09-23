@@ -127,19 +127,12 @@ class ESP_Media_Deriver {
             $c_start = $file_size - 1;
             $c_end = $file_size - 1;
         } else {
-            $range_parts = explode('-', $range_orig);
-            if (!isset($range_parts[0]) || !is_numeric($range_parts[0])) {
-                header('HTTP/1.1 416 Requested Range Not Satisfiable');
-                if (function_exists('http_response_code')) {
-                    http_response_code(416);
-                }
-                header("Content-Range: bytes */$file_size");
-                return false;
-            }
+            $range_parts = explode('-', $range_orig, 2);
+            $start_part = isset($range_parts[0]) ? $range_parts[0] : '';
+            $end_part = isset($range_parts[1]) ? $range_parts[1] : '';
 
-            $c_start = (int) $range_parts[0];
-            if (isset($range_parts[1]) && $range_parts[1] !== '') {
-                if (!is_numeric($range_parts[1])) {
+            if ($start_part === '') {
+                if ($end_part === '' || !is_numeric($end_part)) {
                     header('HTTP/1.1 416 Requested Range Not Satisfiable');
                     if (function_exists('http_response_code')) {
                         http_response_code(416);
@@ -147,9 +140,44 @@ class ESP_Media_Deriver {
                     header("Content-Range: bytes */$file_size");
                     return false;
                 }
-                $c_end = (int) $range_parts[1];
-            } else {
+
+                $suffix_length = (int) $end_part;
+                if ($suffix_length < 1) {
+                    header('HTTP/1.1 416 Requested Range Not Satisfiable');
+                    if (function_exists('http_response_code')) {
+                        http_response_code(416);
+                    }
+                    header("Content-Range: bytes */$file_size");
+                    return false;
+                }
+
+                $suffix_length = min($suffix_length, $file_size);
+                $c_start = $file_size - $suffix_length;
                 $c_end = $file_size - 1;
+            } else {
+                if (!is_numeric($start_part)) {
+                    header('HTTP/1.1 416 Requested Range Not Satisfiable');
+                    if (function_exists('http_response_code')) {
+                        http_response_code(416);
+                    }
+                    header("Content-Range: bytes */$file_size");
+                    return false;
+                }
+
+                $c_start = (int) $start_part;
+                if ($end_part !== '') {
+                    if (!is_numeric($end_part)) {
+                        header('HTTP/1.1 416 Requested Range Not Satisfiable');
+                        if (function_exists('http_response_code')) {
+                            http_response_code(416);
+                        }
+                        header("Content-Range: bytes */$file_size");
+                        return false;
+                    }
+                    $c_end = (int) $end_part;
+                } else {
+                    $c_end = $file_size - 1;
+                }
             }
         }
 
