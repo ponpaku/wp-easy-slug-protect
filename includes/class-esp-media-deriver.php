@@ -159,6 +159,15 @@ class ESP_Media_Deriver {
 
                 // 要求バイト数がファイルサイズを超えないよう調整
                 $suffix_length = min($suffix_length, $file_size);
+                if ($file_size === 0 || $suffix_length === 0) {
+                    // ゼロバイトは満たせない
+                    header('HTTP/1.1 416 Requested Range Not Satisfiable');
+                    if (function_exists('http_response_code')) {
+                        http_response_code(416);
+                    }
+                    header("Content-Range: bytes */$file_size");
+                    return false;
+                }
                 $c_start = $file_size - $suffix_length;
                 $c_end = $file_size - 1;
             } else {
