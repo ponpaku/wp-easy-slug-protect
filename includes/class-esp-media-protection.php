@@ -19,6 +19,11 @@ class ESP_Media_Protection {
     private $cookie;
 
     /**
+     * @var ESP_Media_Deriver メディア配信用クラス
+     */
+    private $deriver;
+
+    /**
      * @var string メディア保護用メタキー
      */
     const META_KEY_PROTECTED_PATH = '_esp_media_protected_path_id';
@@ -60,6 +65,7 @@ class ESP_Media_Protection {
      * コンストラクタ
      */
     public function __construct() {
+        $this->deriver = new ESP_Media_Deriver();
         $this->init();
     }
 
@@ -537,14 +543,14 @@ class ESP_Media_Protection {
 
         // 管理画面またはアップロード権限者はスキップ
         if (is_admin() || current_user_can('upload_files')) {
-            $this->deliver_file($file_path);
+            $this->deliver_media($file_path);
             return;
         }
         
         // ファイル拡張子の確認
         $extension = strtolower(pathinfo($file_path, PATHINFO_EXTENSION));
         if (!in_array($extension, $this->protected_extensions, true)) {
-            $this->deliver_file($file_path);
+            $this->deliver_media($file_path);
             return;
         }
         
@@ -552,21 +558,21 @@ class ESP_Media_Protection {
         $attachment_id = $this->get_attachment_id_from_path($file_path);
         if (!$attachment_id) {
             // メディアライブラリに登録されていないファイルは通常配信
-            $this->deliver_file($file_path);
+            $this->deliver_media($file_path);
             return;
         }
         
         // 保護設定を確認
         $protected_path_id = get_post_meta($attachment_id, self::META_KEY_PROTECTED_PATH, true);
         if (empty($protected_path_id)) {
-            $this->deliver_file($file_path);
+            $this->deliver_media($file_path);
             return;
         }
         
         // 保護パス設定を取得
         $protected_paths = ESP_Option::get_current_setting('path');
         if (!isset($protected_paths[$protected_path_id])) {
-            $this->deliver_file($file_path);
+            $this->deliver_media($file_path);
             return;
         }
         
@@ -579,7 +585,24 @@ class ESP_Media_Protection {
         }
         
         // 認証済みの場合はファイルを配信
-        $this->deliver_file($file_path);
+        $this->deliver_media($file_path);
+    }
+
+    /**
+     * メディアファイルを配信（失敗時は404）
+     *
+     * @param string $file_path ファイルパス
+     */
+    private function deliver_media($file_path) {
+        if (!$this->deriver->deliver($file_path)) {
+            $status_code = function_exists('http_response_code') ? http_response_code() : null;
+
+            if (416 === $status_code) {
+                exit;
+            }
+
+            $this->send_404();
+        }
     }
 
     /**
@@ -700,275 +723,6 @@ class ESP_Media_Protection {
         
         // ESP_Cookieを使用してリダイレクト
         $this->cookie->do_redirect($login_url, false);
-    }
-
-    /**
-     * ファイルを配信
-     *
-     * @param string $file_path ファイルパス
-     */
-    private function deliver_file($file_path) {
-        // エラーハンドリングの改善
-        try {
-            // 現在のバッファレベルを記録
-            $initial_ob_level = ob_get_level();
-            
-            // ESP専用のバッファのみクリア（WordPressのバッファは維持）
-            // 通常WordPressは1-2レベルのバッファを使用
-            while (ob_get_level() > max(0, $initial_ob_level - 1)) {
-                ob_end_clean();
-            }
-            
-            // ヘッダーが既に送信されているかチェック
-            if (headers_sent($file, $line)) {
-                error_log("ESP: Headers already sent in $file on line $line");
-                return false;
-            }
-
-            $mime_type = wp_check_filetype($file_path);
-            $mime_type = $mime_type['type'] ?: 'application/octet-stream';
-            
-            // ファイルサイズ
-            $file_size = filesize($file_path);
-            
-            // Rangeヘッダーの処理（部分的なダウンロード対応）
-            $range = isset($_SERVER['HTTP_RANGE']) ? $_SERVER['HTTP_RANGE'] : '';
-            
-            if ($range) {
-                $this->deliver_file_with_range($file_path, $file_size, $mime_type, $range);
-            } else {
-                // 通常の配信
-                header('Content-Type: ' . $mime_type);
-                header('Content-Length: ' . $file_size);
-                
-                // インライン表示か添付ファイルとしてダウンロードかを判定
-                $disposition = $this->should_inline($mime_type) ? 'inline' : 'attachment';
-                header('Content-Disposition: ' . $disposition . '; filename="' . basename($file_path) . '"');
-                
-                // キャッシュヘッダー
-                $this->set_cache_headers($mime_type);
-                
-                // X-Sendfile/X-Accel-Redirectが利用可能な場合は使用
-                if ($this->is_x_sendfile_available()) {
-                    header('X-Sendfile: ' . $file_path);
-                } elseif ($this->is_x_accel_redirect_available()) {
-                    // Nginx用のX-Accel-Redirect
-                    $internal_path = $this->get_nginx_internal_path($file_path);
-                    if ($internal_path) {
-                        header('X-Accel-Redirect: ' . $internal_path);
-                    } else {
-                        // フォールバック: PHP経由でファイルを出力
-                        $this->readfile_chunked($file_path);
-                    }
-                } else {
-                    // PHP経由でファイルを出力
-                    $this->readfile_chunked($file_path);
-                }
-            }
-            
-            exit;
-        } catch (Exception $e) {
-            error_log("ESP: Exception in deliver_file: " . $e->getMessage());
-            wp_die(
-                __('ファイルの配信中に予期しないエラーが発生しました。', ESP_Config::TEXT_DOMAIN),
-                __('システムエラー', ESP_Config::TEXT_DOMAIN),
-                array('response' => 500)
-            );
-        }
-    }
-
-    /**
-    * ファイルをインライン表示すべきかどうかを判定
-    *
-    * @param string $mime_type MIMEタイプ
-    * @return bool インライン表示する場合true
-    */
-    private function should_inline($mime_type) {
-        $inline_types = [
-            'image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml',
-            'text/plain', 'text/html', 'text/css', 'application/javascript',
-            'application/pdf', 'video/mp4', 'audio/mpeg', 'audio/mp3'
-        ];
-        
-        return in_array($mime_type, $inline_types, true);
-    }
-
-    /**
-     * Range対応のファイル配信
-     *
-     * @param string $file_path ファイルパス
-     * @param int $file_size ファイルサイズ
-     * @param string $mime_type MIMEタイプ
-     * @param string $range Rangeヘッダー
-     */
-    private function deliver_file_with_range($file_path, $file_size, $mime_type, $range) {
-        list($size_unit, $range_orig) = explode('=', $range, 2);
-        
-        if ($size_unit != 'bytes') {
-            header('HTTP/1.1 416 Requested Range Not Satisfiable');
-            header("Content-Range: bytes */$file_size");
-            exit;
-        }
-        
-        // 複数範囲は非対応
-        if (strpos($range_orig, ',') !== false) {
-            header('HTTP/1.1 416 Requested Range Not Satisfiable');
-            header("Content-Range: bytes */$file_size");
-            exit;
-        }
-        
-        // 範囲を解析
-        if ($range_orig == '-') {
-            $c_start = $file_size - 1;
-            $c_end = $file_size - 1;
-        } else {
-            $range = explode('-', $range_orig);
-            $c_start = $range[0];
-            $c_end = (isset($range[1]) && is_numeric($range[1])) ? $range[1] : $file_size - 1;
-        }
-        
-        $c_start = max(0, min($c_start, $file_size - 1));
-        $c_end = max($c_start, min($c_end, $file_size - 1));
-        $length = $c_end - $c_start + 1;
-        
-        header('HTTP/1.1 206 Partial Content');
-        header('Content-Type: ' . $mime_type);
-        header('Content-Length: ' . $length);
-        header("Content-Range: bytes $c_start-$c_end/$file_size");
-        header('Accept-Ranges: bytes');
-        header('Content-Disposition: inline; filename="' . basename($file_path) . '"');
-        
-        $this->set_cache_headers($mime_type);
-        
-        // ファイルハンドルのリーク対策
-        $fp = @fopen($file_path, 'rb');
-        if ($fp === false) {
-            $this->send_404();
-            return;
-        }
-        
-        try {
-            fseek($fp, $c_start);
-            
-            $bytes_send = 0;
-            while (!feof($fp) && !connection_aborted() && ($bytes_send < $length)) {
-                $buffer = fread($fp, min(1024 * 16, $length - $bytes_send));
-                if ($buffer === false) {
-                    break;
-                }
-                echo $buffer;
-                flush();
-                $bytes_send += strlen($buffer);
-            }
-        } finally {
-            // finallyでファイルハンドルを確実にクローズ
-            fclose($fp);
-        }
-        
-        exit;
-    }
-
-    /**
-     * ファイルをチャンク単位で読み込んで出力
-     *
-     * @param string $file_path ファイルパス
-     * @param int $chunk_size チャンクサイズ
-     * @return bool 成功時true
-     */
-    private function readfile_chunked($file_path, $chunk_size = 1048576) {
-        $handle = fopen($file_path, 'rb');
-        if ($handle === false) {
-            return false;
-        }
-        
-        try {
-            while (!feof($handle)) {
-                $buffer = @fread($handle, $chunk_size);
-                if ($buffer === false) {
-                    return false;
-                }
-                echo $buffer;
-                
-                // 出力バッファをフラッシュ
-                if (ob_get_level() > 0) {
-                    ob_flush();
-                }
-                flush();
-                
-                if (connection_aborted()) {
-                    break;
-                }
-            }
-            return true;
-        } finally {
-            fclose($handle);
-        }
-    }
-
-    /**
-     * キャッシュヘッダーを設定
-     *
-     * @param string $mime_type MIMEタイプ
-     */
-    private function set_cache_headers($mime_type) {
-        // 画像やCSSなどの静的ファイルは長めのキャッシュ
-        if (strpos($mime_type, 'image/') === 0 || 
-            strpos($mime_type, 'text/css') === 0 ||
-            strpos($mime_type, 'application/javascript') === 0) {
-            header('Cache-Control: public, max-age=31536000');
-            header('Expires: ' . gmdate('D, d M Y H:i:s', time() + 31536000) . ' GMT');
-        } else {
-            // その他のファイルは短めのキャッシュ
-            header('Cache-Control: private, max-age=3600');
-            header('Expires: ' . gmdate('D, d M Y H:i:s', time() + 3600) . ' GMT');
-        }
-    }
-
-    /**
-     * X-Sendfileが利用可能か確認
-     *
-     * @return bool
-     */
-    private function is_x_sendfile_available() {
-        // Apache mod_xsendfile
-        if (function_exists('apache_get_modules') && in_array('mod_xsendfile', apache_get_modules())) {
-            return true;
-        }
-        
-        // Nginx X-Accel-Redirect（要設定確認）
-        // この判定は環境依存のため、実際にはオプション設定で制御する方が良い
-        
-        return false;
-    }
-
-    /**
-    * X-Accel-Redirect（Nginx）が利用可能か確認
-    *
-    * @return bool
-    */
-    private function is_x_accel_redirect_available() {
-        // Nginxの検出
-        $software = $_SERVER['SERVER_SOFTWARE'] ?? '';
-        return stripos($software, 'nginx') !== false;
-    }
-
-    
-    /**
-    * Nginx用の内部パスを取得
-    *
-    * @param string $file_path ファイルパス
-    * @return string|false 内部パス、取得できない場合はfalse
-    */
-    private function get_nginx_internal_path($file_path) {
-        // Nginxの内部リダイレクトパスを構築
-        // この設定はNginxの設定と合わせる必要があります
-        $upload_dir = wp_upload_dir();
-        if (strpos($file_path, $upload_dir['basedir']) === 0) {
-            $relative_path = str_replace($upload_dir['basedir'], '', $file_path);
-            // Nginxの内部ロケーション（例: /protected-uploads/）
-            return '/protected-uploads' . $relative_path;
-        }
-        return false;
     }
 
     /**
