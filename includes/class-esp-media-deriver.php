@@ -109,6 +109,15 @@ class ESP_Media_Deriver {
         // Rangeヘッダーを単位と値に分割
         list($size_unit, $range_orig) = explode('=', $range, 2);
 
+        if (!is_string($range_orig) || $range_orig === '') {
+            header('HTTP/1.1 416 Requested Range Not Satisfiable');
+            if (function_exists('http_response_code')) {
+                http_response_code(416);
+            }
+            header("Content-Range: bytes */$file_size");
+            return false;
+        }
+
         if ($size_unit !== 'bytes') {
             header('HTTP/1.1 416 Requested Range Not Satisfiable');
             if (function_exists('http_response_code')) {
