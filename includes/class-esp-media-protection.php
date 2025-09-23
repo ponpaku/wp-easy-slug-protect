@@ -595,7 +595,11 @@ class ESP_Media_Protection {
      */
     private function deliver_media($file_path) {
         if (!$this->deriver->deliver($file_path)) {
-            $this->send_404();
+            $status_code = function_exists('http_response_code') ? http_response_code() : null;
+
+            if ($status_code !== 416) {
+                $this->send_404();
+            }
         }
     }
 

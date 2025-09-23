@@ -107,12 +107,18 @@ class ESP_Media_Deriver {
 
         if ($size_unit !== 'bytes') {
             header('HTTP/1.1 416 Requested Range Not Satisfiable');
+            if (function_exists('http_response_code')) {
+                http_response_code(416);
+            }
             header("Content-Range: bytes */$file_size");
             return false;
         }
 
         if (strpos($range_orig, ',') !== false) {
             header('HTTP/1.1 416 Requested Range Not Satisfiable');
+            if (function_exists('http_response_code')) {
+                http_response_code(416);
+            }
             header("Content-Range: bytes */$file_size");
             return false;
         }
@@ -124,6 +130,9 @@ class ESP_Media_Deriver {
             $range_parts = explode('-', $range_orig);
             if (!isset($range_parts[0]) || !is_numeric($range_parts[0])) {
                 header('HTTP/1.1 416 Requested Range Not Satisfiable');
+                if (function_exists('http_response_code')) {
+                    http_response_code(416);
+                }
                 header("Content-Range: bytes */$file_size");
                 return false;
             }
@@ -132,6 +141,9 @@ class ESP_Media_Deriver {
             if (isset($range_parts[1]) && $range_parts[1] !== '') {
                 if (!is_numeric($range_parts[1])) {
                     header('HTTP/1.1 416 Requested Range Not Satisfiable');
+                    if (function_exists('http_response_code')) {
+                        http_response_code(416);
+                    }
                     header("Content-Range: bytes */$file_size");
                     return false;
                 }
@@ -147,11 +159,17 @@ class ESP_Media_Deriver {
 
         if ($length < 1) {
             header('HTTP/1.1 416 Requested Range Not Satisfiable');
+            if (function_exists('http_response_code')) {
+                http_response_code(416);
+            }
             header("Content-Range: bytes */$file_size");
             return false;
         }
 
         header('HTTP/1.1 206 Partial Content');
+        if (function_exists('http_response_code')) {
+            http_response_code(206);
+        }
         header('Content-Type: ' . $mime_type);
         header('Content-Length: ' . $length);
         header("Content-Range: bytes $c_start-$c_end/$file_size");
