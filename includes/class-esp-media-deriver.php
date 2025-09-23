@@ -27,6 +27,7 @@ class ESP_Media_Deriver {
                 return false;
             }
 
+            // 既存のバッファ状態を記録
             $initial_ob_level = ob_get_level();
             while (ob_get_level() > max(0, $initial_ob_level - 1)) {
                 ob_end_clean();
@@ -64,6 +65,7 @@ class ESP_Media_Deriver {
             $this->set_cache_headers($mime_type);
 
             if ($this->is_x_sendfile_available()) {
+                // サーバー側の高速転送機能が使える場合
                 header('X-Sendfile: ' . $file_path);
                 exit;
             }
@@ -71,6 +73,7 @@ class ESP_Media_Deriver {
             if ($this->is_x_accel_redirect_available()) {
                 $internal_path = $this->get_nginx_internal_path($file_path);
                 if ($internal_path) {
+                    // Nginxの内部リダイレクトで処理を委譲
                     header('X-Accel-Redirect: ' . $internal_path);
                     exit;
                 }
@@ -103,6 +106,7 @@ class ESP_Media_Deriver {
      * @return bool 成功時true
      */
     private function deliver_with_range($file_path, $file_size, $mime_type, $range) {
+        // Rangeヘッダーを単位と値に分割
         list($size_unit, $range_orig) = explode('=', $range, 2);
 
         if ($size_unit !== 'bytes') {
@@ -127,6 +131,7 @@ class ESP_Media_Deriver {
             $c_start = $file_size - 1;
             $c_end = $file_size - 1;
         } else {
+            // 範囲指定の開始・終了を抽出
             $range_parts = explode('-', $range_orig, 2);
             $start_part = isset($range_parts[0]) ? $range_parts[0] : '';
             $end_part = isset($range_parts[1]) ? $range_parts[1] : '';
@@ -151,6 +156,7 @@ class ESP_Media_Deriver {
                     return false;
                 }
 
+                // 要求バイト数がファイルサイズを超えないよう調整
                 $suffix_length = min($suffix_length, $file_size);
                 $c_start = $file_size - $suffix_length;
                 $c_end = $file_size - 1;
@@ -181,6 +187,7 @@ class ESP_Media_Deriver {
             }
         }
 
+        // 範囲がファイルサイズの内側に収まるよう補正
         $c_start = max(0, min($c_start, $file_size - 1));
         $c_end = max($c_start, min($c_end, $file_size - 1));
         $length = $c_end - $c_start + 1;
@@ -252,6 +259,7 @@ class ESP_Media_Deriver {
                 if ($buffer === false) {
                     return false;
                 }
+                // チャンクごとにブラウザへ出力
                 echo $buffer;
 
                 if (ob_get_level() > 0) {
