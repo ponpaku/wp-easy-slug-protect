@@ -128,6 +128,7 @@ class ESP_Media_Deriver {
         }
 
         if ($range_orig === '-') {
+            // "-"のみの要求は末尾1バイトを指す
             $c_start = $file_size - 1;
             $c_end = $file_size - 1;
         } else {
