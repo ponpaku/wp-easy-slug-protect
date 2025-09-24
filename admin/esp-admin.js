@@ -16,12 +16,16 @@
 			},
 
 			// イベントのバインド
-			bindEvents: function () {
-				$("#esp-add-path").on("click", this.addNewPath.bind(this));
-				$(document).on("click", ".esp-remove-path", this.removePath.bind(this));
-				this.setupPasswordToggle();
-				this.setupMailNotifications();
-			},
+                        bindEvents: function () {
+                                $("#esp-add-path").on("click", this.addNewPath.bind(this));
+                                $(document).on("click", ".esp-remove-path", this.removePath.bind(this));
+                                this.setupPasswordToggle();
+                                this.setupMailNotifications();
+                                $("#esp-media-delivery-method").on(
+                                        "change",
+                                        this.markFormAsUnsaved.bind(this)
+                                );
+                        },
 
 			// ツールボタン用のイベントバインド
 			bindToolButtons: function () {
@@ -42,7 +46,11 @@
                                         "click",
                                         this.handleResetHtaccessRules.bind(this)
                                 );
-			},
+                                $("#esp-test-media-delivery").on(
+                                        "click",
+                                        this.handleTestMediaDelivery.bind(this)
+                                );
+                        },
 
 			/**
 			 * 新しい保護パスの追加
@@ -337,9 +345,13 @@
 			/**
 			 * フォームを未保存状態としてマーク
 			 */
-			markFormAsUnsaved: function () {
-				$("#esp-settings-form").trigger("change");
-			},
+                        markFormAsUnsaved: function () {
+                                $("#esp-settings-form").trigger("change");
+                        },
+
+                        escapeHtml: function (value) {
+                                return $("<div>").text(value == null ? "" : value).html();
+                        },
 
 			/**
 			 * 「パーマリンクパス情報 再生成」ボタンのハンドラ
@@ -736,9 +748,69 @@
                                         },
                                 });
                         },
+
+                        /**
+                         * 「配信方法をテストする」ボタンのハンドラ
+                         */
+                        handleTestMediaDelivery: function () {
+                                const $button = $("#esp-test-media-delivery");
+                                const $statusContainer = $("#esp-test-media-delivery-status");
+                                const i18n = espAdminData.i18n;
+
+                                if ($button.prop("disabled")) {
+                                        return;
+                                }
+
+                                const defaultLabel = i18n.testMediaDeliveryButton || "配信方法をテストする";
+
+                                $button.prop("disabled", true).text(i18n.testingMediaDelivery || "テスト中...");
+                                $statusContainer
+                                        .html('<span class="spinner is-active" style="float: none; margin: 0;"></span>')
+                                        .removeClass("notice-success notice-error notice-warning");
+
+                                $.ajax({
+                                        url: ajaxurl,
+                                        type: "POST",
+                                        data: {
+                                                action: "esp_test_media_delivery",
+                                                nonce: espAdminData.testMediaDeliveryNonce,
+                                        },
+                                        success: function (response) {
+                                                $button.prop("disabled", false).text(defaultLabel);
+
+                                                if (response.success && response.data && response.data.html) {
+                                                        $statusContainer.html(response.data.html);
+                                                        return;
+                                                }
+
+                                                const message =
+                                                        (response.data && response.data.message) ||
+                                                        i18n.testMediaDeliveryError ||
+                                                        "配信テストでエラーが発生しました。";
+
+                                                $statusContainer.html(
+                                                        '<div class="notice notice-error inline" style="margin: 5px 0; padding: 10px;"><p>' +
+                                                                ESP_Admin.escapeHtml(message) +
+                                                                "</p></div>"
+                                                );
+                                        },
+                                        error: function (jqXHR, textStatus) {
+                                                $button.prop("disabled", false).text(defaultLabel);
+
+                                                const message =
+                                                        (i18n.ajaxError || "AJAXリクエストに失敗しました: ") + textStatus;
+
+                                                $statusContainer.html(
+                                                        '<div class="notice notice-error inline" style="margin: 5px 0; padding: 10px;"><p>' +
+                                                                ESP_Admin.escapeHtml(message) +
+                                                                "</p></div>"
+                                                );
+                                        },
+                                });
+                        },
                 }; // ESP_Admin オブジェクトここまで
 
-		// 初期化実行
-		ESP_Admin.init();
+                // 初期化実行
+                ESP_Admin.init();
 	});
 })(jQuery);

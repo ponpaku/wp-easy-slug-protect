@@ -83,6 +83,8 @@ class ESP_Admin_Menu {
         $bruteforce_settings = ESP_Option::get_current_setting('brute');
         $remember_settings = ESP_Option::get_current_setting('remember');
         $mail_settings =  ESP_Option::get_current_setting('mail');
+        $media_settings = ESP_Option::get_current_setting('media');
+        $delivery_method = isset($media_settings['delivery_method']) ? $media_settings['delivery_method'] : 'auto';
 
         $text_domain = ESP_Config::TEXT_DOMAIN;
         $option_key = ESP_Config::OPTION_KEY;
@@ -412,6 +414,49 @@ class ESP_Admin_Menu {
                                 <p class="description">
                                     <?php _e('セキュリティ上の理由でパスワードをメールに含めたくない場合はチェックを外してください。', $text_domain); ?>
                                 </p>
+                            </td>
+                        </tr>
+                    </table>
+                </div>
+
+                <div class="esp-section">
+                    <h2><?php _e('メディア配信設定', $text_domain); ?></h2>
+                    <table class="form-table">
+                        <tr>
+                            <th scope="row">
+                                <label for="esp-media-delivery-method"><?php _e('配信方法', $text_domain); ?></label>
+                            </th>
+                            <td>
+                                <select name="<?php echo $option_key; ?>[media][delivery_method]" id="esp-media-delivery-method">
+                                    <option value="auto" <?php selected($delivery_method, 'auto'); ?>><?php _e('自動判定', $text_domain); ?></option>
+                                    <option value="x-sendfile" <?php selected($delivery_method, 'x-sendfile'); ?>><?php _e('X-Sendfile (Apache/mod_xsendfile)', $text_domain); ?></option>
+                                    <option value="x-litespeed-location" <?php selected($delivery_method, 'x-litespeed-location'); ?>><?php _e('X-LiteSpeed-Location (LiteSpeed)', $text_domain); ?></option>
+                                    <option value="x-accel-redirect" <?php selected($delivery_method, 'x-accel-redirect'); ?>><?php _e('X-Accel-Redirect (Nginx)', $text_domain); ?></option>
+                                </select>
+                                <p class="description">
+                                    <?php _e('各方式の概要:', $text_domain); ?>
+                                </p>
+                                <ul class="description">
+                                    <li><strong><?php _e('自動判定', $text_domain); ?></strong> — <?php _e('サーバー環境を検出し、利用可能な方式から最適なものを自動選択します。', $text_domain); ?></li>
+                                    <li><strong><?php _e('X-Sendfile', $text_domain); ?></strong> — <?php _e('Apache＋mod_xsendfile でファイルを直接配信します。', $text_domain); ?></li>
+                                    <li><strong><?php _e('X-LiteSpeed-Location', $text_domain); ?></strong> — <?php _e('LiteSpeed サーバーの内部 URI を利用して配信します。', $text_domain); ?></li>
+                                    <li><strong><?php _e('X-Accel-Redirect', $text_domain); ?></strong> — <?php _e('Nginx の内部リダイレクト機能で PHP を介さずに配信します。', $text_domain); ?></li>
+                                </ul>
+                                <p class="description">
+                                    <?php _e('「自動判定」以外を選択すると、指定した方式を優先して使用します。', $text_domain); ?>
+                                </p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><?php _e('配信テスト', $text_domain); ?></th>
+                            <td>
+                                <button type="button" class="button button-secondary" id="esp-test-media-delivery">
+                                    <?php _e('配信方法をテストする', $text_domain); ?>
+                                </button>
+                                <p class="description">
+                                    <?php _e('現在の設定でどの配信方法が利用されるか確認します。', $text_domain); ?>
+                                </p>
+                                <div id="esp-test-media-delivery-status" style="margin-top: 5px;"></div>
                             </td>
                         </tr>
                     </table>

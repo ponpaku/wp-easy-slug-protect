@@ -218,4 +218,24 @@ class ESP_Sanitize {
 
         return $sanitized_settings;
     }
+
+    /**
+     * メディア配信設定のサニタイズ
+     */
+    public function sanitize_media_settings($settings) {
+        if (!is_array($settings)) {
+            $settings = array();
+        }
+
+        $allowed = array('auto', 'x-sendfile', 'x-litespeed-location', 'x-accel-redirect');
+        $method = isset($settings['delivery_method']) ? sanitize_text_field($settings['delivery_method']) : 'auto';
+
+        if (!in_array($method, $allowed, true)) {
+            $method = 'auto';
+        }
+
+        return array(
+            'delivery_method' => $method,
+        );
+    }
 }

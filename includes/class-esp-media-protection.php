@@ -93,6 +93,7 @@ class ESP_Media_Protection {
             // AJAX ハンドラーの登録
             add_action('wp_ajax_esp_clear_media_cache', [$this, 'ajax_clear_media_cache']);
             add_action('wp_ajax_esp_reset_htaccess_rules', [$this, 'ajax_reset_htaccess_rules']);
+            add_action('wp_ajax_esp_test_media_delivery', [$this, 'ajax_test_media_delivery']);
 
             $this->auth = new ESP_Auth();
             $this->cookie = ESP_Cookie::get_instance();
@@ -257,6 +258,82 @@ class ESP_Media_Protection {
 
         wp_send_json_error([
             'message' => __('.htaccessの再設定に失敗しました。書き込み権限を確認してください。', ESP_Config::TEXT_DOMAIN)
+        ]);
+    }
+
+    /**
+     * AJAXハンドラ: 配信設定をテスト
+     */
+    public function ajax_test_media_delivery() {
+        check_ajax_referer('esp_test_media_delivery_nonce', 'nonce');
+
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(['message' => __('権限がありません。', ESP_Config::TEXT_DOMAIN)], 403);
+        }
+
+        $result = $this->deriver->run_delivery_diagnostics();
+        if (is_wp_error($result)) {
+            wp_send_json_error(['message' => $result->get_error_message()]);
+        }
+
+        $labels = ESP_Media_Deriver::get_delivery_method_labels();
+        $handler_map = array(
+            'apache' => 'x-sendfile',
+            'litespeed' => 'x-litespeed-location',
+            'nginx' => 'x-accel-redirect',
+            'php' => 'php',
+        );
+
+        $configured_label = isset($labels[$result['configured_method']])
+            ? $labels[$result['configured_method']]
+            : $result['configured_method'];
+        $resolved_key = isset($handler_map[$result['resolved_handler']])
+            ? $handler_map[$result['resolved_handler']]
+            : $result['resolved_handler'];
+        $resolved_label = isset($labels[$resolved_key]) ? $labels[$resolved_key] : $resolved_key;
+
+        $message_lines = array(
+            sprintf(
+                esc_html__('選択中の設定: %s', ESP_Config::TEXT_DOMAIN),
+                esc_html($configured_label)
+            ),
+            sprintf(
+                esc_html__('想定される配信方法: %s', ESP_Config::TEXT_DOMAIN),
+                esc_html($resolved_label)
+            ),
+        );
+
+        if (!empty($result['forced']) && $result['resolved_handler'] === 'php' && !empty($result['fallback_reason'])) {
+            $message_lines[] = esc_html__('選択した配信方法を利用できないためPHP配信へフォールバックします。', ESP_Config::TEXT_DOMAIN);
+        } elseif (!empty($result['warning']) && $result['warning'] === 'x_sendfile_unavailable') {
+            $message_lines[] = esc_html__('選択した配信方法のモジュールが検出できませんでした。サーバー設定をご確認ください。', ESP_Config::TEXT_DOMAIN);
+        }
+
+        $availability_items = array();
+        foreach ($result['available_methods'] as $key => $available) {
+            $label = isset($labels[$key]) ? $labels[$key] : $key;
+            $status_label = $available
+                ? esc_html__('利用可能', ESP_Config::TEXT_DOMAIN)
+                : esc_html__('利用不可', ESP_Config::TEXT_DOMAIN);
+            $availability_items[] = '<li>' . esc_html($label) . ': <strong>' . esc_html($status_label) . '</strong></li>';
+        }
+
+        $html  = '<div class="notice notice-info inline" style="margin: 5px 0; padding: 10px;">';
+        $html .= '<p>' . implode('<br>', $message_lines) . '</p>';
+        $html .= '<p>' . esc_html__('検出結果', ESP_Config::TEXT_DOMAIN) . ':</p>';
+        $html .= '<ul>' . implode('', $availability_items) . '</ul>';
+
+        if (!empty($result['resolved_path'])) {
+            $html .= '<p>' . sprintf(
+                esc_html__('送出ヘッダーで使用されるパス: %s', ESP_Config::TEXT_DOMAIN),
+                esc_html($result['resolved_path'])
+            ) . '</p>';
+        }
+
+        $html .= '</div>';
+
+        wp_send_json_success([
+            'html' => $html,
         ]);
     }
 
