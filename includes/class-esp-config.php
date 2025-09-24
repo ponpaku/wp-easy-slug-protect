@@ -40,6 +40,9 @@ class ESP_Config {
                 'critical_error' => true
             )
         ),
+        'media' => array(
+            'delivery_method' => 'auto'
+        ),
         'db_version' => 4 // DBバージョン
 
     );

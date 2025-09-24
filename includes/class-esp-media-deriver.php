@@ -106,7 +106,15 @@ class ESP_Media_Deriver {
      * @return array{type:string,path?:string}
      */
     private function determine_delivery_handler($file_path) {
+        $preferred_method = $this->get_configured_delivery_method();
+
+        if ($preferred_method !== 'auto') {
+            // 管理画面で強制指定された方法を優先
+            return $this->determine_forced_delivery_handler($file_path, $preferred_method);
+        }
+
         if ($this->is_x_sendfile_available()) {
+            // Apache系で利用できる場合
             return [
                 'type' => 'apache',
             ];
@@ -114,6 +122,7 @@ class ESP_Media_Deriver {
 
         $litespeed_path = $this->get_litespeed_internal_path($file_path);
         if ($litespeed_path !== false) {
+            // LiteSpeedに渡す内部パスが判明した場合
             return [
                 'type' => 'litespeed',
                 'path' => $litespeed_path,
@@ -123,6 +132,7 @@ class ESP_Media_Deriver {
         if ($this->is_x_accel_redirect_available()) {
             $internal_path = $this->get_nginx_internal_path($file_path);
             if ($internal_path !== false) {
+                // Nginxの内部パスが利用可能な場合
                 return [
                     'type' => 'nginx',
                     'path' => $internal_path,
@@ -130,9 +140,75 @@ class ESP_Media_Deriver {
             }
         }
 
+        // いずれにも該当しない場合はPHPで配信
         return [
             'type' => 'php',
         ];
+    }
+
+    /**
+     * 設定で指定された配信方法を優先的に適用
+     *
+     * @param string $file_path ファイルパス
+     * @param string $preferred_method 設定された配信方法
+     * @return array{type:string,path?:string}
+     */
+    private function determine_forced_delivery_handler($file_path, $preferred_method) {
+        switch ($preferred_method) {
+            case 'x_sendfile':
+                // Apache系サーバーでの配信を強制
+                return [
+                    'type' => 'apache',
+                ];
+            case 'litespeed':
+                $litespeed_path = $this->get_litespeed_internal_path($file_path);
+                if ($litespeed_path !== false) {
+                    // LiteSpeedの内部リダイレクトパスが取得できた場合
+                    return [
+                        'type' => 'litespeed',
+                        'path' => $litespeed_path,
+                    ];
+                }
+                error_log('ESP: LiteSpeed delivery path unavailable. Falling back to PHP delivery.');
+                break;
+            case 'x_accel_redirect':
+                $internal_path = $this->get_nginx_internal_path($file_path);
+                if ($internal_path !== false) {
+                    // Nginxの内部リダイレクトパスが取得できた場合
+                    return [
+                        'type' => 'nginx',
+                        'path' => $internal_path,
+                    ];
+                }
+                error_log('ESP: Nginx delivery path unavailable. Falling back to PHP delivery.');
+                break;
+            case 'php':
+                // PHP配信を明示的に指定
+                return [
+                    'type' => 'php',
+                ];
+        }
+
+        // 条件を満たさない場合はPHPにフォールバック
+        return [
+            'type' => 'php',
+        ];
+    }
+
+    /**
+     * メディア設定で選択された配信方法を取得
+     *
+     * @return string
+     */
+    private function get_configured_delivery_method() {
+        $media_settings = ESP_Option::get_current_setting('media');
+        if (is_array($media_settings) && isset($media_settings['delivery_method'])) {
+            // 保存された配信方法を利用
+            return $media_settings['delivery_method'];
+        }
+
+        // 保存が無い場合は自動判定
+        return 'auto';
     }
 
     /**

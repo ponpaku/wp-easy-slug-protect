@@ -107,6 +107,11 @@ class ESP_Settings {
             isset($input['mail']) ? $input['mail'] : ESP_Option::get_current_setting('mail')
         );
 
+        // メディア設定のサニタイズ
+        $sanitized['media'] = $this->sanitize->sanitize_media_settings(
+            isset($input['media']) ? $input['media'] : ESP_Option::get_current_setting('media')
+        );
+
         return $sanitized;
     }
 
