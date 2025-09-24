@@ -38,13 +38,31 @@ class ESP_Media_Deriver {
                 return false;
             }
 
-            $file_type = wp_check_filetype($file_path);
-            $mime_type = $file_type['type'] ?: 'application/octet-stream';
-
             $file_size = filesize($file_path);
             if ($file_size === false) {
                 return false;
             }
+
+            $delivery_method = $this->determine_delivery_handler($file_path);
+
+            // Webサーバー配信が可能な場合はヘッダー委譲のみで終了
+            if ($delivery_method['type'] !== 'php') {
+                switch ($delivery_method['type']) {
+                    case 'apache':
+                        header('X-Sendfile: ' . $file_path);
+                        break;
+                    case 'litespeed':
+                        header('X-LiteSpeed-Location: ' . $delivery_method['path']);
+                        break;
+                    case 'nginx':
+                        header('X-Accel-Redirect: ' . $delivery_method['path']);
+                        break;
+                }
+                exit;
+            }
+
+            $file_type = wp_check_filetype($file_path);
+            $mime_type = $file_type['type'] ?: 'application/octet-stream';
 
             $range = isset($_SERVER['HTTP_RANGE']) ? $_SERVER['HTTP_RANGE'] : '';
             if ($range) {
@@ -64,21 +82,6 @@ class ESP_Media_Deriver {
 
             $this->set_cache_headers($mime_type);
 
-            if ($this->is_x_sendfile_available()) {
-                // サーバー側の高速転送機能が使える場合
-                header('X-Sendfile: ' . $file_path);
-                exit;
-            }
-
-            if ($this->is_x_accel_redirect_available()) {
-                $internal_path = $this->get_nginx_internal_path($file_path);
-                if ($internal_path) {
-                    // Nginxの内部リダイレクトで処理を委譲
-                    header('X-Accel-Redirect: ' . $internal_path);
-                    exit;
-                }
-            }
-
             if (!$this->readfile_chunked($file_path)) {
                 return false;
             }
@@ -94,6 +97,42 @@ class ESP_Media_Deriver {
         }
 
         return true;
+    }
+
+    /**
+     * 配信方法を判定
+     *
+     * @param string $file_path ファイルパス
+     * @return array{type:string,path?:string}
+     */
+    private function determine_delivery_handler($file_path) {
+        if ($this->is_x_sendfile_available()) {
+            return [
+                'type' => 'apache',
+            ];
+        }
+
+        $litespeed_path = $this->get_litespeed_internal_path($file_path);
+        if ($litespeed_path !== false) {
+            return [
+                'type' => 'litespeed',
+                'path' => $litespeed_path,
+            ];
+        }
+
+        if ($this->is_x_accel_redirect_available()) {
+            $internal_path = $this->get_nginx_internal_path($file_path);
+            if ($internal_path !== false) {
+                return [
+                    'type' => 'nginx',
+                    'path' => $internal_path,
+                ];
+            }
+        }
+
+        return [
+            'type' => 'php',
+        ];
     }
 
     /**
@@ -330,6 +369,54 @@ class ESP_Media_Deriver {
     }
 
     /**
+     * LiteSpeedサーバーか判定
+     *
+     * @return bool
+     */
+    private function is_litespeed_server() {
+        $software = $_SERVER['SERVER_SOFTWARE'] ?? '';
+        return stripos($software, 'litespeed') !== false;
+    }
+
+    /**
+     * LiteSpeed内部パスを取得
+     *
+     * @param string $file_path ファイルパス
+     * @return string|false
+     */
+    private function get_litespeed_internal_path($file_path) {
+        if (!$this->is_litespeed_server()) {
+            return false;
+        }
+
+        $normalized_path = $this->normalize_path($file_path);
+
+        $document_root = $_SERVER['DOCUMENT_ROOT'] ?? '';
+        if ($document_root !== '') {
+            $normalized_root = rtrim($this->normalize_path($document_root), '/');
+            if ($normalized_root !== '' && strpos($normalized_path, $normalized_root) === 0) {
+                $relative = substr($normalized_path, strlen($normalized_root));
+                return '/' . ltrim($relative, '/');
+            }
+        }
+
+        $abs_path = rtrim($this->normalize_path(ABSPATH), '/');
+        if ($abs_path !== '' && strpos($normalized_path, $abs_path) === 0) {
+            $relative = substr($normalized_path, strlen($abs_path));
+            $home_path = parse_url(home_url('/'), PHP_URL_PATH);
+            if (!is_string($home_path)) {
+                $home_path = '/';
+            }
+            $base_path = rtrim($home_path, '/');
+            $base_path = $base_path === '' ? '' : $base_path;
+
+            return $base_path . '/' . ltrim($relative, '/');
+        }
+
+        return false;
+    }
+
+    /**
      * X-Sendfileが利用可能か判定
      *
      * @return bool
@@ -365,5 +452,19 @@ class ESP_Media_Deriver {
             return '/protected-uploads' . $relative_path;
         }
         return false;
+    }
+
+    /**
+     * パスを正規化
+     *
+     * @param string $path 対象パス
+     * @return string
+     */
+    private function normalize_path($path) {
+        if (function_exists('wp_normalize_path')) {
+            return wp_normalize_path($path);
+        }
+
+        return str_replace('\\', '/', $path);
     }
 }
