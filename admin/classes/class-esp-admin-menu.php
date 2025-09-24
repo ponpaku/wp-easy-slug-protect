@@ -425,6 +425,9 @@ class ESP_Admin_Menu {
                         <tr>
                             <th scope="row"><?php _e('配信方法', $text_domain); ?></th>
                             <td>
+                                <p class="description">
+                                    <?php _e('メディアファイルを保護するために当プラグインでメディアファイルへのアクセス認証を行い配信します。環境に合わせてメディアファイルの配信方法を選択してください。', $text_domain); ?>
+                                </p>
                                 <select name="<?php echo $option_key; ?>[media][delivery_method]" class="regular-text">
                                     <option value="auto" <?php selected($delivery_method, 'auto'); ?>>
                                         <?php _e('自動判定（利用可能な方法を選択）', $text_domain); ?>
@@ -443,7 +446,7 @@ class ESP_Admin_Menu {
                                     </option>
                                 </select>
                                 <p class="description">
-                                    <?php _e('環境に合わせてメディアファイルの配信方法を選択してください。設定保存後は正しくメディアファイルが配信されるかを確認してください。', $text_domain); ?>
+                                    <?php _e('設定保存後は正しくメディアファイルが配信されるかを確認してください。', $text_domain); ?>
                                 </p>
                             </td>
                         </tr>
