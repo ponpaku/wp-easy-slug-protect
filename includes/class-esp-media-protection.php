@@ -298,46 +298,45 @@ class ESP_Media_Protection {
                 esc_html($configured_label)
             ),
             sprintf(
-                esc_html__('想定される配信方法: %s', ESP_Config::TEXT_DOMAIN),
+                esc_html__('適用される配信方法: %s', ESP_Config::TEXT_DOMAIN),
                 esc_html($resolved_label)
             ),
         );
 
-        if (!empty($result['warning'])) {
-            switch ($result['warning']) {
-                case 'x_sendfile_unavailable':
-                    $message_lines[] = esc_html__('選択した配信方法のモジュールが検出できませんでした。サーバー設定をご確認ください。', ESP_Config::TEXT_DOMAIN);
-                    break;
-                case 'litespeed_path_unavailable':
-                    $message_lines[] = esc_html__('LiteSpeed連携用の内部パスを特定できませんでした。DOCUMENT_ROOTの設定を確認してください。', ESP_Config::TEXT_DOMAIN);
-                    break;
-                case 'nginx_path_unavailable':
-                    $message_lines[] = esc_html__('Nginx連携用の内部パスを特定できませんでした。リバースプロキシ設定をご確認ください。', ESP_Config::TEXT_DOMAIN);
-                    break;
+        // 成否に応じてメッセージと通知種別を切り替える
+        if (!empty($result['success'])) {
+            $message_lines[] = esc_html__('テストファイルは現在の設定で正常に返される想定です。', ESP_Config::TEXT_DOMAIN);
+            $notice_class = 'notice-success';
+        } else {
+            $notice_class = 'notice-error';
+
+            // 失敗理由ごとに案内を表示
+            if (!empty($result['error'])) {
+                switch ($result['error']) {
+                    case 'missing_litespeed_path':
+                        $message_lines[] = esc_html__('LiteSpeed方式で内部URIを算出できないためファイルを返せません。DOCUMENT_ROOTなどの設定をご確認ください。', ESP_Config::TEXT_DOMAIN);
+                        break;
+                    case 'missing_nginx_path':
+                        $message_lines[] = esc_html__('Nginx方式で内部パスを特定できないためファイルを返せません。X-Accel-Mappingの設定をご確認ください。', ESP_Config::TEXT_DOMAIN);
+                        break;
+                    default:
+                        $message_lines[] = esc_html__('選択した配信方法ではテストファイルを返せませんでした。設定を見直してください。', ESP_Config::TEXT_DOMAIN);
+                        break;
+                }
+            } else {
+                $message_lines[] = esc_html__('選択した配信方法ではテストファイルを返せませんでした。設定を見直してください。', ESP_Config::TEXT_DOMAIN);
             }
         }
 
-        $availability_items = array();
-        foreach ($result['available_methods'] as $key => $available) {
-            $label = isset($labels[$key]) ? $labels[$key] : $key;
-            $status_label = $available
-                ? esc_html__('利用可能', ESP_Config::TEXT_DOMAIN)
-                : esc_html__('利用不可', ESP_Config::TEXT_DOMAIN);
-            $availability_items[] = '<li>' . esc_html($label) . ': <strong>' . esc_html($status_label) . '</strong></li>';
-        }
-
-        $html  = '<div class="notice notice-info inline" style="margin: 5px 0; padding: 10px;">';
-        $html .= '<p>' . implode('<br>', $message_lines) . '</p>';
-        $html .= '<p>' . esc_html__('検出結果', ESP_Config::TEXT_DOMAIN) . ':</p>';
-        $html .= '<ul>' . implode('', $availability_items) . '</ul>';
-
         if (!empty($result['resolved_path'])) {
-            $html .= '<p>' . sprintf(
+            $message_lines[] = sprintf(
                 esc_html__('送出ヘッダーで使用されるパス: %s', ESP_Config::TEXT_DOMAIN),
                 esc_html($result['resolved_path'])
-            ) . '</p>';
+            );
         }
 
+        $html  = '<div class="notice ' . esc_attr($notice_class) . ' inline" style="margin: 5px 0; padding: 10px;">';
+        $html .= '<p>' . implode('<br>', $message_lines) . '</p>';
         $html .= '</div>';
 
         wp_send_json_success([

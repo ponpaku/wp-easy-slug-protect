@@ -60,12 +60,6 @@ class ESP_Media_Deriver {
 
         list($test_file, $test_dir) = $test_artifact;
 
-        $available_methods = array(
-            'x-sendfile' => $this->is_x_sendfile_available(),
-            'x-litespeed-location' => $this->get_litespeed_internal_path($test_file) !== false,
-            'x-accel-redirect' => $this->is_x_accel_redirect_available() && $this->get_nginx_internal_path($test_file) !== false,
-        );
-
         try {
             $handler = $this->determine_delivery_handler($test_file);
         } finally {
@@ -77,19 +71,23 @@ class ESP_Media_Deriver {
 
         $result = array(
             'configured_method' => $this->get_configured_delivery_method(),
-            'available_methods' => $available_methods,
             'resolved_handler' => $handler['type'],
+            'success' => true,
         );
 
         // 取得したハンドラー情報に応じて追加情報を格納
         if (!empty($handler['path'])) {
             $result['resolved_path'] = $handler['path'];
         }
-        if (!empty($handler['forced'])) {
-            $result['forced'] = true;
-        }
-        if (!empty($handler['warning'])) {
-            $result['warning'] = $handler['warning'];
+
+        // LiteSpeed・Nginxは内部パスが無い場合に失敗扱いとする
+        if ($handler['type'] === 'litespeed' && empty($handler['path'])) {
+            $result['success'] = false;
+            $result['error'] = 'missing_litespeed_path';
+        } elseif ($handler['type'] === 'nginx' && empty($handler['path'])) {
+            // Nginx設定が成立していない場合も失敗扱い
+            $result['success'] = false;
+            $result['error'] = 'missing_nginx_path';
         }
 
         return $result;
@@ -188,11 +186,6 @@ class ESP_Media_Deriver {
 
             $delivery_method = $this->determine_delivery_handler($file_path);
 
-            // 配信時の警告がある場合はログに残す
-            if (!empty($delivery_method['warning'])) {
-                error_log('ESP: Media delivery warning (' . $delivery_method['warning'] . ') for ' . $file_path);
-            }
-
             // Webサーバー配信が可能な場合はヘッダー委譲のみで終了
             if ($delivery_method['type'] !== 'php') {
                 switch ($delivery_method['type']) {
@@ -262,7 +255,7 @@ class ESP_Media_Deriver {
      * 配信方法を判定
      *
      * @param string $file_path ファイルパス
-     * @return array{type:string,path?:string,forced?:bool,warning?:string}
+     * @return array{type:string,path?:string,forced?:bool}
      */
     private function determine_delivery_handler($file_path) {
         $configured = $this->get_configured_delivery_method();
@@ -273,11 +266,6 @@ class ESP_Media_Deriver {
                 'type' => 'apache',
                 'forced' => true,
             );
-
-            // サーバー側で未対応の場合は警告を出す
-            if (!$this->is_x_sendfile_available()) {
-                $result['warning'] = 'x_sendfile_unavailable';
-            }
 
             return $result;
         }
@@ -291,10 +279,6 @@ class ESP_Media_Deriver {
                 'path' => $path !== false ? $path : '',
             );
 
-            if ($path === false) {
-                $result['warning'] = 'litespeed_path_unavailable';
-            }
-
             return $result;
         }
 
@@ -306,10 +290,6 @@ class ESP_Media_Deriver {
                 'forced' => true,
                 'path' => $path !== false ? $path : '',
             );
-
-            if ($path === false) {
-                $result['warning'] = 'nginx_path_unavailable';
-            }
 
             return $result;
         }
