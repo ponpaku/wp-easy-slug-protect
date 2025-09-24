@@ -46,9 +46,6 @@ class ESP_Admin_Assets {
             'resetHtaccessSuccess' => __('.htaccessのルールを再設定しました。', $plugin_name),
             'resetHtaccessError' => __('.htaccessの再設定中にエラーが発生しました。', $plugin_name),
             'ajaxError' => __('AJAXリクエストに失敗しました:', $plugin_name),
-            'testMediaDeliveryButton' => __('配信方法をテストする', $plugin_name),
-            'testingMediaDelivery' => __('テスト中...', $plugin_name),
-            'testMediaDeliveryError' => __('配信テストでエラーが発生しました。', $plugin_name),
         );
     }
 
@@ -98,7 +95,6 @@ class ESP_Admin_Assets {
                 'clearCacheNonce' => wp_create_nonce('esp_clear_cache_nonce'),// キャッシュクリア用Nonce
                 'clearMediaCacheNonce' => wp_create_nonce('esp_clear_media_cache_nonce'),// メディア保護キャッシュ用
                 'resetHtaccessNonce' => wp_create_nonce('esp_reset_htaccess_nonce'),// .htaccessルール再設定用Nonce
-                'testMediaDeliveryNonce' => wp_create_nonce('esp_test_media_delivery_nonce'),// メディア配信テスト用Nonce
                 'i18n' => $this::localize_data()
             )
         );

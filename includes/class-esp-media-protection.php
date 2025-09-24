@@ -93,7 +93,6 @@ class ESP_Media_Protection {
             // AJAX ハンドラーの登録
             add_action('wp_ajax_esp_clear_media_cache', [$this, 'ajax_clear_media_cache']);
             add_action('wp_ajax_esp_reset_htaccess_rules', [$this, 'ajax_reset_htaccess_rules']);
-            add_action('wp_ajax_esp_test_media_delivery', [$this, 'ajax_test_media_delivery']);
 
             $this->auth = new ESP_Auth();
             $this->cookie = ESP_Cookie::get_instance();
@@ -258,89 +257,6 @@ class ESP_Media_Protection {
 
         wp_send_json_error([
             'message' => __('.htaccessの再設定に失敗しました。書き込み権限を確認してください。', ESP_Config::TEXT_DOMAIN)
-        ]);
-    }
-
-    /**
-     * AJAXハンドラ: 配信設定をテスト
-     */
-    public function ajax_test_media_delivery() {
-        check_ajax_referer('esp_test_media_delivery_nonce', 'nonce');
-
-        if (!current_user_can('manage_options')) {
-            wp_send_json_error(['message' => __('権限がありません。', ESP_Config::TEXT_DOMAIN)], 403);
-        }
-
-        $result = $this->deriver->run_delivery_diagnostics();
-        if (is_wp_error($result)) {
-            wp_send_json_error(['message' => $result->get_error_message()]);
-        }
-
-        $labels = ESP_Media_Deriver::get_delivery_method_labels();
-        $handler_map = array(
-            'apache' => 'x-sendfile',
-            'litespeed' => 'x-litespeed-location',
-            'nginx' => 'x-accel-redirect',
-            'php' => 'php',
-        );
-
-        $configured_label = isset($labels[$result['configured_method']])
-            ? $labels[$result['configured_method']]
-            : $result['configured_method'];
-        $resolved_key = isset($handler_map[$result['resolved_handler']])
-            ? $handler_map[$result['resolved_handler']]
-            : $result['resolved_handler'];
-        $resolved_label = isset($labels[$resolved_key]) ? $labels[$resolved_key] : $resolved_key;
-
-        $message_lines = array(
-            sprintf(
-                esc_html__('選択中の設定: %s', ESP_Config::TEXT_DOMAIN),
-                esc_html($configured_label)
-            ),
-            sprintf(
-                esc_html__('適用される配信方法: %s', ESP_Config::TEXT_DOMAIN),
-                esc_html($resolved_label)
-            ),
-        );
-
-        // 成否に応じてメッセージと通知種別を切り替える
-        if (!empty($result['success'])) {
-            $message_lines[] = esc_html__('テストファイルは現在の設定で正常に返される想定です。', ESP_Config::TEXT_DOMAIN);
-            $notice_class = 'notice-success';
-        } else {
-            $notice_class = 'notice-error';
-
-            // 失敗理由ごとに案内を表示
-            if (!empty($result['error'])) {
-                switch ($result['error']) {
-                    case 'missing_litespeed_path':
-                        $message_lines[] = esc_html__('LiteSpeed方式で内部URIを算出できないためファイルを返せません。DOCUMENT_ROOTなどの設定をご確認ください。', ESP_Config::TEXT_DOMAIN);
-                        break;
-                    case 'missing_nginx_path':
-                        $message_lines[] = esc_html__('Nginx方式で内部パスを特定できないためファイルを返せません。X-Accel-Mappingの設定をご確認ください。', ESP_Config::TEXT_DOMAIN);
-                        break;
-                    default:
-                        $message_lines[] = esc_html__('選択した配信方法ではテストファイルを返せませんでした。設定を見直してください。', ESP_Config::TEXT_DOMAIN);
-                        break;
-                }
-            } else {
-                $message_lines[] = esc_html__('選択した配信方法ではテストファイルを返せませんでした。設定を見直してください。', ESP_Config::TEXT_DOMAIN);
-            }
-        }
-
-        if (!empty($result['resolved_path'])) {
-            $message_lines[] = sprintf(
-                esc_html__('送出ヘッダーで使用されるパス: %s', ESP_Config::TEXT_DOMAIN),
-                esc_html($result['resolved_path'])
-            );
-        }
-
-        $html  = '<div class="notice ' . esc_attr($notice_class) . ' inline" style="margin: 5px 0; padding: 10px;">';
-        $html .= '<p>' . implode('<br>', $message_lines) . '</p>';
-        $html .= '</div>';
-
-        wp_send_json_success([
-            'html' => $html,
         ]);
     }
 

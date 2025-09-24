@@ -447,18 +447,6 @@ class ESP_Admin_Menu {
                                 </p>
                             </td>
                         </tr>
-                        <tr>
-                            <th scope="row"><?php _e('配信テスト', $text_domain); ?></th>
-                            <td>
-                                <button type="button" class="button button-secondary" id="esp-test-media-delivery">
-                                    <?php _e('配信方法をテストする', $text_domain); ?>
-                                </button>
-                                <p class="description">
-                                    <?php _e('現在の設定でどの配信方法が利用されるか確認します。', $text_domain); ?>
-                                </p>
-                                <div id="esp-test-media-delivery-status" style="margin-top: 5px;"></div>
-                            </td>
-                        </tr>
                     </table>
                 </div>
 
