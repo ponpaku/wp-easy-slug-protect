@@ -83,6 +83,8 @@ class ESP_Admin_Menu {
         $bruteforce_settings = ESP_Option::get_current_setting('brute');
         $remember_settings = ESP_Option::get_current_setting('remember');
         $mail_settings =  ESP_Option::get_current_setting('mail');
+        $media_settings = ESP_Option::get_current_setting('media');
+        $delivery_method = isset($media_settings['delivery_method']) ? $media_settings['delivery_method'] : 'auto';
 
         $text_domain = ESP_Config::TEXT_DOMAIN;
         $option_key = ESP_Config::OPTION_KEY;
@@ -411,6 +413,37 @@ class ESP_Admin_Menu {
                                 </label>
                                 <p class="description">
                                     <?php _e('セキュリティ上の理由でパスワードをメールに含めたくない場合はチェックを外してください。', $text_domain); ?>
+                                </p>
+                            </td>
+                        </tr>
+                    </table>
+                </div>
+
+                <div class="esp-section">
+                    <h2><?php _e('メディア配信設定', $text_domain); ?></h2>
+                    <table class="form-table">
+                        <tr>
+                            <th scope="row"><?php _e('配信方法', $text_domain); ?></th>
+                            <td>
+                                <select name="<?php echo $option_key; ?>[media][delivery_method]" class="regular-text">
+                                    <option value="auto" <?php selected($delivery_method, 'auto'); ?>>
+                                        <?php _e('自動判定（利用可能な方法を選択）', $text_domain); ?>
+                                    </option>
+                                    <option value="x_sendfile" <?php selected($delivery_method, 'x_sendfile'); ?>>
+                                        <?php _e('X-Sendfile（Apache系で利用）', $text_domain); ?>
+                                    </option>
+                                    <option value="litespeed" <?php selected($delivery_method, 'litespeed'); ?>>
+                                        <?php _e('X-LiteSpeed-Location（LiteSpeed用）', $text_domain); ?>
+                                    </option>
+                                    <option value="x_accel_redirect" <?php selected($delivery_method, 'x_accel_redirect'); ?>>
+                                        <?php _e('X-Accel-Redirect（Nginx用）', $text_domain); ?>
+                                    </option>
+                                    <option value="php" <?php selected($delivery_method, 'php'); ?>>
+                                        <?php _e('PHP（WordPressから直接配信）', $text_domain); ?>
+                                    </option>
+                                </select>
+                                <p class="description">
+                                    <?php _e('環境に合わせてメディアファイルの配信方法を選択してください。設定保存後は正しくメディアファイルが配信されるかを確認してください。', $text_domain); ?>
                                 </p>
                             </td>
                         </tr>

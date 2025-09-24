@@ -194,6 +194,26 @@ class ESP_Sanitize {
     }
 
     /**
+     * メディア設定のサニタイズ
+     */
+    public function sanitize_media_settings($settings) {
+        // 許可する配信方法の一覧
+        $allowed = array('auto', 'x_sendfile', 'litespeed', 'x_accel_redirect', 'php');
+        $delivery_method = 'auto';
+
+        if (is_array($settings) && isset($settings['delivery_method'])) {
+            $candidate = sanitize_text_field($settings['delivery_method']);
+            if (in_array($candidate, $allowed, true)) {
+                $delivery_method = $candidate;
+            }
+        }
+
+        return array(
+            'delivery_method' => $delivery_method
+        );
+    }
+
+    /**
      * メール設定のサニタイズ
      */
     public function sanitize_mail_settings($settings) {
