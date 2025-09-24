@@ -82,14 +82,11 @@ class ESP_Media_Deriver {
         );
 
         // 取得したハンドラー情報に応じて追加情報を格納
-        if (isset($handler['path'])) {
+        if (!empty($handler['path'])) {
             $result['resolved_path'] = $handler['path'];
         }
         if (!empty($handler['forced'])) {
             $result['forced'] = true;
-        }
-        if (!empty($handler['fallback_reason'])) {
-            $result['fallback_reason'] = $handler['fallback_reason'];
         }
         if (!empty($handler['warning'])) {
             $result['warning'] = $handler['warning'];
@@ -191,13 +188,6 @@ class ESP_Media_Deriver {
 
             $delivery_method = $this->determine_delivery_handler($file_path);
 
-            if (!empty($delivery_method['forced']) &&
-                $delivery_method['type'] === 'php' &&
-                !empty($delivery_method['fallback_reason'])
-            ) {
-                error_log('ESP: Forced media delivery fallback (' . $delivery_method['fallback_reason'] . ') for ' . $file_path);
-            }
-
             // 配信時の警告がある場合はログに残す
             if (!empty($delivery_method['warning'])) {
                 error_log('ESP: Media delivery warning (' . $delivery_method['warning'] . ') for ' . $file_path);
@@ -210,9 +200,19 @@ class ESP_Media_Deriver {
                         header('X-Sendfile: ' . $file_path);
                         break;
                     case 'litespeed':
+                        if (empty($delivery_method['path'])) {
+                            // 強制設定でも内部パスが無い場合は処理を中止
+                            error_log('ESP: LiteSpeed internal path unavailable for ' . $file_path);
+                            return false;
+                        }
                         header('X-LiteSpeed-Location: ' . $delivery_method['path']);
                         break;
                     case 'nginx':
+                        if (empty($delivery_method['path'])) {
+                            // 内部パス不明時は安全のため中断
+                            error_log('ESP: Nginx internal path unavailable for ' . $file_path);
+                            return false;
+                        }
                         header('X-Accel-Redirect: ' . $delivery_method['path']);
                         break;
                 }
@@ -262,7 +262,7 @@ class ESP_Media_Deriver {
      * 配信方法を判定
      *
      * @param string $file_path ファイルパス
-     * @return array{type:string,path?:string,forced?:bool,fallback_reason?:string,warning?:string}
+     * @return array{type:string,path?:string,forced?:bool,warning?:string}
      */
     private function determine_delivery_handler($file_path) {
         $configured = $this->get_configured_delivery_method();
@@ -285,39 +285,33 @@ class ESP_Media_Deriver {
         // 管理画面でLiteSpeed連携が強制されている場合
         if ($configured === 'x-litespeed-location') {
             $path = $this->get_litespeed_internal_path($file_path, true);
-            if ($path !== false) {
-                return array(
-                    'type' => 'litespeed',
-                    'path' => $path,
-                    'forced' => true,
-                );
+            $result = array(
+                'type' => 'litespeed',
+                'forced' => true,
+                'path' => $path !== false ? $path : '',
+            );
+
+            if ($path === false) {
+                $result['warning'] = 'litespeed_path_unavailable';
             }
 
-            // 想定経路が見つからない場合はPHP配信へフォールバック
-            return array(
-                'type' => 'php',
-                'forced' => true,
-                'fallback_reason' => 'litespeed_path_unavailable',
-            );
+            return $result;
         }
 
         // 管理画面でNginx連携が強制されている場合
         if ($configured === 'x-accel-redirect') {
             $path = $this->get_nginx_internal_path($file_path);
-            if ($path !== false) {
-                return array(
-                    'type' => 'nginx',
-                    'path' => $path,
-                    'forced' => true,
-                );
+            $result = array(
+                'type' => 'nginx',
+                'forced' => true,
+                'path' => $path !== false ? $path : '',
+            );
+
+            if ($path === false) {
+                $result['warning'] = 'nginx_path_unavailable';
             }
 
-            // 想定経路が見つからない場合はPHP配信へフォールバック
-            return array(
-                'type' => 'php',
-                'forced' => true,
-                'fallback_reason' => 'nginx_path_unavailable',
-            );
+            return $result;
         }
 
         // 自動判定ではX-Sendfileが利用可能なら最優先

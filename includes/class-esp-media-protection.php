@@ -303,10 +303,18 @@ class ESP_Media_Protection {
             ),
         );
 
-        if (!empty($result['forced']) && $result['resolved_handler'] === 'php' && !empty($result['fallback_reason'])) {
-            $message_lines[] = esc_html__('選択した配信方法を利用できないためPHP配信へフォールバックします。', ESP_Config::TEXT_DOMAIN);
-        } elseif (!empty($result['warning']) && $result['warning'] === 'x_sendfile_unavailable') {
-            $message_lines[] = esc_html__('選択した配信方法のモジュールが検出できませんでした。サーバー設定をご確認ください。', ESP_Config::TEXT_DOMAIN);
+        if (!empty($result['warning'])) {
+            switch ($result['warning']) {
+                case 'x_sendfile_unavailable':
+                    $message_lines[] = esc_html__('選択した配信方法のモジュールが検出できませんでした。サーバー設定をご確認ください。', ESP_Config::TEXT_DOMAIN);
+                    break;
+                case 'litespeed_path_unavailable':
+                    $message_lines[] = esc_html__('LiteSpeed連携用の内部パスを特定できませんでした。DOCUMENT_ROOTの設定を確認してください。', ESP_Config::TEXT_DOMAIN);
+                    break;
+                case 'nginx_path_unavailable':
+                    $message_lines[] = esc_html__('Nginx連携用の内部パスを特定できませんでした。リバースプロキシ設定をご確認ください。', ESP_Config::TEXT_DOMAIN);
+                    break;
+            }
         }
 
         $availability_items = array();
