@@ -9,6 +9,10 @@ if (!defined('ABSPATH')) {
  */
 class ESP_Media_Protection {
     /**
+     * @var ESP_Media_Protection|null シングルトンインスタンス
+     */
+    private static $instance = null;
+    /**
      * @var ESP_Auth 認証クラスのインスタンス
      */
     private $auth;
@@ -22,6 +26,16 @@ class ESP_Media_Protection {
      * @var ESP_Media_Deriver メディア配信用クラス
      */
     private $deriver;
+
+    /**
+     * @var bool メディア保護機能が有効かどうか
+     */
+    private $is_enabled = true;
+
+    /**
+     * @var array メディア関連の設定値
+     */
+    private $media_settings = array();
 
     /**
      * @var string メディア保護用メタキー
@@ -67,11 +81,49 @@ class ESP_Media_Protection {
     ];
 
     /**
+     * @var bool リライトルール用クエリ変数の登録状態
+     */
+    private $query_var_registered = false;
+
+    /**
+     * シングルトンインスタンスを取得
+     */
+    public static function get_instance() {
+        if (self::$instance === null) {
+            self::$instance = new self();
+        }
+
+        return self::$instance;
+    }
+
+    /**
      * コンストラクタ
      */
-    public function __construct() {
+    private function __construct() {
         $this->deriver = new ESP_Media_Deriver();
+        $this->load_settings();
         $this->init();
+    }
+
+    /**
+     * 設定を読み込みプロパティを更新
+     */
+    private function load_settings() {
+        $this->media_settings = ESP_Option::get_current_setting('media');
+
+        $enabled = ESP_Config::OPTION_DEFAULTS['media']['enabled'] ?? false;
+        if (is_array($this->media_settings) && array_key_exists('enabled', $this->media_settings)) {
+            $enabled = !empty($this->media_settings['enabled']);
+        }
+
+        $this->is_enabled = (bool) $enabled;
+    }
+
+    /**
+     * メディア保護機能の有効状態を取得
+     */
+    public function is_enabled() {
+        return $this->is_enabled;
     }
 
     /**
@@ -81,16 +133,19 @@ class ESP_Media_Protection {
         // キャッシュの初期チェック
         $this->check_and_generate_cache();
 
+        $this->auth = new ESP_Auth();
+        $this->cookie = ESP_Cookie::get_instance();
+
         // 管理画面の場合
         if (is_admin()) {
             // メディアライブラリのカスタムフィールドを追加
             add_filter('attachment_fields_to_edit', [$this, 'add_media_protection_field'], 10, 2);
             add_filter('attachment_fields_to_save', [$this, 'save_media_protection_field'], 10, 2);
-            
+
             // メディアライブラリの列を追加
             add_filter('manage_media_columns', [$this, 'add_media_columns']);
             add_action('manage_media_custom_column', [$this, 'render_media_columns'], 10, 2);
-            
+
             // 一括操作の追加
             add_filter('bulk_actions-upload', [$this, 'add_bulk_actions']);
             add_filter('handle_bulk_actions-upload', [$this, 'handle_bulk_actions'], 10, 3);
@@ -98,16 +153,10 @@ class ESP_Media_Protection {
             // AJAX ハンドラーの登録
             add_action('wp_ajax_esp_clear_media_cache', [$this, 'ajax_clear_media_cache']);
             add_action('wp_ajax_esp_reset_htaccess_rules', [$this, 'ajax_reset_htaccess_rules']);
-
-            $this->auth = new ESP_Auth();
-            $this->cookie = ESP_Cookie::get_instance();
-            add_action('template_redirect', [$this, 'handle_media_access'], 1);
-        } else {
-            // フロントエンドでのアクセス制御
-            $this->auth = new ESP_Auth();
-            $this->cookie = ESP_Cookie::get_instance();
-            add_action('template_redirect', [$this, 'handle_media_access'], 1);
         }
+
+        // テンプレートリダイレクトでのアクセス制御
+        add_action('template_redirect', [$this, 'handle_media_access'], 1);
 
         // REST API フィルタリング
         add_filter('rest_attachment_query', [$this, 'filter_rest_media_query'], 10, 2);
@@ -115,7 +164,7 @@ class ESP_Media_Protection {
 
         // リライトルールの追加
         add_action('init', [$this, 'add_rewrite_rules']);
-        
+
         // アップロード時の自動保護設定
         add_action('add_attachment', [$this, 'auto_protect_on_upload']);
         
@@ -275,6 +324,10 @@ class ESP_Media_Protection {
      * @return array 修正されたWP_Queryの引数配列
      */
     public function filter_rest_media_query($args, $request) {
+        if (!$this->is_enabled) {
+            return $args;
+        }
+
         // REST APIリクエストであることを確認
         if (!(defined('REST_REQUEST') && REST_REQUEST)) {
             return $args;
@@ -305,6 +358,10 @@ class ESP_Media_Protection {
      * @return WP_REST_Response|WP_Error 変更されたレスポンスまたはエラー
      */
     public function check_rest_media_access($response, $post, $request) {
+        if (!$this->is_enabled) {
+            return $response;
+        }
+
         // REST APIリクエストであることを確認
         if (!(defined('REST_REQUEST') && REST_REQUEST)) {
             return $response;
@@ -481,31 +538,93 @@ class ESP_Media_Protection {
      * リライトルールを追加
      */
     public function add_rewrite_rules() {
+        if (!$this->is_enabled) {
+            $this->remove_rewrite_rules();
+            $this->deregister_query_var();
+            return;
+        }
+
         $upload_dir = wp_upload_dir();
+        if (!empty($upload_dir['error'])) {
+            return;
+        }
+
         $upload_path = str_replace(home_url(), '', $upload_dir['baseurl']);
         $upload_path = trim($upload_path, '/');
-        
+
+        // リセットしてからルールを再登録
+        $this->remove_rewrite_rules();
+
         // wp-content/uploads/以下のファイルへのアクセスをキャッチ
         // 保護された拡張子のみを対象にする
         $extensions_pattern = implode('|', array_map('preg_quote', $this->protected_extensions));
-        
+
         add_rewrite_rule(
             '^' . $upload_path . '/(.+\.(' . $extensions_pattern . '))$',
             'index.php?' . self::REWRITE_ENDPOINT . '=$matches[1]',
             'top'
         );
-        
+
         // クエリ変数を追加
-        add_filter('query_vars', function($vars) {
-            $vars[] = self::REWRITE_ENDPOINT;
-            return $vars;
-        });
+        if (!$this->query_var_registered) {
+            add_filter('query_vars', [$this, 'register_media_query_var']);
+            $this->query_var_registered = true;
+        }
+    }
+
+    /**
+     * メディア保護用のクエリ変数を登録
+     */
+    public function register_media_query_var($vars) {
+        $vars[] = self::REWRITE_ENDPOINT;
+        return $vars;
+    }
+
+    /**
+     * クエリ変数の登録を解除
+     */
+    private function deregister_query_var() {
+        if ($this->query_var_registered) {
+            remove_filter('query_vars', [$this, 'register_media_query_var']);
+            $this->query_var_registered = false;
+        }
+    }
+
+    /**
+     * 追加済みのリライトルールを削除
+     */
+    private function remove_rewrite_rules() {
+        global $wp_rewrite;
+
+        if (!class_exists('WP_Rewrite')) {
+            return;
+        }
+
+        if (!isset($wp_rewrite) || !($wp_rewrite instanceof WP_Rewrite)) {
+            return;
+        }
+
+        if (!is_array($wp_rewrite->extra_rules_top)) {
+            return;
+        }
+
+        $target = 'index.php?' . self::REWRITE_ENDPOINT . '=$matches[1]';
+
+        foreach ($wp_rewrite->extra_rules_top as $regex => $rewrite) {
+            if ($rewrite === $target) {
+                unset($wp_rewrite->extra_rules_top[$regex]);
+            }
+        }
     }
 
     /**
     * メディアファイルへのアクセスを処理（クリーンアップ版）
     */
     public function handle_media_access() {
+        if (!$this->is_enabled) {
+            return;
+        }
+
         // リクエストURIから直接判定
         $request_uri = $_SERVER['REQUEST_URI'] ?? '';
         $is_media_request = false;
@@ -756,6 +875,10 @@ class ESP_Media_Protection {
      * @param int $attachment_id 添付ファイルID
      */
     public function auto_protect_on_upload($attachment_id) {
+        if (!$this->is_enabled) {
+            return;
+        }
+
         // 現在のユーザーがアップロードしているコンテキストから保護パスを推定
         // 例：特定のページや投稿からアップロードされた場合など
         // この実装は要件に応じてカスタマイズが必要
@@ -913,15 +1036,19 @@ class ESP_Media_Protection {
             $current_rules = $contents;
         }
 
-        // ESP用のルールを定義
-        $esp_rules = $this->get_htaccess_rules();
+        // ESP用のルールを定義（無効時は追加しない）
+        $esp_rules = $this->is_enabled ? $this->get_htaccess_rules() : '';
 
         // 既存のESPルールを削除
         $pattern = '/# BEGIN ESP Media Protection.*?# END ESP Media Protection\s*/s';
         $current_rules = preg_replace($pattern, '', $current_rules);
 
         // 保護が有効な場合は新しいルールを追加
-        $new_rules = $this->has_protected_media() ? $esp_rules . "\n" . ltrim($current_rules) : ltrim($current_rules);
+        if ($this->is_enabled && $this->has_protected_media()) {
+            $new_rules = $esp_rules . "\n" . ltrim($current_rules);
+        } else {
+            $new_rules = ltrim($current_rules);
+        }
 
         // WP_Filesystemを優先的に使用
         if (!function_exists('WP_Filesystem')) {
@@ -1105,12 +1232,21 @@ class ESP_Media_Protection {
      * 設定保存時に呼び出される処理
      */
     public function on_settings_save() {
+        $this->load_settings();
         // キャッシュを再生成
         $this->regenerate_media_cache();
-        
+
         // .htaccessを更新
         $this->update_htaccess();
-        
+
+        // リライトルールを最新の状態に合わせる
+        if ($this->is_enabled) {
+            $this->add_rewrite_rules();
+        } else {
+            $this->remove_rewrite_rules();
+            $this->deregister_query_var();
+        }
+
         // リライトルールをフラッシュ
         flush_rewrite_rules();
     }
@@ -1120,7 +1256,7 @@ class ESP_Media_Protection {
      * ESP_Setupから呼び出される静的メソッド
      */
     public static function cron_regenerate_media_cache() {
-        $instance = new self();
+        $instance = self::get_instance();
         $instance->regenerate_media_cache();
     }
 }

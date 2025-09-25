@@ -85,6 +85,7 @@ class ESP_Admin_Menu {
         $mail_settings =  ESP_Option::get_current_setting('mail');
         $media_settings = ESP_Option::get_current_setting('media');
         $delivery_method = isset($media_settings['delivery_method']) ? $media_settings['delivery_method'] : 'auto';
+        $media_enabled = !empty($media_settings['enabled']);
 
         $text_domain = ESP_Config::TEXT_DOMAIN;
         $option_key = ESP_Config::OPTION_KEY;
@@ -422,6 +423,18 @@ class ESP_Admin_Menu {
                 <div class="esp-section">
                     <h2><?php _e('メディア配信設定', $text_domain); ?></h2>
                     <table class="form-table">
+                        <tr>
+                            <th scope="row"><?php _e('メディア保護機能', $text_domain); ?></th>
+                            <td>
+                                <label>
+                                    <input type="checkbox" name="<?php echo $option_key; ?>[media][enabled]" value="1" <?php checked($media_enabled); ?>>
+                                    <?php _e('メディアファイルの保護を有効にする', $text_domain); ?>
+                                </label>
+                                <p class="description">
+                                    <?php _e('無効にするとメディアへのアクセス制御と認証が停止します。', $text_domain); ?>
+                                </p>
+                            </td>
+                        </tr>
                         <tr>
                             <th scope="row"><?php _e('配信方法', $text_domain); ?></th>
                             <td>

@@ -134,7 +134,7 @@ class ESP_Settings {
 
         // メディア保護の設定更新
         if (class_exists('ESP_Media_Protection')) {
-            $media_protection = new ESP_Media_Protection();
+            $media_protection = ESP_Media_Protection::get_instance();
             $media_protection->on_settings_save();
         }
 

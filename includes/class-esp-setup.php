@@ -21,7 +21,7 @@ class ESP_Setup {
 
         // メディア保護の初期設定
         if (class_exists('ESP_Media_Protection')) {
-            $media_protection = new ESP_Media_Protection();
+            $media_protection = ESP_Media_Protection::get_instance();
             $media_protection->update_htaccess();
             // 初回のメディアキャッシュ生成
             $media_protection->regenerate_media_cache();
@@ -96,7 +96,7 @@ class ESP_Setup {
 
         // メディア保護キャッシュの更新
         if (class_exists('ESP_Media_Protection')) {
-            $media_protection = new ESP_Media_Protection();
+            $media_protection = ESP_Media_Protection::get_instance();
             $media_protection->regenerate_media_cache();
         }
 
@@ -117,7 +117,7 @@ class ESP_Setup {
         
         // .htaccessからESPルールを削除
         if (class_exists('ESP_Media_Protection')) {
-            $media_protection = new ESP_Media_Protection();
+            $media_protection = ESP_Media_Protection::get_instance();
             $media_protection->update_htaccess(); // 保護メディアがない場合、ルールが削除される
         }
 

@@ -113,7 +113,7 @@ class Easy_Slug_Protect {
         }
 
         if (class_exists('ESP_Media_Protection')) {
-            new ESP_Media_Protection();
+            ESP_Media_Protection::get_instance();
         }
     }
 

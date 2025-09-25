@@ -200,6 +200,8 @@ class ESP_Sanitize {
         // 許可する配信方法の一覧
         $allowed = array('auto', 'x_sendfile', 'litespeed', 'x_accel_redirect', 'php');
         $delivery_method = 'auto';
+        $current = ESP_Option::get_current_setting('media');
+        $enabled = null;
 
         if (is_array($settings) && isset($settings['delivery_method'])) {
             $candidate = sanitize_text_field($settings['delivery_method']);
@@ -208,8 +210,24 @@ class ESP_Sanitize {
             }
         }
 
+        if (is_array($current) && array_key_exists('enabled', $current)) {
+            $enabled = !empty($current['enabled']);
+        } elseif (
+            isset(ESP_Config::OPTION_DEFAULTS['media'])
+            && is_array(ESP_Config::OPTION_DEFAULTS['media'])
+            && array_key_exists('enabled', ESP_Config::OPTION_DEFAULTS['media'])
+        ) {
+            $enabled = !empty(ESP_Config::OPTION_DEFAULTS['media']['enabled']);
+        } else {
+            $enabled = false;
+        }
+
+        if (is_array($settings) && array_key_exists('enabled', $settings)) {
+            // 未送信の場合は既存値を維持したいので、キーがある時のみ評価する
+            $enabled = !empty($settings['enabled']);
+        }
+
         // 保存済みのLiteSpeedキーを優先的に維持
-        $current = ESP_Option::get_current_setting('media');
         $stored_key = '';
         if (is_array($current) && isset($current[ESP_Media_Protection::OPTION_LITESPEED_KEY])) {
             $stored_key = sanitize_text_field($current[ESP_Media_Protection::OPTION_LITESPEED_KEY]);
@@ -224,6 +242,7 @@ class ESP_Sanitize {
         }
 
         return array(
+            'enabled' => $enabled,
             'delivery_method' => $delivery_method,
             ESP_Media_Protection::OPTION_LITESPEED_KEY => $stored_key
         );

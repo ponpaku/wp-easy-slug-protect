@@ -55,7 +55,7 @@ class ESP_Core {
         $this->cookie = ESP_Cookie::get_instance();
         $this->filter = new ESP_Filter();
         $this->path_matcher = new ESP_Path_Matcher();
-        $this->media_protection = new ESP_Media_Protection();
+        $this->media_protection = ESP_Media_Protection::get_instance();
     }
 
     /**
