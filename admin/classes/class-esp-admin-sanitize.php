@@ -208,8 +208,24 @@ class ESP_Sanitize {
             }
         }
 
+        // 保存済みのLiteSpeedキーを優先的に維持
+        $current = ESP_Option::get_current_setting('media');
+        $stored_key = '';
+        if (is_array($current) && isset($current[ESP_Media_Protection::OPTION_LITESPEED_KEY])) {
+            $stored_key = sanitize_text_field($current[ESP_Media_Protection::OPTION_LITESPEED_KEY]);
+        }
+
+        // 新しい入力がある場合のみキーを更新
+        if (is_array($settings) && isset($settings[ESP_Media_Protection::OPTION_LITESPEED_KEY])) {
+            $candidate_key = sanitize_text_field($settings[ESP_Media_Protection::OPTION_LITESPEED_KEY]);
+            if ($candidate_key !== '') {
+                $stored_key = preg_replace('/[^a-zA-Z0-9]/', '', $candidate_key);
+            }
+        }
+
         return array(
-            'delivery_method' => $delivery_method
+            'delivery_method' => $delivery_method,
+            ESP_Media_Protection::OPTION_LITESPEED_KEY => $stored_key
         );
     }
 

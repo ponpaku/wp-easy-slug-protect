@@ -47,18 +47,9 @@ class ESP_Media_Deriver {
 
             // Webサーバー配信が可能な場合はヘッダー委譲のみで終了
             if ($delivery_method['type'] !== 'php') {
-                switch ($delivery_method['type']) {
-                    case 'apache':
-                        header('X-Sendfile: ' . $file_path);
-                        break;
-                    case 'litespeed':
-                        header('X-LiteSpeed-Location: ' . $delivery_method['path']);
-                        break;
-                    case 'nginx':
-                        header('X-Accel-Redirect: ' . $delivery_method['path']);
-                        break;
+                if ($this->attempt_web_server_delivery($delivery_method, $file_path)) {
+                    exit;
                 }
-                exit;
             }
 
             $file_type = wp_check_filetype($file_path);
@@ -121,7 +112,7 @@ class ESP_Media_Deriver {
         }
 
         $litespeed_path = $this->get_litespeed_internal_path($file_path);
-        if ($litespeed_path !== false) {
+        if ($litespeed_path !== false && $this->get_litespeed_access_key() !== '') {
             // LiteSpeedに渡す内部パスが判明した場合
             return [
                 'type' => 'litespeed',
@@ -147,6 +138,54 @@ class ESP_Media_Deriver {
     }
 
     /**
+     * Webサーバーにヘッダーを引き渡して配信させる
+     *
+     * @param array{type:string,path?:string} $delivery_method 判定済みの配信方法
+     * @param string $file_path 実ファイルパス
+     * @return bool ヘッダー送信に成功したらtrue
+     */
+    private function attempt_web_server_delivery($delivery_method, $file_path) {
+        switch ($delivery_method['type']) {
+            case 'apache':
+                // X-Sendfileヘッダーを付与
+                header('X-Sendfile: ' . $file_path);
+                return true;
+
+            case 'nginx':
+                if (isset($delivery_method['path'])) {
+                    // X-Accel-Redirectで内部リダイレクト
+                    header('X-Accel-Redirect: ' . $delivery_method['path']);
+                    return true;
+                }
+                return false;
+
+            case 'litespeed':
+                // LiteSpeedでは内部リダイレクト先に認証キー付きのパスを指定する
+                $access_key = $this->get_litespeed_access_key();
+                if ($access_key === '') {
+                    error_log('ESP: LiteSpeed access key unavailable. Falling back to PHP delivery.');
+                    return false;
+                }
+
+                if (!isset($delivery_method['path'])) {
+                    error_log('ESP: LiteSpeed redirect path missing. Falling back to PHP delivery.');
+                    return false;
+                }
+
+                $redirect_path = $this->build_litespeed_redirect_path($delivery_method['path'], $access_key);
+                if ($redirect_path === '') {
+                    error_log('ESP: LiteSpeed redirect path unavailable. Falling back to PHP delivery.');
+                    return false;
+                }
+
+                header('X-LiteSpeed-Location: ' . $redirect_path);
+                return true;
+        }
+
+        return false;
+    }
+
+    /**
      * 設定で指定された配信方法を優先的に適用
      *
      * @param string $file_path ファイルパス
@@ -162,7 +201,7 @@ class ESP_Media_Deriver {
                 ];
             case 'litespeed':
                 $litespeed_path = $this->get_litespeed_internal_path($file_path);
-                if ($litespeed_path !== false) {
+                if ($litespeed_path !== false && $this->get_litespeed_access_key() !== '') {
                     // LiteSpeedの内部リダイレクトパスが取得できた場合
                     return [
                         'type' => 'litespeed',
@@ -490,6 +529,40 @@ class ESP_Media_Deriver {
         }
 
         return false;
+    }
+
+    /**
+     * LiteSpeed用のアクセスキーを取得
+     */
+    private function get_litespeed_access_key() {
+        if (!class_exists('ESP_Media_Protection')) {
+            // クラスが無ければキーは扱えない
+            return '';
+        }
+
+        // 設定に保存されているキーを取得
+        $key = ESP_Media_Protection::get_litespeed_key_value();
+        return is_string($key) ? $key : '';
+    }
+
+    /**
+     * LiteSpeed内部リダイレクト用のパスを生成
+     */
+    private function build_litespeed_redirect_path($path, $key) {
+        if (!is_string($path) || $path === '' || $key === '') {
+            // 不正な入力の場合はリダイレクトを行わない
+            return '';
+        }
+
+        if (function_exists('add_query_arg')) {
+            return add_query_arg(
+                array(ESP_Config::LITESPEED_QUERY_KEY => $key),
+                $path
+            );
+        }
+
+        $separator = strpos($path, '?') === false ? '?' : '&';
+        return $path . $separator . ESP_Config::LITESPEED_QUERY_KEY . '=' . rawurlencode($key);
     }
 
     /**
