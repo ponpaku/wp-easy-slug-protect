@@ -84,6 +84,7 @@ class ESP_Admin_Menu {
         $remember_settings = ESP_Option::get_current_setting('remember');
         $mail_settings =  ESP_Option::get_current_setting('mail');
         $media_settings = ESP_Option::get_current_setting('media');
+        $media_enabled = isset($media_settings['enabled']) ? (bool) $media_settings['enabled'] : true;
         $delivery_method = isset($media_settings['delivery_method']) ? $media_settings['delivery_method'] : 'auto';
 
         $text_domain = ESP_Config::TEXT_DOMAIN;
@@ -423,12 +424,27 @@ class ESP_Admin_Menu {
                     <h2><?php _e('メディア配信設定', $text_domain); ?></h2>
                     <table class="form-table">
                         <tr>
+                            <th scope="row"><?php _e('メディア保護', $text_domain); ?></th>
+                            <td>
+                                <label>
+                                    <input type="checkbox"
+                                        name="<?php echo $option_key; ?>[media][enabled]"
+                                        value="1"
+                                        <?php checked($media_enabled); ?>>
+                                    <?php _e('メディア保護を有効にする', $text_domain); ?>
+                                </label>
+                                <p class="description">
+                                    <?php _e('チェックを外すとメディア保護機能が無効化され、添付ファイルは通常通り配信されます。', $text_domain); ?>
+                                </p>
+                            </td>
+                        </tr>
+                        <tr>
                             <th scope="row"><?php _e('配信方法', $text_domain); ?></th>
                             <td>
                                 <p class="description">
                                     <?php _e('メディアファイルを保護するために当プラグインでメディアファイルへのアクセス認証を行い配信します。環境に合わせてメディアファイルの配信方法を選択してください。', $text_domain); ?>
                                 </p>
-                                <select name="<?php echo $option_key; ?>[media][delivery_method]" class="regular-text">
+                                <select name="<?php echo $option_key; ?>[media][delivery_method]" class="regular-text" <?php disabled(!$media_enabled); ?>>
                                     <option value="auto" <?php selected($delivery_method, 'auto'); ?>>
                                         <?php _e('自動判定（利用可能な方法を選択）', $text_domain); ?>
                                     </option>
