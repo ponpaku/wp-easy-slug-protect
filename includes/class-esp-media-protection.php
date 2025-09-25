@@ -44,6 +44,11 @@ class ESP_Media_Protection {
     const REWRITE_ENDPOINT = 'esp-media';
 
     /**
+     * LiteSpeed用の配信キーを格納するオプションのキー名
+     */
+    const OPTION_LITESPEED_KEY = 'litespeed_key';
+
+    /**
      * @var array 保護対象のファイル拡張子
      */
     private $protected_extensions = [
@@ -975,10 +980,25 @@ class ESP_Media_Protection {
         
         // 保護されたメディアが存在する場合のみルールを適用
         if ($this->has_protected_media()) {
+            if ($this->is_litespeed()) {
+                // LiteSpeed用の認証キーを必ず確保
+                $litespeed_key = $this->ensure_litespeed_key();
+                $escaped_key = preg_quote($litespeed_key, '/');
+                $query_key = ESP_Config::LITESPEED_QUERY_KEY;
+
+                $rules .= "# LiteSpeed: 認証済みキーがある場合のみ直接配信を許可\n";
+                $rules .= "RewriteCond %{REQUEST_FILENAME} -f\n";
+                $rules .= "RewriteCond %{REQUEST_URI} ^.*\\.({$extensions_pattern})$ [NC]\n";
+                $rules .= "RewriteCond %{QUERY_STRING} (^|&)" . $query_key . "=" . $escaped_key . "(&|$)\n";
+                $rules .= "RewriteRule ^ - [L]\n";
+            }
+
             $rules .= "# 保護されたファイル拡張子へのアクセスをWordPress経由に\n";
             $rules .= "RewriteCond %{REQUEST_FILENAME} -f\n";
             $rules .= "RewriteCond %{REQUEST_URI} ^.*\\.({$extensions_pattern})$ [NC]\n";
-            $rules .= "RewriteRule ^(.+)$ {$home_path}index.php?" . self::REWRITE_ENDPOINT . "=$1 [L]\n";
+
+            $rewrite_flags = $this->is_litespeed() ? '[L,QSA]' : '[L]';
+            $rules .= "RewriteRule ^(.+)$ {$home_path}index.php?" . self::REWRITE_ENDPOINT . "=$1 {$rewrite_flags}\n";
         }
         
         $rules .= "</IfModule>\n";
@@ -998,6 +1018,71 @@ class ESP_Media_Protection {
         // Apache または LiteSpeed(OpenLiteSpeed を含む) なら true
         return stripos($software, 'Apache') !== false
             || stripos($software, 'LiteSpeed') !== false;
+    }
+
+    /**
+     * LiteSpeed環境か確認
+     */
+    private function is_litespeed() {
+        $software = $_SERVER['SERVER_SOFTWARE'] ?? '';
+        return stripos($software, 'LiteSpeed') !== false;
+    }
+
+    /**
+     * LiteSpeed用のキーを取得（存在しない場合は生成して保存）
+     */
+    private function ensure_litespeed_key() {
+        // 保存済みのキーがあればそれを利用
+        $existing = self::get_litespeed_key_value();
+        if ($existing !== '') {
+            return $existing;
+        }
+
+        // 未保存なら新たにキーを生成
+        $key = $this->generate_litespeed_key();
+
+        $settings = ESP_Option::get_all_settings();
+        if (!isset($settings['media']) || !is_array($settings['media'])) {
+            $settings['media'] = array();
+        }
+
+        $settings['media'][self::OPTION_LITESPEED_KEY] = $key;
+        ESP_Option::update_settings($settings);
+
+        return $key;
+    }
+
+    /**
+     * LiteSpeed用のキーを取得（存在しない場合は空文字）
+     */
+    public static function get_litespeed_key_value() {
+        $settings = ESP_Option::get_current_setting('media');
+        if (!is_array($settings) || !isset($settings[self::OPTION_LITESPEED_KEY])) {
+            return '';
+        }
+
+        // 保存済みのキーをサニタイズして返却
+        $key = sanitize_text_field($settings[self::OPTION_LITESPEED_KEY]);
+        $key = preg_replace('/[^a-zA-Z0-9]/', '', $key);
+
+        return is_string($key) ? $key : '';
+    }
+
+    /**
+     * LiteSpeed用のキーを生成
+     */
+    private function generate_litespeed_key() {
+        try {
+            $bytes = random_bytes(16);
+            return bin2hex($bytes);
+        } catch (Exception $e) {
+            if (function_exists('wp_generate_password')) {
+                $password = wp_generate_password(32, false, false);
+                return preg_replace('/[^a-zA-Z0-9]/', '', $password);
+            }
+
+            return substr(md5(uniqid((string) mt_rand(), true)), 0, 32);
+        }
     }
 
     /**

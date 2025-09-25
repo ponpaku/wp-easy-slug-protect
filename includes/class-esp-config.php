@@ -7,6 +7,7 @@ if (!defined('ABSPATH')) {
 class ESP_Config {
     const TEXT_DOMAIN = 'easy-slug-protect';
     const OPTION_KEY = 'esp_settings';
+    const LITESPEED_QUERY_KEY = 'esp_media_key';
     
     // バージョン管理用の定数を追加
     const VERSION_OPTION_KEY = 'esp_plugin_version';
@@ -41,7 +42,8 @@ class ESP_Config {
             )
         ),
         'media' => array(
-            'delivery_method' => 'auto'
+            'delivery_method' => 'auto',
+            'litespeed_key' => ''
         ),
         'db_version' => 4 // DBバージョン
 
