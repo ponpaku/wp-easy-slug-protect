@@ -623,7 +623,7 @@ class ESP_Filter {
         if (empty($post_ids)) {
             // 全件処理済み
             $instance->regenerate_protected_posts_cache();
-            error_log('ESP Cron Integrity Check: All posts processed. Total fixed in this session: ' . (int) $progress['total_fixed_this_session']);
+            // error_log('ESP Cron Integrity Check: All posts processed. Total fixed in this session: ' . (int) $progress['total_fixed_this_session']);
             delete_option($option_name);
             return;
         }
@@ -655,7 +655,7 @@ class ESP_Filter {
             $instance->regenerate_protected_posts_cache(); // 差分があった場合のみ再生成
         }
 
-        error_log(sprintf('ESP Cron Integrity Check: Processed %d posts in this batch (fixed %d). Next offset: %d. Total fixed this session: %d.', $checked_count_this_batch, $fixed_count_this_batch, $new_offset, $total_fixed_session));
+        // error_log(sprintf('ESP Cron Integrity Check: Processed %d posts in this batch (fixed %d). Next offset: %d. Total fixed this session: %d.', $checked_count_this_batch, $fixed_count_this_batch, $new_offset, $total_fixed_session));
 
         update_option($option_name, [
             'offset'                  => $new_offset,
