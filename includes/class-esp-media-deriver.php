@@ -148,12 +148,14 @@ class ESP_Media_Deriver {
         switch ($delivery_method['type']) {
             case 'apache':
                 // X-Sendfileヘッダーを付与
+                $this->clear_header();
                 header('X-Sendfile: ' . $file_path);
                 return true;
 
             case 'nginx':
                 if (isset($delivery_method['path'])) {
                     // X-Accel-Redirectで内部リダイレクト
+                    $this->clear_header();
                     header('X-Accel-Redirect: ' . $delivery_method['path']);
                     return true;
                 }
@@ -178,11 +180,44 @@ class ESP_Media_Deriver {
                     return false;
                 }
 
+                $this->clear_header();
                 header('X-LiteSpeed-Location: ' . $redirect_path);
                 return true;
         }
 
         return false;
+    }
+
+    /**
+     * LiteSpeed等へ委譲する前に競合しうるヘッダーを削除
+     */
+    private function clear_header() {
+        if (!function_exists('header_remove')) {
+            return;
+        }
+
+        $headers = [
+            'Content-Type',
+            'Content-Length',
+            'Content-Encoding',
+            'Content-Range',
+            'Accept-Ranges',
+            'Content-Disposition',
+            'Cache-Control',
+            'Expires',
+            'Pragma',
+            'Last-Modified',
+            'ETag',
+        ];
+
+        foreach ($headers as $header) {
+            header_remove($header);
+        }
+
+        if (function_exists('ini_set')) {
+            // 既定のContent-Type付与を抑止
+            ini_set('default_mimetype', '');
+        }
     }
 
     /**
