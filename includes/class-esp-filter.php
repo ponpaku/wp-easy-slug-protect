@@ -96,7 +96,7 @@ class ESP_Filter {
      * @param string|null $new_structure
      */
     public function handle_permalink_structure_change($old_structure = null, $new_structure = null) {
-        error_log('ESP: Permalink structure changed. Manual regeneration of permalink path meta data is recommended.');
+        // error_log('ESP: Permalink structure changed. Manual regeneration of permalink path meta data is recommended.');
         $this->force_regenerate_all_permalink_paths_meta_sync();
         $this->regenerate_protected_posts_cache();
     }
@@ -285,7 +285,7 @@ class ESP_Filter {
     private function get_excluded_post_ids() {
         $cached_data = get_transient(self::CACHE_KEY);
         if ($cached_data === false) {
-            error_log('ESP_Filter: Cache miss in get_excluded_post_ids. Regenerating on the fly.');
+            // error_log('ESP_Filter: Cache miss in get_excluded_post_ids. Regenerating on the fly.');
             $this->regenerate_protected_posts_cache(); // 次回以降のために構築
             $cached_data = get_transient(self::CACHE_KEY);
         }
@@ -438,7 +438,7 @@ class ESP_Filter {
 
         while (true) {
             if (memory_get_usage(true) > $memory_threshold) {
-                error_log('ESP_Filter: Memory usage high, stopping batch processing');
+                // error_log('ESP_Filter: Memory usage high, stopping batch processing');
                 break; // 多量サイトでの安全装置
             }
 
@@ -606,7 +606,7 @@ class ESP_Filter {
         $offset = isset($progress['offset']) ? absint($progress['offset']) : 0;
         $limit  = apply_filters('esp_integrity_check_cron_limit', 100);
 
-        error_log(sprintf('ESP Cron Integrity Check: Starting batch from offset %d, limit %d.', $offset, $limit));
+        // error_log(sprintf('ESP Cron Integrity Check: Starting batch from offset %d, limit %d.', $offset, $limit));
         update_option($option_name, ['offset' => $offset, 'last_run_start' => time(), 'total_fixed_this_session' => (int) $progress['total_fixed_this_session']]);
 
         $args = [
