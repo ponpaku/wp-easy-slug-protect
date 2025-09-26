@@ -76,7 +76,3 @@ if (file_exists($htaccess_file)) {
     $content = preg_replace($pattern, '', $content);
     file_put_contents($htaccess_file, $content);
 }
-
-// データベースの最適化（オプション）
-$wpdb->query("OPTIMIZE TABLE {$wpdb->options}");
-$wpdb->query("OPTIMIZE TABLE {$wpdb->postmeta}");
