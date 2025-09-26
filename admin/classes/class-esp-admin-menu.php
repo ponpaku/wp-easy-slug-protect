@@ -87,6 +87,31 @@ class ESP_Admin_Menu {
         $media_enabled = isset($media_settings['enabled']) ? (bool) $media_settings['enabled'] : true;
         $delivery_method = isset($media_settings['delivery_method']) ? $media_settings['delivery_method'] : 'auto';
 
+        $nginx_rules = '';
+        $nginx_rules_error = '';
+        $nginx_rules_meta = array(
+            'media_enabled' => $media_enabled,
+            'has_protected_media' => false,
+        );
+
+        $is_nginx_server = class_exists('ESP_Media_Protection') && ESP_Media_Protection::is_nginx_server();
+
+        if ($is_nginx_server && class_exists('ESP_Media_Protection')) {
+            $nginx_rules_result = ESP_Media_Protection::generate_nginx_rules_for_admin();
+
+            if (is_wp_error($nginx_rules_result)) {
+                $nginx_rules_error = $nginx_rules_result->get_error_message();
+            } else {
+                $nginx_rules = isset($nginx_rules_result['rules']) ? $nginx_rules_result['rules'] : '';
+                if (isset($nginx_rules_result['media_enabled'])) {
+                    $nginx_rules_meta['media_enabled'] = (bool) $nginx_rules_result['media_enabled'];
+                }
+                if (isset($nginx_rules_result['has_protected_media'])) {
+                    $nginx_rules_meta['has_protected_media'] = (bool) $nginx_rules_result['has_protected_media'];
+                }
+            }
+        }
+
         $text_domain = ESP_Config::TEXT_DOMAIN;
         $option_key = ESP_Config::OPTION_KEY;
 
@@ -466,6 +491,38 @@ class ESP_Admin_Menu {
                                 </p>
                             </td>
                         </tr>
+                        <?php if ($is_nginx_server): ?>
+                        <tr>
+                            <th scope="row"><?php _e('Nginx向けサーバー設定', $text_domain); ?></th>
+                            <td>
+                                <p class="description">
+                                    <?php _e('サーバーがNginxとして検出されたため、以下のルールをサーバー設定に追加してメディア保護を有効にしてください。', $text_domain); ?>
+                                </p>
+                                <?php if (!empty($nginx_rules_error)): ?>
+                                    <p class="description" style="color: #d63638;">
+                                        <?php echo esc_html($nginx_rules_error); ?>
+                                    </p>
+                                <?php else: ?>
+                                    <?php if (!$nginx_rules_meta['media_enabled']): ?>
+                                        <p class="description">
+                                            <?php _e('現在メディア保護が無効になっています。設定を保存して有効化するとルールが機能します。', $text_domain); ?>
+                                        </p>
+                                    <?php endif; ?>
+                                    <?php if (!$nginx_rules_meta['has_protected_media']): ?>
+                                        <p class="description">
+                                            <?php _e('まだ保護対象のメディアは登録されていませんが、先にルールを設定しても問題ありません。', $text_domain); ?>
+                                        </p>
+                                    <?php endif; ?>
+                                    <?php if (!empty($nginx_rules)): ?>
+                                        <textarea readonly class="large-text code" rows="8" onclick="this.select();"><?php echo esc_textarea($nginx_rules); ?></textarea>
+                                        <p class="description">
+                                            <?php _e('serverディレクティブ内に貼り付け、設定反映後にNginxをリロードしてください。', $text_domain); ?>
+                                        </p>
+                                    <?php endif; ?>
+                                <?php endif; ?>
+                            </td>
+                        </tr>
+                        <?php endif; ?>
                     </table>
                 </div>
 

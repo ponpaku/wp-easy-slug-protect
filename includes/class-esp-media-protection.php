@@ -54,9 +54,9 @@ class ESP_Media_Protection {
     const OPTION_LITESPEED_KEY = 'litespeed_key';
 
     /**
-     * @var array 保護対象のファイル拡張子
+     * 保護対象のファイル拡張子
      */
-    private $protected_extensions = [
+    private const PROTECTED_EXTENSIONS = [
         // 画像
         'jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'ico', 'bmp',
         // ドキュメント
@@ -536,7 +536,7 @@ class ESP_Media_Protection {
         
         // wp-content/uploads/以下のファイルへのアクセスをキャッチ
         // 保護された拡張子のみを対象にする
-        $extensions_pattern = implode('|', array_map('preg_quote', $this->protected_extensions));
+        $extensions_pattern = implode('|', array_map('preg_quote', self::PROTECTED_EXTENSIONS));
         
         add_rewrite_rule(
             '^' . $upload_path . '/(.+\.(' . $extensions_pattern . '))$',
@@ -564,7 +564,7 @@ class ESP_Media_Protection {
         $is_media_request = false;
         
         // 保護拡張子のパターンマッチング
-        $extensions_pattern = implode('|', array_map('preg_quote', $this->protected_extensions));
+        $extensions_pattern = implode('|', array_map('preg_quote', self::PROTECTED_EXTENSIONS));
         if (preg_match('/wp-content\/uploads\/.*\.(' . $extensions_pattern . ')$/i', $request_uri)) {
             $is_media_request = true;
         }
@@ -607,7 +607,7 @@ class ESP_Media_Protection {
         
         // ファイル拡張子の確認
         $extension = strtolower(pathinfo($file_path, PATHINFO_EXTENSION));
-        if (!in_array($extension, $this->protected_extensions, true)) {
+        if (!in_array($extension, self::PROTECTED_EXTENSIONS, true)) {
             $this->deliver_media($file_path);
             return;
         }
@@ -1033,7 +1033,7 @@ class ESP_Media_Protection {
         $rules .= "RewriteBase {$home_path}\n";
         
         // 保護対象の拡張子パターンを生成
-        $extensions_pattern = implode('|', array_map('preg_quote', $this->protected_extensions));
+        $extensions_pattern = implode('|', array_map('preg_quote', self::PROTECTED_EXTENSIONS));
         
         // 保護されたメディアが存在する場合のみルールを適用
         if ($this->has_protected_media()) {
@@ -1069,10 +1069,8 @@ class ESP_Media_Protection {
      * @return bool
      */
     private function is_apache() {
-        // $_SERVER['SERVER_SOFTWARE'] が未定義でもエラーにならないように
-        $software = $_SERVER['SERVER_SOFTWARE'] ?? '';
+        $software = self::get_server_software();
 
-        // Apache または LiteSpeed(OpenLiteSpeed を含む) なら true
         return stripos($software, 'Apache') !== false
             || stripos($software, 'LiteSpeed') !== false;
     }
@@ -1081,8 +1079,77 @@ class ESP_Media_Protection {
      * LiteSpeed環境か確認
      */
     private function is_litespeed() {
-        $software = $_SERVER['SERVER_SOFTWARE'] ?? '';
+        $software = self::get_server_software();
         return stripos($software, 'LiteSpeed') !== false;
+    }
+
+    /**
+     * Nginx環境か確認
+     */
+    public static function is_nginx_server() {
+        $software = self::get_server_software();
+
+        return stripos($software, 'nginx') !== false
+            || stripos($software, 'openresty') !== false
+            || stripos($software, 'tengine') !== false;
+    }
+
+    /**
+     * サーバーソフトウェア文字列を取得
+     */
+    private static function get_server_software() {
+        return $_SERVER['SERVER_SOFTWARE'] ?? '';
+    }
+
+    /**
+     * 管理画面で表示するNginx用ルールを生成
+     */
+    public static function generate_nginx_rules_for_admin() {
+        if (!is_admin()) {
+            return new WP_Error(
+                'esp_nginx_rules_context',
+                __('Nginx設定の生成は管理画面からのみ実行できます。', ESP_Config::TEXT_DOMAIN)
+            );
+        }
+
+        if (!self::is_nginx_server()) {
+            return new WP_Error(
+                'esp_nginx_rules_not_nginx',
+                __('現在のサーバーソフトウェアではNginx用ルールは必要ありません。', ESP_Config::TEXT_DOMAIN)
+            );
+        }
+
+        $upload_dir = wp_upload_dir();
+        if (!empty($upload_dir['error'])) {
+            return new WP_Error(
+                'esp_nginx_rules_upload_dir',
+                sprintf(__('アップロードディレクトリを取得できません: %s', ESP_Config::TEXT_DOMAIN), $upload_dir['error'])
+            );
+        }
+
+        $upload_path = parse_url($upload_dir['baseurl'], PHP_URL_PATH);
+        if (!$upload_path) {
+            $upload_path = '/wp-content/uploads';
+        }
+        $upload_path = rtrim($upload_path, '/');
+
+        $home_path = parse_url(home_url(), PHP_URL_PATH);
+        $home_path = $home_path ? trailingslashit($home_path) : '/';
+
+        $extensions_pattern = implode('|', array_map('preg_quote', self::PROTECTED_EXTENSIONS));
+
+        $rules  = "# BEGIN ESP Media Protection (nginx)\n";
+        $rules .= "# このブロックをserverディレクティブ内に追加してください。\n";
+        $rules .= "location ~* ^{$upload_path}/(.+\\.({$extensions_pattern}))$ {\n";
+        $rules .= "    rewrite ^{$upload_path}/(.+)$ {$home_path}index.php?" . self::REWRITE_ENDPOINT . "=$1 last;\n";
+        $rules .= "}\n";
+        $rules .= "# END ESP Media Protection (nginx)\n";
+
+        return array(
+            'rules' => $rules,
+            'media_enabled' => self::is_media_protection_enabled(),
+            'has_protected_media' => self::has_any_protected_media_records(),
+        );
     }
 
     /**
@@ -1154,14 +1221,34 @@ class ESP_Media_Protection {
             return false;
         }
 
+        return self::has_any_protected_media_records();
+    }
+
+    /**
+     * メディア保護が有効かどうか
+     */
+    private static function is_media_protection_enabled() {
+        $settings = ESP_Option::get_current_setting('media');
+
+        if (!is_array($settings) || !array_key_exists('enabled', $settings)) {
+            return true;
+        }
+
+        return (bool) $settings['enabled'];
+    }
+
+    /**
+     * 保護されたメディアが存在するかどうか
+     */
+    private static function has_any_protected_media_records() {
         global $wpdb;
 
         $count = $wpdb->get_var($wpdb->prepare(
             "SELECT COUNT(*) FROM {$wpdb->postmeta} WHERE meta_key = %s",
             self::META_KEY_PROTECTED_PATH
         ));
-        
-        return $count > 0;
+
+        return (int) $count > 0;
     }
 
     /**
