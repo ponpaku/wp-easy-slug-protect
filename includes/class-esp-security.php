@@ -10,7 +10,7 @@ if (!defined('ABSPATH')) {
 class ESP_Security {
 
     /**
-     * IPアドレスの取得（SiteGuard方式）
+     * IPアドレスの取得
      * 保守性・反複雑化を最優先し、REMOTE_ADDRのみを使用
      * 
      * @return string|false IPアドレス。取得できない場合はfalse
