@@ -276,8 +276,14 @@ class ESP_Media_Protection {
             ], 400);
         }
 
+        $media_settings = ESP_Option::get_current_setting('media');
+        $delivery_method = is_array($media_settings) && isset($media_settings['delivery_method'])
+            ? $media_settings['delivery_method']
+            : 'auto';
+        $force_litespeed_key_regeneration = ($delivery_method === 'litespeed');
+
         // 実際の書き込み結果を取得（WP_Errorの可能性あり）
-        $result = $this->update_htaccess();
+        $result = $this->update_htaccess($force_litespeed_key_regeneration);
 
         if ($result === true) {
             wp_send_json_success([
@@ -935,9 +941,10 @@ class ESP_Media_Protection {
     /**
      * .htaccessファイルを更新（Apache環境用）
      *
+     * @param bool $force_litespeed_key_regeneration LiteSpeedキーを再生成するかどうか
      * @return bool 成功時true
      */
-    public function update_htaccess() {
+    public function update_htaccess($force_litespeed_key_regeneration = false) {
         if (!$this->is_apache()) {
             return $this->enabled
                 ? new WP_Error('esp_htaccess_unsupported', __('ApacheまたはLiteSpeed環境でのみ利用できます。', ESP_Config::TEXT_DOMAIN))
@@ -963,7 +970,7 @@ class ESP_Media_Protection {
         }
 
         // ESP用のルールを定義
-        $esp_rules = $this->get_htaccess_rules();
+        $esp_rules = $this->get_htaccess_rules($force_litespeed_key_regeneration);
 
         // 既存のESPルールを削除
         $pattern = '/# BEGIN ESP Media Protection.*?# END ESP Media Protection\s*/s';
@@ -1007,9 +1014,10 @@ class ESP_Media_Protection {
     /**
      * .htaccess用のルールを生成
      *
+     * @param bool $force_litespeed_key_regeneration LiteSpeedキーを再生成するかどうか
      * @return string .htaccessルール
      */
-    private function get_htaccess_rules() {
+    private function get_htaccess_rules($force_litespeed_key_regeneration = false) {
         $home_path = parse_url(home_url(), PHP_URL_PATH);
         $home_path = $home_path ? trailingslashit($home_path) : '/';
         
@@ -1031,7 +1039,7 @@ class ESP_Media_Protection {
         if ($this->has_protected_media()) {
             if ($this->is_litespeed()) {
                 // LiteSpeed用の認証キーを必ず確保
-                $litespeed_key = $this->ensure_litespeed_key();
+                $litespeed_key = $this->ensure_litespeed_key($force_litespeed_key_regeneration);
                 $escaped_key = preg_quote($litespeed_key, '/');
                 $query_key = ESP_Config::LITESPEED_QUERY_KEY;
 
@@ -1079,15 +1087,17 @@ class ESP_Media_Protection {
 
     /**
      * LiteSpeed用のキーを取得（存在しない場合は生成して保存）
+     *
+     * @param bool $force_regeneration 強制的にキーを再生成するかどうか
      */
-    private function ensure_litespeed_key() {
-        // 保存済みのキーがあればそれを利用
+    private function ensure_litespeed_key($force_regeneration = false) {
+        // 強制再生成が不要で、保存済みのキーがあればそれを利用
         $existing = self::get_litespeed_key_value();
-        if ($existing !== '') {
+        if (!$force_regeneration && $existing !== '') {
             return $existing;
         }
 
-        // 未保存なら新たにキーを生成
+        // 未保存または強制再生成が必要な場合は新たにキーを生成
         $key = $this->generate_litespeed_key();
 
         $settings = ESP_Option::get_all_settings();
