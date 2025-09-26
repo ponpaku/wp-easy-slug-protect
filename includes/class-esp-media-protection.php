@@ -24,6 +24,11 @@ class ESP_Media_Protection {
     private $deriver;
 
     /**
+     * @var bool メディア保護が有効かどうか
+     */
+    private $enabled = true;
+
+    /**
      * @var string メディア保護用メタキー
      */
     const META_KEY_PROTECTED_PATH = '_esp_media_protected_path_id';
@@ -70,6 +75,11 @@ class ESP_Media_Protection {
      * コンストラクタ
      */
     public function __construct() {
+        $settings = ESP_Option::get_current_setting('media');
+        if (is_array($settings) && isset($settings['enabled'])) {
+            $this->enabled = (bool) $settings['enabled'];
+        }
+
         $this->deriver = new ESP_Media_Deriver();
         $this->init();
     }
@@ -132,6 +142,11 @@ class ESP_Media_Protection {
      * キャッシュの存在確認と生成
      */
     private function check_and_generate_cache() {
+        if (!$this->enabled) {
+            delete_transient(self::MEDIA_CACHE_KEY);
+            return;
+        }
+
         $cached_data = get_transient(self::MEDIA_CACHE_KEY);
         if ($cached_data === false) {
             $this->regenerate_media_cache();
@@ -142,8 +157,13 @@ class ESP_Media_Protection {
      * 保護されたメディアのキャッシュを再生成
      */
     public function regenerate_media_cache() {
+        if (!$this->enabled) {
+            delete_transient(self::MEDIA_CACHE_KEY);
+            return;
+        }
+
         global $wpdb;
-        
+
         $protected_paths = ESP_Option::get_current_setting('path');
         if (empty($protected_paths)) {
             delete_transient(self::MEDIA_CACHE_KEY);
@@ -188,8 +208,12 @@ class ESP_Media_Protection {
      * @return array 除外すべきメディアIDの配列
      */
     private function get_protected_media_ids_for_current_user() {
+        if (!$this->enabled) {
+            return [];
+        }
+
         $cached_data = get_transient(self::MEDIA_CACHE_KEY);
-        
+
         if ($cached_data === false) {
             $this->regenerate_media_cache();
             $cached_data = get_transient(self::MEDIA_CACHE_KEY);
@@ -239,6 +263,13 @@ class ESP_Media_Protection {
             wp_send_json_error(['message' => __('権限がありません。', ESP_Config::TEXT_DOMAIN)], 403);
         }
 
+        if (!$this->enabled && !$this->is_apache()) {
+            $this->update_htaccess();
+            wp_send_json_success([
+                'message' => __('.htaccessのルールを再設定しました。', ESP_Config::TEXT_DOMAIN)
+            ]);
+        }
+
         if (!$this->is_apache()) {
             wp_send_json_error([
                 'message' => __('この機能はApacheまたはLiteSpeed環境でのみ利用できます。', ESP_Config::TEXT_DOMAIN)
@@ -275,6 +306,10 @@ class ESP_Media_Protection {
      * @return array 修正されたWP_Queryの引数配列
      */
     public function filter_rest_media_query($args, $request) {
+        if (!$this->enabled) {
+            return $args;
+        }
+
         // REST APIリクエストであることを確認
         if (!(defined('REST_REQUEST') && REST_REQUEST)) {
             return $args;
@@ -305,6 +340,10 @@ class ESP_Media_Protection {
      * @return WP_REST_Response|WP_Error 変更されたレスポンスまたはエラー
      */
     public function check_rest_media_access($response, $post, $request) {
+        if (!$this->enabled) {
+            return $response;
+        }
+
         // REST APIリクエストであることを確認
         if (!(defined('REST_REQUEST') && REST_REQUEST)) {
             return $response;
@@ -481,6 +520,10 @@ class ESP_Media_Protection {
      * リライトルールを追加
      */
     public function add_rewrite_rules() {
+        if (!$this->enabled) {
+            return;
+        }
+
         $upload_dir = wp_upload_dir();
         $upload_path = str_replace(home_url(), '', $upload_dir['baseurl']);
         $upload_path = trim($upload_path, '/');
@@ -506,6 +549,10 @@ class ESP_Media_Protection {
     * メディアファイルへのアクセスを処理（クリーンアップ版）
     */
     public function handle_media_access() {
+        if (!$this->enabled) {
+            return;
+        }
+
         // リクエストURIから直接判定
         $request_uri = $_SERVER['REQUEST_URI'] ?? '';
         $is_media_request = false;
@@ -892,7 +939,9 @@ class ESP_Media_Protection {
      */
     public function update_htaccess() {
         if (!$this->is_apache()) {
-            return new WP_Error('esp_htaccess_unsupported', __('ApacheまたはLiteSpeed環境でのみ利用できます。', ESP_Config::TEXT_DOMAIN));
+            return $this->enabled
+                ? new WP_Error('esp_htaccess_unsupported', __('ApacheまたはLiteSpeed環境でのみ利用できます。', ESP_Config::TEXT_DOMAIN))
+                : true;
         }
 
         $upload_dir = wp_upload_dir();
@@ -1091,8 +1140,12 @@ class ESP_Media_Protection {
      * @return bool
      */
     private function has_protected_media() {
+        if (!$this->enabled) {
+            return false;
+        }
+
         global $wpdb;
-        
+
         $count = $wpdb->get_var($wpdb->prepare(
             "SELECT COUNT(*) FROM {$wpdb->postmeta} WHERE meta_key = %s",
             self::META_KEY_PROTECTED_PATH

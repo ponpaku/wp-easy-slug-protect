@@ -42,6 +42,7 @@ class ESP_Config {
             )
         ),
         'media' => array(
+            'enabled' => true,
             'delivery_method' => 'auto',
             'litespeed_key' => ''
         ),

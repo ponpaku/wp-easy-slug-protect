@@ -224,6 +224,7 @@ class ESP_Sanitize {
         }
 
         return array(
+            'enabled' => is_array($settings) && !empty($settings['enabled']),
             'delivery_method' => $delivery_method,
             ESP_Media_Protection::OPTION_LITESPEED_KEY => $stored_key
         );
