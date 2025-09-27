@@ -51,9 +51,7 @@ class ESP_Admin_Page {
         $this->menu = new ESP_Admin_Menu();
         $this->assets = new ESP_Admin_Assets();
 
-        if (class_exists('ESP_Media_Protection')) {
-            // 管理画面でもメディア保護機能を有効化
-            $this->media_protection = new ESP_Media_Protection();
-        }
+        // 管理画面でもメディア保護機能を有効化
+        $this->media_protection = new ESP_Media_Protection();
     }
 }
