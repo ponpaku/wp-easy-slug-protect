@@ -49,3 +49,4 @@ wp-config.php
 
 *.zip
 dev-doc.md
+/archive/
