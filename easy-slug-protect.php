@@ -112,9 +112,6 @@ class Easy_Slug_Protect {
             add_action(ESP_Config::INTEGRITY_CHECK_HOOK, ['ESP_Filter', 'cron_check_and_fix_permalink_paths']);
         }
 
-        if (class_exists('ESP_Media_Protection')) {
-            new ESP_Media_Protection();
-        }
     }
 
     /**
