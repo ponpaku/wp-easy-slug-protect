@@ -125,6 +125,47 @@ class ESP_Core {
         // 現在のページがログインページかチェック
         $is_login_page_setting = $this->is_login_page($post->ID);
 
+        // 保護対象ページかつログインページ以外
+        if ($target_path && !$is_login_page_setting) {
+            static $nocache_headers_sent = false;
+            // まだ送信されていない場合のみ送信
+            if (!$nocache_headers_sent && !headers_sent()) {
+                nocache_headers();
+
+                $cache_control_sent = false;
+                $pragma_sent = false;
+                // headers_list() が利用可能な場合のみ確認
+                if (function_exists('headers_list')) {
+                    foreach (headers_list() as $header_line) {
+                        $lower_header = strtolower($header_line);
+                        // Cache-Control ヘッダー検出
+                        if (strpos($lower_header, 'cache-control:') === 0) {
+                            $cache_control_sent = true;
+                        }
+                        // Pragma ヘッダー検出
+                        if (strpos($lower_header, 'pragma:') === 0) {
+                            $pragma_sent = true;
+                        }
+                        // 両方検出したら終了
+                        if ($cache_control_sent && $pragma_sent) {
+                            break;
+                        }
+                    }
+                }
+
+                // まだ送信されていない場合のみ追加
+                if (!$cache_control_sent) {
+                    header('Cache-Control: no-cache, must-revalidate, max-age=0');
+                }
+                // まだ送信されていない場合のみ追加
+                if (!$pragma_sent) {
+                    header('Pragma: no-cache');
+                }
+
+                $nocache_headers_sent = true;
+            }
+        }
+
         // POSTリクエストの場合はログイン処理を優先
         if (isset($_POST['esp_password'])) {
             $login_handling_path_setting = $is_login_page_setting ? $is_login_page_setting : $target_path;
