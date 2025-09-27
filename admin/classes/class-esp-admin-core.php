@@ -20,6 +20,11 @@ class ESP_Admin_Page {
      */
     private $assets;
 
+    /**
+     * @var ESP_Media_Protection
+     */
+    private $media_protection;
+
     public function __construct() {
         $this->load_dependencies();
         $this->initialize_components();
@@ -42,8 +47,11 @@ class ESP_Admin_Page {
         // シングルトンインスタンスを取得して初期化
         $settings = ESP_Settings::get_instance();
         $settings->init();
-        
+
         $this->menu = new ESP_Admin_Menu();
         $this->assets = new ESP_Admin_Assets();
+
+        // 管理画面でもメディア保護機能を有効化
+        $this->media_protection = new ESP_Media_Protection();
     }
 }
