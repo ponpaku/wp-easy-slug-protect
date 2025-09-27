@@ -1028,9 +1028,10 @@ class ESP_Media_Protection {
         
         $rules = "# BEGIN ESP Media Protection\n";
         $rules .= "# 保護されたメディアファイルへの直接アクセスをWordPress経由にリダイレクト\n";
+        $indent = '    ';
         $rules .= "<IfModule mod_rewrite.c>\n";
-        $rules .= "RewriteEngine On\n";
-        $rules .= "RewriteBase {$home_path}\n";
+        $rules .= "{$indent}RewriteEngine On\n";
+        $rules .= "{$indent}RewriteBase {$home_path}\n";
         
         // 保護対象の拡張子パターンを生成
         $extensions_pattern = implode('|', array_map('preg_quote', self::PROTECTED_EXTENSIONS));
@@ -1043,19 +1044,19 @@ class ESP_Media_Protection {
                 $escaped_key = preg_quote($litespeed_key, '/');
                 $query_key = ESP_Config::LITESPEED_QUERY_KEY;
 
-                $rules .= "# LiteSpeed: 認証済みキーがある場合のみ直接配信を許可\n";
-                $rules .= "RewriteCond %{REQUEST_FILENAME} -f\n";
-                $rules .= "RewriteCond %{REQUEST_URI} ^.*\\.({$extensions_pattern})$ [NC]\n";
-                $rules .= "RewriteCond %{QUERY_STRING} (^|&)" . $query_key . "=" . $escaped_key . "(&|$)\n";
-                $rules .= "RewriteRule ^ - [L]\n";
+                $rules .= "{$indent}# LiteSpeed: 認証済みキーがある場合のみ直接配信を許可\n";
+                $rules .= "{$indent}RewriteCond %{REQUEST_FILENAME} -f\n";
+                $rules .= "{$indent}RewriteCond %{REQUEST_URI} ^.*\\.({$extensions_pattern})$ [NC]\n";
+                $rules .= "{$indent}RewriteCond %{QUERY_STRING} (^|&)" . $query_key . "=" . $escaped_key . "(&|$)\n";
+                $rules .= "{$indent}RewriteRule ^ - [L]\n";
             }
 
-            $rules .= "# 保護されたファイル拡張子へのアクセスをWordPress経由に\n";
-            $rules .= "RewriteCond %{REQUEST_FILENAME} -f\n";
-            $rules .= "RewriteCond %{REQUEST_URI} ^.*\\.({$extensions_pattern})$ [NC]\n";
+            $rules .= "{$indent}# 保護されたファイル拡張子へのアクセスをWordPress経由に\n";
+            $rules .= "{$indent}RewriteCond %{REQUEST_FILENAME} -f\n";
+            $rules .= "{$indent}RewriteCond %{REQUEST_URI} ^.*\\.({$extensions_pattern})$ [NC]\n";
 
             $rewrite_flags = $this->is_litespeed() ? '[L,QSA]' : '[L]';
-            $rules .= "RewriteRule ^(.+)$ {$home_path}index.php?" . self::REWRITE_ENDPOINT . "=$1 {$rewrite_flags}\n";
+            $rules .= "{$indent}RewriteRule ^(.+)$ {$home_path}index.php?" . self::REWRITE_ENDPOINT . "=$1 {$rewrite_flags}\n";
         }
         
         $rules .= "</IfModule>\n";
