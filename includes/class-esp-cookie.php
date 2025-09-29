@@ -16,6 +16,12 @@ class ESP_Cookie {
     private $pending_cookies = [];
 
     /**
+     * Cookie名のプレフィックス
+     * @var array|null
+     */
+    private $cookie_prefixes = null;
+
+    /**
      * シングルトンインスタンス
      * @var ESP_Cookie
      */
@@ -63,8 +69,19 @@ class ESP_Cookie {
     }
 
     /**
+     * Cookieプレフィックスを取得
+     */
+    private function get_prefixes() {
+        if ($this->cookie_prefixes === null) {
+            $this->cookie_prefixes = ESP_Config::get_cookie_prefixes();
+        }
+
+        return $this->cookie_prefixes;
+    }
+
+    /**
      * 認証用セッションCookieの準備
-     * 
+     *
      * @param string $path_id パスID
      * @param string $token トークン
      */
@@ -72,7 +89,8 @@ class ESP_Cookie {
         if ($expires === null) {
             $expires = time() + DAY_IN_SECONDS;
         }
-        $this->pending_cookies['esp_auth_' . $path_id] = [
+        $prefixes = $this->get_prefixes();
+        $this->pending_cookies[$prefixes['session'] . $path_id] = [
             'value' => $token,
             'expires' => $expires
         ];
@@ -88,11 +106,12 @@ class ESP_Cookie {
      */
     public function prepare_remember_cookies($path_settings, $user_id, $token, $expires) {
         $path_id = $path_settings['id'];
-        $this->pending_cookies["esp_remember_id_{$path_id}"] = [
+        $prefixes = $this->get_prefixes();
+        $this->pending_cookies[$prefixes['remember_id'] . $path_id] = [
             'value' => $user_id,
             'expires' => $expires
         ];
-        $this->pending_cookies["esp_remember_token_{$path_id}"] = [
+        $this->pending_cookies[$prefixes['remember_token'] . $path_id] = [
             'value' => $token,
             'expires' => $expires
         ];
@@ -151,7 +170,8 @@ class ESP_Cookie {
      * @param string $path_id パスID
      */
     public function clear_session_cookie($path_id) {
-        $this->pending_cookies['esp_auth_' . $path_id] = [
+        $prefixes = $this->get_prefixes();
+        $this->pending_cookies[$prefixes['session'] . $path_id] = [
             'value' => '',
             'expires' => time() - HOUR_IN_SECONDS
         ];
@@ -164,7 +184,11 @@ class ESP_Cookie {
      */
     public function clear_remember_cookies_for_path($path_settings) {
         $path_id = $path_settings['id'];
-        foreach (["esp_remember_id_{$path_id}", "esp_remember_token_{$path_id}"] as $name) {
+        $prefixes = $this->get_prefixes();
+        foreach (array(
+            $prefixes['remember_id'] . $path_id,
+            $prefixes['remember_token'] . $path_id
+        ) as $name) {
             $this->pending_cookies[$name] = [
                 'value' => '',
                 'expires' => time() - HOUR_IN_SECONDS
@@ -179,7 +203,9 @@ class ESP_Cookie {
      * @return string|null Cookie値。存在しない場合はnull
      */
     public function get_session_cookie($path_id) {
-        return isset($_COOKIE['esp_auth_' . $path_id]) ? $_COOKIE['esp_auth_' . $path_id] : null;
+        $prefixes = $this->get_prefixes();
+        $name = $prefixes['session'] . $path_id;
+        return isset($_COOKIE[$name]) ? $_COOKIE[$name] : null;
     }
 
     /**
@@ -190,14 +216,17 @@ class ESP_Cookie {
      */
     public function get_remember_cookies_for_path($path_settings) {
         $path_id = $path_settings['id'];
-        if (!isset($_COOKIE["esp_remember_id_{$path_id}"]) || 
-            !isset($_COOKIE["esp_remember_token_{$path_id}"])) {
+        $prefixes = $this->get_prefixes();
+        $id_name = $prefixes['remember_id'] . $path_id;
+        $token_name = $prefixes['remember_token'] . $path_id;
+
+        if (!isset($_COOKIE[$id_name]) || !isset($_COOKIE[$token_name])) {
             return null;
         }
 
         return [
-            'id' => $_COOKIE["esp_remember_id_{$path_id}"],
-            'token' => $_COOKIE["esp_remember_token_{$path_id}"]
+            'id' => $_COOKIE[$id_name],
+            'token' => $_COOKIE[$token_name]
         ];
     }
 
@@ -217,11 +246,13 @@ class ESP_Cookie {
      * @return array
      */
     public function get_cookie_names() {
+        $prefixes = $this->get_prefixes();
+
         return [
-            'session_prefix' => 'esp_auth_',
+            'session_prefix' => $prefixes['session'],
             'remember' => [
-                'id' => 'esp_remember_id',
-                'token' => 'esp_remember_token'
+                'id' => rtrim($prefixes['remember_id'], '_'),
+                'token' => rtrim($prefixes['remember_token'], '_')
             ]
         ];
     }
