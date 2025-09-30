@@ -8,6 +8,7 @@ class ESP_Config {
     const TEXT_DOMAIN = 'easy-slug-protect';
     const OPTION_KEY = 'esp_settings';
     const LITESPEED_QUERY_KEY = 'esp_media_key';
+    const COOKIE_PREFIX_DEFAULT = 'esp';
     
     // バージョン管理用の定数を追加
     const VERSION_OPTION_KEY = 'esp_plugin_version';
@@ -27,8 +28,7 @@ class ESP_Config {
             'whitelist_ips' => ''       // ホワイトリストIPアドレス (カンマ区切り)
         ),
         'remember' => array(
-            'time_frame' => 15,         // ログイン保持期間（日）
-            'cookie_prefix' => 'esp'    // Cookieのプレフィックス
+            'time_frame' => 15         // ログイン保持期間（日）
         ),
         'mail' => array(
             'enable_notifications' => true,
@@ -44,7 +44,9 @@ class ESP_Config {
         'media' => array(
             'enabled' => true,
             'delivery_method' => 'auto',
-            'litespeed_key' => ''
+            'fast_gate_enabled' => false,
+            'litespeed_key' => '',
+            'media_gate_key' => ''
         ),
         'db_version' => 4 // DBバージョン
 
@@ -55,4 +57,58 @@ class ESP_Config {
         'brute' => 'esp_login_attempts',
         'session' => 'esp_login_session'
     );
+
+    /**
+     * Cookie名のプレフィックスを取得
+     */
+    public static function get_cookie_prefixes() {
+        $base = rtrim(self::COOKIE_PREFIX_DEFAULT, '_');
+        $gate_prefix = $base . '_gate_';
+        $site_token = self::get_site_cookie_namespace();
+
+        if ($site_token !== '') {
+            $gate_prefix .= $site_token . '_';
+        }
+
+        return array(
+            'session' => $base . '_auth_',
+            'remember_id' => $base . '_remember_id_',
+            'remember_token' => $base . '_remember_token_',
+            'gate' => $gate_prefix,
+        );
+    }
+
+    /**
+     * 高速ゲートCookie用のサイト識別子
+     */
+    private static function get_site_cookie_namespace() {
+        if (!function_exists('is_multisite') || !is_multisite()) {
+            return '';
+        }
+
+        $identifier = '';
+
+        if (function_exists('get_current_blog_id')) {
+            $blog_id = get_current_blog_id();
+            if (is_numeric($blog_id)) {
+                $blog_id = (int) $blog_id;
+                if ($blog_id > 0) {
+                    $identifier = (string) $blog_id;
+                }
+            }
+        }
+
+        if ($identifier === '' && function_exists('home_url')) {
+            $home = home_url('/');
+            if (is_string($home)) {
+                $identifier = $home;
+            }
+        }
+
+        $identifier = strtolower((string) $identifier);
+        $identifier = preg_replace('/[^a-z0-9]+/', '-', $identifier);
+        $identifier = trim($identifier, '-');
+
+        return $identifier;
+    }
 }

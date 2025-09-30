@@ -29,6 +29,16 @@ class ESP_Media_Protection {
     private $enabled = true;
 
     /**
+     * @var bool 高速ゲートが有効かどうか
+     */
+    private $fast_gate_enabled = false;
+
+    /**
+     * @var string|null 使用するゲートスクリプト
+     */
+    private $fast_gate_deriver = null;
+
+    /**
      * @var string メディア保護用メタキー
      */
     const META_KEY_PROTECTED_PATH = '_esp_media_protected_path_id';
@@ -52,6 +62,46 @@ class ESP_Media_Protection {
      * LiteSpeed用の配信キーを格納するオプションのキー名
      */
     const OPTION_LITESPEED_KEY = 'litespeed_key';
+
+    /**
+     * 高速ゲートの有効フラグ
+     */
+    const OPTION_FAST_GATE_ENABLED = 'fast_gate_enabled';
+
+    /**
+     * メディアゲートで利用するキー
+     */
+    const OPTION_MEDIA_GATE_KEY = 'media_gate_key';
+
+    /**
+     * ゲート用の配置フォルダ名
+     */
+    private const SECRET_DIR_NAME = 'gate';
+
+    /**
+     * ゲートの設定ファイル名
+     */
+    private const SECRET_CONFIG_FILE = 'config.php';
+
+    /**
+     * 保護ファイルリストのファイル名
+     */
+    private const PROTECTED_LIST_FILENAME = 'protected-files.php';
+
+    /**
+     * 環境変数に利用するキー名
+     */
+    private const GATE_ENV_KEY = 'ESP_MEDIA_GATE_KEY';
+
+    /**
+     * サイト識別子を渡す環境変数
+     */
+    private const GATE_SITE_ENV_KEY = 'ESP_MEDIA_SITE_ID';
+
+    /**
+     * Nginxで利用する内部パスのプレフィックス
+     */
+    private const NGINX_INTERNAL_PREFIX = '/protected-uploads';
 
     /**
      * 保護対象のファイル拡張子
@@ -80,6 +130,11 @@ class ESP_Media_Protection {
             $this->enabled = (bool) $settings['enabled'];
         }
 
+        if ($this->enabled) {
+            $this->fast_gate_deriver = self::get_active_gate_deriver_slug($settings);
+            $this->fast_gate_enabled = $this->fast_gate_deriver !== null;
+        }
+
         $this->deriver = new ESP_Media_Deriver();
         $this->init();
     }
@@ -90,6 +145,11 @@ class ESP_Media_Protection {
     public function init() {
         // キャッシュの初期チェック
         $this->check_and_generate_cache();
+
+        if ($this->fast_gate_enabled) {
+            // ゲート環境を初期化
+            $this->maybe_initialize_gate_environment();
+        }
 
         // 管理画面の場合
         if (is_admin()) {
@@ -136,6 +196,508 @@ class ESP_Media_Protection {
         add_action('update_option_' . ESP_Config::OPTION_KEY, [$this, 'handle_path_deletion'], 10, 2);
     }
 
+    /**
+     * ゲート用の環境を準備
+     */
+    private function maybe_initialize_gate_environment($force_gate_key_regeneration = false) {
+        if (!$this->fast_gate_enabled) {
+            return;
+        }
+
+        $this->ensure_secret_directory_exists();
+        $this->ensure_protected_list_exists();
+        $this->ensure_media_gate_key($force_gate_key_regeneration);
+        $this->write_gate_config();
+    }
+
+    /**
+     * シークレットディレクトリを取得
+     */
+    private function get_secret_directory_path() {
+        return self::get_secret_directory_path_static();
+    }
+
+    /**
+     * シークレットディレクトリの相対パス
+     */
+    private function get_secret_directory_relative_path() {
+        return self::get_secret_directory_relative_path_static();
+    }
+
+    /**
+     * シークレットディレクトリの相対パス（静的）
+     */
+    private static function get_secret_directory_relative_path_static() {
+        $secret_url = trailingslashit(ESP_URL) . self::SECRET_DIR_NAME . '/';
+        $path = wp_parse_url($secret_url, PHP_URL_PATH);
+
+        if (!is_string($path) || $path === '') {
+            return '';
+        }
+
+        $relative = trim($path, '/');
+
+        return $relative;
+    }
+
+    /**
+     * シークレットディレクトリのフルパス（静的）
+     */
+    private static function get_secret_directory_path_static() {
+        $plugin_root = dirname(__DIR__);
+        return trailingslashit($plugin_root) . self::SECRET_DIR_NAME;
+    }
+
+    /**
+     * サイト固有のファイル名を生成
+     */
+    private static function build_site_specific_filename($base_filename) {
+        if (!self::should_skip_legacy_secret_files()) {
+            return $base_filename;
+        }
+
+        $token = self::get_current_site_storage_token();
+        $dot_position = strrpos($base_filename, '.');
+
+        if ($dot_position === false) {
+            return $base_filename . '-' . $token;
+        }
+
+        $name = substr($base_filename, 0, $dot_position);
+        $extension = substr($base_filename, $dot_position);
+
+        return $name . '-' . $token . $extension;
+    }
+
+    /**
+     * 設定ファイルのフルパス（静的）
+     */
+    private static function get_gate_config_path_static() {
+        $filename = self::build_site_specific_filename(self::SECRET_CONFIG_FILE);
+
+        return trailingslashit(self::get_secret_directory_path_static()) . $filename;
+    }
+
+    /**
+     * 保護リストファイルのフルパス（静的）
+     */
+    private static function get_protected_list_path_static() {
+        $filename = self::build_site_specific_filename(self::PROTECTED_LIST_FILENAME);
+
+        return trailingslashit(self::get_secret_directory_path_static()) . $filename;
+    }
+
+    /**
+     * 旧形式の設定ファイルパス
+     */
+    private static function get_legacy_gate_config_path_static() {
+        return trailingslashit(self::get_secret_directory_path_static()) . self::SECRET_CONFIG_FILE;
+    }
+
+    /**
+     * 旧形式の保護リストファイルパス
+     */
+    private static function get_legacy_protected_list_path_static() {
+        return trailingslashit(self::get_secret_directory_path_static()) . self::PROTECTED_LIST_FILENAME;
+    }
+
+    /**
+     * 旧ファイルの書き込みを避けるべきかどうか
+     */
+    private static function should_skip_legacy_secret_files() {
+        return function_exists('is_multisite') && is_multisite();
+    }
+
+    /**
+     * 現在のサイトを識別するID
+     */
+    private static function get_current_site_identifier_value() {
+        if (function_exists('get_current_blog_id')) {
+            $blog_id = get_current_blog_id();
+            if (is_numeric($blog_id)) {
+                $blog_id = (int) $blog_id;
+                if ($blog_id > 0) {
+                    return (string) $blog_id;
+                }
+            }
+        }
+
+        return 'single';
+    }
+
+    /**
+     * 現在のサイトURL
+     */
+    private static function get_current_site_url_value() {
+        $url = home_url('/');
+        if (!is_string($url)) {
+            return '';
+        }
+
+        return untrailingslashit($url);
+    }
+
+    /**
+     * サイト識別子をファイル名向けのトークンに変換
+     */
+    private static function get_current_site_storage_token() {
+        $identifier = strtolower((string) self::get_current_site_identifier_value());
+        $identifier = preg_replace('/[^a-z0-9]+/', '-', $identifier);
+        $identifier = trim((string) $identifier, '-');
+
+        if ($identifier === '') {
+            $identifier = 'single';
+        }
+
+        return $identifier;
+    }
+
+    /**
+     * 保護リストを書き出すためのPHPスクリプト文字列
+     */
+    private static function build_protected_list_payload(array $map) {
+        $payload = array(
+            'site_id' => self::get_current_site_identifier_value(),
+            'site_url' => self::get_current_site_url_value(),
+            'site_slug' => self::get_current_site_storage_token(),
+            'items' => $map,
+        );
+
+        $export = var_export($payload, true);
+        if (!is_string($export) || $export === '') {
+            $export = var_export(array(
+                'site_id' => '',
+                'site_url' => '',
+                'site_slug' => '',
+                'items' => array(),
+            ), true);
+        }
+
+        $php = "<?php\n";
+        $php .= "if (!defined('ESP_GATE_ENV_PASSED') || ESP_GATE_ENV_PASSED !== true) {\n    return array();\n}\n";
+        $php .= 'return ' . $export . ';' . "\n";
+
+        return $php;
+    }
+
+    /**
+     * シークレットディレクトリを作成
+     */
+    private function ensure_secret_directory_exists() {
+        self::ensure_secret_directory_exists_static();
+    }
+
+    /**
+     * 設定ファイルのフルパスを取得
+     */
+    private function get_gate_config_path() {
+        return self::get_gate_config_path_static();
+    }
+
+    /**
+     * 保護ファイルリストのフルパスを取得
+     */
+    private function get_protected_list_path() {
+        return self::get_protected_list_path_static();
+    }
+
+    /**
+     * 保護ファイルリストを空で初期化
+     */
+    private function ensure_protected_list_exists() {
+        $path = $this->get_protected_list_path();
+        if (!file_exists($path)) {
+            $this->write_protected_file_list([]);
+        }
+    }
+
+    /**
+     * シークレットディレクトリを静的に作成
+     */
+    private static function ensure_secret_directory_exists_static() {
+        $secret_dir = self::get_secret_directory_path_static();
+        if (!is_dir($secret_dir)) {
+            if (function_exists('wp_mkdir_p')) {
+                wp_mkdir_p($secret_dir);
+            } else {
+                @mkdir($secret_dir, 0755, true);
+            }
+        }
+    }
+
+    /**
+     * ゲート設定を書き出し（静的）
+     */
+    private static function write_gate_config_static() {
+        if (self::get_active_gate_deriver_slug() === null) {
+            return;
+        }
+
+        $upload_dir = wp_upload_dir();
+        if (!empty($upload_dir['error'])) {
+            // アップロードディレクトリが取得できない場合は終了
+            return;
+        }
+
+        // フォルダとキーの下準備
+        self::ensure_secret_directory_exists_static();
+        $config_path = self::get_gate_config_path_static();
+        $media_gate_key = self::ensure_media_gate_key_exists();
+        $cookie_prefixes = ESP_Config::get_cookie_prefixes();
+        $litespeed_key = self::get_litespeed_key_value();
+
+        $protected_list_path = self::get_protected_list_path_static();
+        if (!file_exists($protected_list_path)) {
+            // 空の保護リストを強制生成
+            @file_put_contents($protected_list_path, self::build_protected_list_payload(array()), LOCK_EX);
+        }
+
+        $home_path = parse_url(home_url('/'), PHP_URL_PATH);
+        if (!is_string($home_path) || $home_path === '') {
+            $home_path = '/';
+        }
+
+        // gate.phpで利用する値をまとめて書き出す
+        $config = array(
+            'media_gate_key' => $media_gate_key,
+            'upload_base' => $upload_dir['basedir'],
+            'protected_list_file' => $protected_list_path,
+            'site_id' => self::get_current_site_identifier_value(),
+            'site_url' => self::get_current_site_url_value(),
+            'site_slug' => self::get_current_site_storage_token(),
+            'session_cookie_prefix' => $cookie_prefixes['session'],
+            'remember_id_cookie_prefix' => $cookie_prefixes['remember_id'],
+            'remember_token_cookie_prefix' => $cookie_prefixes['remember_token'],
+            'gate_cookie_prefix' => $cookie_prefixes['gate'],
+            'document_root' => isset($_SERVER['DOCUMENT_ROOT']) ? $_SERVER['DOCUMENT_ROOT'] : '',
+            'abs_path' => ABSPATH,
+            'home_path' => $home_path,
+            'litespeed_query_key' => ESP_Config::LITESPEED_QUERY_KEY,
+            'litespeed_access_key' => $litespeed_key,
+            'nginx_internal_prefix' => self::get_nginx_internal_prefix_static(),
+        );
+
+        $export = var_export($config, true);
+        $php = "<?php\n";
+        $php .= "if (!defined('ESP_GATE_CONFIG_ALLOWED')) {\n    return array();\n}\n";
+        $php .= 'return ' . $export . ';' . "\n";
+
+        @file_put_contents($config_path, $php, LOCK_EX);
+
+        if (!self::should_skip_legacy_secret_files()) {
+            $legacy_path = self::get_legacy_gate_config_path_static();
+            if ($legacy_path !== $config_path) {
+                @file_put_contents($legacy_path, $php, LOCK_EX);
+            }
+        }
+    }
+
+    /**
+     * ゲート設定を書き出し
+     */
+    private function write_gate_config() {
+        self::write_gate_config_static();
+    }
+
+    /**
+     * 保護ファイルリストを書き出し
+     */
+    private function write_protected_file_list(array $map) {
+        $this->ensure_secret_directory_exists();
+        $path = $this->get_protected_list_path();
+        $payload = self::build_protected_list_payload($map);
+        @file_put_contents($path, $payload, LOCK_EX);
+
+        if (!self::should_skip_legacy_secret_files()) {
+            $legacy_path = self::get_legacy_protected_list_path_static();
+            if ($legacy_path !== $path) {
+                @file_put_contents($legacy_path, $payload, LOCK_EX);
+            }
+        }
+    }
+
+    /**
+     * ファイルパスをアップロードディレクトリからの相対パスに変換
+     */
+    private function convert_to_relative_upload_path($file_path, $upload_base) {
+        if (!is_string($file_path) || $file_path === '' || !is_string($upload_base) || $upload_base === '') {
+            // 必須情報が欠けている場合は空文字
+            return '';
+        }
+
+        $normalized_file = wp_normalize_path($file_path);
+        $normalized_base = rtrim(wp_normalize_path($upload_base), '/');
+
+        if (strpos($normalized_file, $normalized_base . '/') !== 0 && $normalized_file !== $normalized_base) {
+            // アップロード配下に無い場合は対象外
+            return '';
+        }
+
+        $relative = substr($normalized_file, strlen($normalized_base));
+        $relative = ltrim($relative, '/');
+
+        return trim($relative);
+    }
+
+    /**
+     * Nginx内部パスのプレフィックス
+     */
+    private function get_nginx_internal_prefix() {
+        return self::NGINX_INTERNAL_PREFIX;
+    }
+
+    /**
+     * Nginx内部パスのプレフィックス（静的）
+     */
+    private static function get_nginx_internal_prefix_static() {
+        return self::NGINX_INTERNAL_PREFIX;
+    }
+
+    /**
+     * 設定から配信方法を取得
+     */
+    private static function get_delivery_method_from_settings($settings = null) {
+        if ($settings === null) {
+            $settings = ESP_Option::get_current_setting('media');
+        }
+
+        $method = 'auto';
+        $allowed = array('auto', 'x_sendfile', 'litespeed', 'x_accel_redirect', 'php');
+
+        if (is_array($settings) && isset($settings['delivery_method'])) {
+            $candidate = $settings['delivery_method'];
+            if (in_array($candidate, $allowed, true)) {
+                $method = $candidate;
+            }
+        }
+
+        return $method;
+    }
+
+    /**
+     * 高速ゲート設定が有効か確認
+     */
+    private static function is_fast_gate_option_enabled($settings = null) {
+        if ($settings === null) {
+            $settings = ESP_Option::get_current_setting('media');
+        }
+
+        if (!is_array($settings)) {
+            return false;
+        }
+
+        if (array_key_exists('enabled', $settings) && !$settings['enabled']) {
+            return false;
+        }
+
+        return !empty($settings[self::OPTION_FAST_GATE_ENABLED]);
+    }
+
+    /**
+     * 設定に基づき利用するゲートスクリプトを決定
+     */
+    private static function determine_gate_deriver_slug($settings = null) {
+        $method = self::get_delivery_method_from_settings($settings);
+
+        switch ($method) {
+            case 'php':
+                return null;
+            case 'x_sendfile':
+                return 'deriver-apache.php';
+            case 'litespeed':
+                return 'deriver-litespeed.php';
+            case 'x_accel_redirect':
+                return 'deriver-nginx.php';
+        }
+
+        if (self::is_litespeed_server()) {
+            return 'deriver-litespeed.php';
+        }
+
+        if (self::is_apache_server() && self::is_x_sendfile_module_enabled_static()) {
+            return 'deriver-apache.php';
+        }
+
+        if (self::is_nginx_server()) {
+            return 'deriver-nginx.php';
+        }
+
+        return null;
+    }
+
+    /**
+     * 現在の設定で有効なゲートスクリプトを取得
+     */
+    private static function get_active_gate_deriver_slug($settings = null) {
+        if (!self::is_fast_gate_option_enabled($settings)) {
+            return null;
+        }
+
+        return self::determine_gate_deriver_slug($settings);
+    }
+
+    /**
+     * 設定された配信方法
+     */
+    private function get_selected_delivery_method() {
+        return self::get_delivery_method_from_settings();
+    }
+
+    /**
+     * Rewriteで利用するderiverファイル
+     */
+    private function resolve_gate_deriver_slug() {
+        if (!$this->fast_gate_enabled) {
+            return null;
+        }
+
+        if ($this->fast_gate_deriver === null) {
+            $this->fast_gate_deriver = self::get_active_gate_deriver_slug();
+            if ($this->fast_gate_deriver === null) {
+                $this->fast_gate_enabled = false;
+                return null;
+            }
+        }
+
+        return $this->fast_gate_deriver;
+    }
+
+    /**
+     * X-Sendfileモジュールの有無
+     */
+    private function is_x_sendfile_module_enabled() {
+        return self::is_x_sendfile_module_enabled_static();
+    }
+
+    /**
+     * X-Sendfileモジュールの有無（静的）
+     */
+    private static function is_x_sendfile_module_enabled_static() {
+        return function_exists('apache_get_modules') && in_array('mod_xsendfile', apache_get_modules());
+    }
+
+    /**
+     * .htaccess向けのリライトルート
+     */
+    private function build_gate_rewrite_target($home_path) {
+        $deriver = $this->resolve_gate_deriver_slug();
+        if ($deriver === null || $deriver === 'deriver-nginx.php') {
+            // NginxはRewriteを利用しない
+            return null;
+        }
+
+        $relative_secret = $this->get_secret_directory_relative_path();
+        if ($relative_secret === '') {
+            // 相対パスが計算できない場合は中止
+            return null;
+        }
+
+        $target_path = $relative_secret . '/' . $deriver;
+        $target_path = trim($target_path, '/');
+
+        return $home_path . $target_path . '?file=$1';
+    }
+
     /*----- キャッシュ管理 -----*/
 
     /**
@@ -159,37 +721,78 @@ class ESP_Media_Protection {
     public function regenerate_media_cache() {
         if (!$this->enabled) {
             delete_transient(self::MEDIA_CACHE_KEY);
+            if ($this->fast_gate_enabled) {
+                $this->write_protected_file_list([]);
+                $this->write_gate_config();
+            }
             return;
         }
 
         global $wpdb;
 
+        $upload_dir = wp_upload_dir();
+        if (!empty($upload_dir['error'])) {
+            // アップロードディレクトリが無い場合はキャッシュを削除
+            delete_transient(self::MEDIA_CACHE_KEY);
+            if ($this->fast_gate_enabled) {
+                $this->write_protected_file_list([]);
+            }
+            return;
+        }
+
         $protected_paths = ESP_Option::get_current_setting('path');
         if (empty($protected_paths)) {
             delete_transient(self::MEDIA_CACHE_KEY);
+            if ($this->fast_gate_enabled) {
+                $this->write_protected_file_list([]);
+                $this->write_gate_config();
+            }
             return;
         }
 
         // パスIDごとのメディアIDをグループ化
         $media_by_path = [];
-        
+        $protected_file_map = [];
+
         $protected_media = $wpdb->get_results($wpdb->prepare(
-            "SELECT post_id, meta_value as path_id 
-             FROM {$wpdb->postmeta} 
+            "SELECT post_id, meta_value as path_id
+             FROM {$wpdb->postmeta}
              WHERE meta_key = %s",
             self::META_KEY_PROTECTED_PATH
         ));
-        
+
         foreach ($protected_media as $media) {
-            if (isset($protected_paths[$media->path_id])) {
-                if (!isset($media_by_path[$media->path_id])) {
-                    $media_by_path[$media->path_id] = [];
-                }
-                $media_by_path[$media->path_id][] = (int) $media->post_id;
+            if (!isset($protected_paths[$media->path_id])) {
+                continue;
             }
+
+            if (!isset($media_by_path[$media->path_id])) {
+                $media_by_path[$media->path_id] = [];
+            }
+
+            $attachment_id = (int) $media->post_id;
+            $media_by_path[$media->path_id][] = $attachment_id;
+
+            $file_path = get_attached_file($attachment_id);
+            if (!is_string($file_path) || $file_path === '') {
+                continue;
+            }
+
+            $relative = $this->convert_to_relative_upload_path($file_path, $upload_dir['basedir']);
+            if ($relative === '') {
+                continue;
+            }
+
+            // gate.phpで参照する保護リストを構築
+            $protected_file_map[$relative] = $media->path_id;
         }
-        
+
         set_transient(self::MEDIA_CACHE_KEY, $media_by_path, self::MEDIA_CACHE_DURATION);
+
+        if ($this->fast_gate_enabled) {
+            $this->write_protected_file_list($protected_file_map);
+            $this->write_gate_config();
+        }
 
         // デバッグ
         // error_log(print_r($media_by_path, true));
@@ -1000,7 +1603,7 @@ class ESP_Media_Protection {
 
         if (!$write_success) {
             // フォールバックで直接書き込み
-            $bytes = @file_put_contents($htaccess_file, $new_rules);
+            $bytes = @file_put_contents($htaccess_file, $new_rules, LOCK_EX);
             $write_success = ($bytes !== false);
         }
 
@@ -1020,7 +1623,11 @@ class ESP_Media_Protection {
     private function get_htaccess_rules($force_litespeed_key_regeneration = false) {
         $home_path = parse_url(home_url(), PHP_URL_PATH);
         $home_path = $home_path ? trailingslashit($home_path) : '/';
-        
+
+        if ($this->fast_gate_enabled) {
+            $this->maybe_initialize_gate_environment($force_litespeed_key_regeneration);
+        }
+
         // wp-content/uploads/のパスを取得
         $upload_dir = wp_upload_dir();
         $upload_path = str_replace(ABSPATH, '', $upload_dir['basedir']);
@@ -1055,13 +1662,21 @@ class ESP_Media_Protection {
             $rules .= "{$indent}RewriteCond %{REQUEST_FILENAME} -f\n";
             $rules .= "{$indent}RewriteCond %{REQUEST_URI} ^.*\\.({$extensions_pattern})$ [NC]\n";
 
-            $rewrite_flags = $this->is_litespeed() ? '[L,QSA]' : '[L]';
-            $rules .= "{$indent}RewriteRule ^(.+)$ {$home_path}index.php?" . self::REWRITE_ENDPOINT . "=$1 {$rewrite_flags}\n";
+            $rewrite_target = $this->build_gate_rewrite_target($home_path);
+            if ($rewrite_target !== null) {
+                $media_gate_key = self::ensure_media_gate_key_exists($force_litespeed_key_regeneration);
+                $site_token = self::get_current_site_storage_token();
+                $rules .= "{$indent}# 環境変数でゲートキーとサイトIDを渡し高速ゲートにリダイレクト\n";
+                $rules .= "{$indent}RewriteRule ^(.+)$ {$rewrite_target} [L,QSA,E=" . self::GATE_ENV_KEY . ":{$media_gate_key},E=" . self::GATE_SITE_ENV_KEY . ":{$site_token}]\n";
+            } else {
+                $rewrite_flags = $this->is_litespeed() ? '[L,QSA]' : '[L]';
+                $rules .= "{$indent}RewriteRule ^(.+)$ {$home_path}index.php?" . self::REWRITE_ENDPOINT . "=$1 {$rewrite_flags}\n";
+            }
         }
-        
+
         $rules .= "</IfModule>\n";
         $rules .= "# END ESP Media Protection\n";
-        
+
         return $rules;
     }
     /**
@@ -1070,6 +1685,13 @@ class ESP_Media_Protection {
      * @return bool
      */
     private function is_apache() {
+        return self::is_apache_server();
+    }
+
+    /**
+     * Apache互換サーバーか確認（静的）
+     */
+    private static function is_apache_server() {
         $software = self::get_server_software();
 
         return stripos($software, 'Apache') !== false
@@ -1080,6 +1702,13 @@ class ESP_Media_Protection {
      * LiteSpeed環境か確認
      */
     private function is_litespeed() {
+        return self::is_litespeed_server();
+    }
+
+    /**
+     * LiteSpeed環境か確認（静的）
+     */
+    private static function is_litespeed_server() {
         $software = self::get_server_software();
         return stripos($software, 'LiteSpeed') !== false;
     }
@@ -1142,7 +1771,26 @@ class ESP_Media_Protection {
         $rules  = "# BEGIN ESP Media Protection (nginx)\n";
         $rules .= "# このブロックをserverディレクティブ内に追加してください。\n";
         $rules .= "location ~* ^{$upload_path}/(.+\\.({$extensions_pattern}))$ {\n";
-        $rules .= "    rewrite ^{$upload_path}/(.+)$ {$home_path}index.php?" . self::REWRITE_ENDPOINT . "=$1 last;\n";
+        $settings = ESP_Option::get_current_setting('media');
+        $deriver_slug = self::get_active_gate_deriver_slug($settings);
+        $use_fast_gate = ($deriver_slug === 'deriver-nginx.php');
+
+        if ($use_fast_gate) {
+            $secret_relative = self::get_secret_directory_relative_path_static();
+            $deriver_path = trim($secret_relative . '/' . $deriver_slug, '/');
+            $media_gate_key = self::ensure_media_gate_key_exists();
+            $site_token = self::get_current_site_storage_token();
+            self::write_gate_config_static();
+
+            $rules .= "    set \\$esp_media_gate_key \"{$media_gate_key}\";\n";
+            $rules .= "    set \\$esp_media_site_id \"{$site_token}\";\n";
+            $rules .= "    rewrite ^{$upload_path}/(.+)$ {$home_path}{$deriver_path}?file=$1 last;\n";
+            $rules .= "    # PHPハンドラ側で fastcgi_param " . self::GATE_ENV_KEY . " \\$esp_media_gate_key;\n";
+            $rules .= "    # fastcgi_param " . self::GATE_SITE_ENV_KEY . " \\$esp_media_site_id; を追加してください。\n";
+        } else {
+            $rules .= "    rewrite ^{$upload_path}/(.+)$ {$home_path}index.php?" . self::REWRITE_ENDPOINT . "=$1 last;\n";
+        }
+
         $rules .= "}\n";
         $rules .= "# END ESP Media Protection (nginx)\n";
 
@@ -1150,6 +1798,7 @@ class ESP_Media_Protection {
             'rules' => $rules,
             'media_enabled' => self::is_media_protection_enabled(),
             'has_protected_media' => self::has_any_protected_media_records(),
+            'fast_gate_active' => $use_fast_gate,
         );
     }
 
@@ -1176,6 +1825,8 @@ class ESP_Media_Protection {
         $settings['media'][self::OPTION_LITESPEED_KEY] = $key;
         ESP_Option::update_settings($settings);
 
+        $this->write_gate_config();
+
         return $key;
     }
 
@@ -1193,6 +1844,74 @@ class ESP_Media_Protection {
         $key = preg_replace('/[^a-zA-Z0-9]/', '', $key);
 
         return is_string($key) ? $key : '';
+    }
+
+    /**
+     * メディアゲートキーを確保
+     */
+    private function ensure_media_gate_key($force_regeneration = false) {
+        return self::ensure_media_gate_key_exists($force_regeneration);
+    }
+
+    /**
+     * メディアゲートキーを取得または生成
+     */
+    public static function ensure_media_gate_key_exists($force_regeneration = false) {
+        $settings = ESP_Option::get_current_setting('media');
+        $current = '';
+        if (is_array($settings) && isset($settings[self::OPTION_MEDIA_GATE_KEY])) {
+            // 既存キーを信頼する
+            $current = sanitize_text_field($settings[self::OPTION_MEDIA_GATE_KEY]);
+        }
+
+        if (!$force_regeneration && $current !== '') {
+            return $current;
+        }
+
+        // 新しいキーを生成して保存
+        $new_key = self::generate_media_gate_key();
+
+        if (!is_array($settings)) {
+            $settings = array();
+        }
+        $settings[self::OPTION_MEDIA_GATE_KEY] = $new_key;
+        ESP_Option::update_section('media', $settings);
+
+        return $new_key;
+    }
+
+    /**
+     * メディアゲートキーを取得
+     */
+    public static function get_media_gate_key_value() {
+        $settings = ESP_Option::get_current_setting('media');
+        if (!is_array($settings) || !isset($settings[self::OPTION_MEDIA_GATE_KEY])) {
+            return '';
+        }
+
+        return sanitize_text_field($settings[self::OPTION_MEDIA_GATE_KEY]);
+    }
+
+    /**
+     * メディアゲートキー生成
+     */
+    private static function generate_media_gate_key() {
+        try {
+            // 安全な乱数で生成
+            return bin2hex(random_bytes(18));
+        } catch (Exception $e) {
+            if (function_exists('wp_generate_password')) {
+                $password = wp_generate_password(36, false, false);
+                $password = preg_replace('/[^a-zA-Z0-9]/', '', $password);
+                if (is_string($password) && $password !== '') {
+                    // WordPressのヘルパーをフォールバック利用
+                    return $password;
+                }
+            }
+
+            // 最終手段として一意な文字列をハッシュ
+            return substr(md5(uniqid((string) mt_rand(), true)), 0, 36);
+        }
     }
 
     /**

@@ -85,6 +85,9 @@ class ESP_Admin_Menu {
         $mail_settings =  ESP_Option::get_current_setting('mail');
         $media_settings = ESP_Option::get_current_setting('media');
         $media_enabled = isset($media_settings['enabled']) ? (bool) $media_settings['enabled'] : true;
+        $fast_gate_enabled = isset($media_settings[ESP_Media_Protection::OPTION_FAST_GATE_ENABLED])
+            ? (bool) $media_settings[ESP_Media_Protection::OPTION_FAST_GATE_ENABLED]
+            : false;
         $delivery_method = isset($media_settings['delivery_method']) ? $media_settings['delivery_method'] : 'auto';
 
         $nginx_rules = '';
@@ -488,6 +491,22 @@ class ESP_Admin_Menu {
                                 </select>
                                 <p class="description">
                                     <?php _e('設定保存後は正しくメディアファイルが配信されるかを確認してください。', $text_domain); ?>
+                                </p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><?php _e('高速ゲート', $text_domain); ?></th>
+                            <td>
+                                <label>
+                                    <input type="checkbox"
+                                        name="<?php echo $option_key; ?>[media][<?php echo esc_attr(ESP_Media_Protection::OPTION_FAST_GATE_ENABLED); ?>]"
+                                        value="1"
+                                        <?php checked($fast_gate_enabled); ?>
+                                        <?php disabled(!$media_enabled); ?>>
+                                    <?php _e('WordPressを経由しない高速ゲートを利用する', $text_domain); ?>
+                                </label>
+                                <p class="description">
+                                    <?php _e('高速ゲートでは事前に生成した保護リストとCookieのみで認証し、データベース照合を行いません。高速化の代わりに厳密な確認は省略されるため、利用環境に合わせて有効化してください。', $text_domain); ?>
                                 </p>
                             </td>
                         </tr>

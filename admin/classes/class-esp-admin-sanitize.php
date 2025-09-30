@@ -188,8 +188,7 @@ class ESP_Sanitize {
      */
     public function sanitize_remember_settings($settings) {
         return array(
-            'time_frame' => max(1, absint($settings['time_frame'])),
-            'cookie_prefix' => 'esp' // 固定値
+            'time_frame' => max(1, absint($settings['time_frame']))
         );
     }
 
@@ -202,6 +201,7 @@ class ESP_Sanitize {
         $delivery_method = 'auto';
 
         if (is_array($settings) && isset($settings['delivery_method'])) {
+            // 入力方式が許可リストにあるか検証
             $candidate = sanitize_text_field($settings['delivery_method']);
             if (in_array($candidate, $allowed, true)) {
                 $delivery_method = $candidate;
@@ -211,8 +211,15 @@ class ESP_Sanitize {
         // 保存済みのLiteSpeedキーを優先的に維持
         $current = ESP_Option::get_current_setting('media');
         $stored_key = '';
-        if (is_array($current) && isset($current[ESP_Media_Protection::OPTION_LITESPEED_KEY])) {
-            $stored_key = sanitize_text_field($current[ESP_Media_Protection::OPTION_LITESPEED_KEY]);
+        $media_gate_key = '';
+        if (is_array($current)) {
+            // 既存設定がある場合は再利用を優先
+            if (isset($current[ESP_Media_Protection::OPTION_LITESPEED_KEY])) {
+                $stored_key = sanitize_text_field($current[ESP_Media_Protection::OPTION_LITESPEED_KEY]);
+            }
+            if (isset($current[ESP_Media_Protection::OPTION_MEDIA_GATE_KEY])) {
+                $media_gate_key = sanitize_text_field($current[ESP_Media_Protection::OPTION_MEDIA_GATE_KEY]);
+            }
         }
 
         // 新しい入力がある場合のみキーを更新
@@ -224,9 +231,14 @@ class ESP_Sanitize {
         }
 
         return array(
+            // 真偽値は空チェックのみで判定
             'enabled' => is_array($settings) && !empty($settings['enabled']),
+            // 許可済みの方式だけを保存
             'delivery_method' => $delivery_method,
-            ESP_Media_Protection::OPTION_LITESPEED_KEY => $stored_key
+            ESP_Media_Protection::OPTION_FAST_GATE_ENABLED => is_array($settings)
+                && !empty($settings[ESP_Media_Protection::OPTION_FAST_GATE_ENABLED]),
+            ESP_Media_Protection::OPTION_LITESPEED_KEY => $stored_key,
+            ESP_Media_Protection::OPTION_MEDIA_GATE_KEY => $media_gate_key
         );
     }
 
