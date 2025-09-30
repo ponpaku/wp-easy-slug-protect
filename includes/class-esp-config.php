@@ -68,6 +68,7 @@ class ESP_Config {
             'session' => $base . '_auth_',
             'remember_id' => $base . '_remember_id_',
             'remember_token' => $base . '_remember_token_',
+            'gate' => $base . '_gate_',
         );
     }
 }

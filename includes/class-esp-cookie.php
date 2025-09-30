@@ -22,6 +22,12 @@ class ESP_Cookie {
     private $cookie_prefixes = null;
 
     /**
+     * 高速ゲート機能の有効状態キャッシュ
+     * @var bool|null
+     */
+    private $fast_gate_active = null;
+
+    /**
      * シングルトンインスタンス
      * @var ESP_Cookie
      */
@@ -80,6 +86,115 @@ class ESP_Cookie {
     }
 
     /**
+     * ゲートCookieのプレフィックスを取得
+     */
+    private function get_gate_cookie_prefix() {
+        $prefixes = $this->get_prefixes();
+        return isset($prefixes['gate']) ? $prefixes['gate'] : 'esp_gate_';
+    }
+
+    /**
+     * 高速ゲート機能が有効かどうかを判定
+     */
+    private function is_fast_gate_active() {
+        if ($this->fast_gate_active === null) {
+            $settings = class_exists('ESP_Option') ? ESP_Option::get_current_setting('media') : array();
+            $enabled = false;
+
+            if (is_array($settings)) {
+                $media_enabled = true;
+                if (array_key_exists('enabled', $settings)) {
+                    $media_enabled = (bool) $settings['enabled'];
+                }
+
+                $enabled = $media_enabled && !empty($settings['fast_gate_enabled']);
+            }
+
+            $this->fast_gate_active = $enabled;
+        }
+
+        return $this->fast_gate_active;
+    }
+
+    /**
+     * ゲートCookie用のMACを生成
+     */
+    private function build_gate_cookie_value($path_id, $token, $expires) {
+        if (!class_exists('ESP_Media_Protection')) {
+            return null;
+        }
+
+        $key = ESP_Media_Protection::get_media_gate_key_value();
+        if ($key === '') {
+            $key = ESP_Media_Protection::ensure_media_gate_key_exists();
+        }
+
+        if ($key === '') {
+            return null;
+        }
+
+        $payload = $path_id . '|' . $token . '|' . $expires;
+        $mac = hash_hmac('sha256', $payload, $key);
+
+        if (!is_string($mac) || $mac === '') {
+            return null;
+        }
+
+        return $mac . '.' . $expires;
+    }
+
+    /**
+     * ゲートCookieの発行を予約
+     */
+    public function queue_gate_cookie($path_id, $token, $expires) {
+        $path_id = (string) $path_id;
+        if ($path_id === '') {
+            return;
+        }
+
+        if (!$this->is_fast_gate_active()) {
+            $this->clear_gate_cookie($path_id);
+            return;
+        }
+
+        if (!is_string($token) || $token === '') {
+            return;
+        }
+
+        $expires = intval($expires);
+        if ($expires <= 0) {
+            return;
+        }
+
+        $value = $this->build_gate_cookie_value($path_id, $token, $expires);
+        if ($value === null) {
+            return;
+        }
+
+        $prefix = $this->get_gate_cookie_prefix();
+        $this->pending_cookies[$prefix . $path_id] = [
+            'value' => $value,
+            'expires' => $expires
+        ];
+    }
+
+    /**
+     * ゲートCookieを破棄
+     */
+    public function clear_gate_cookie($path_id) {
+        $path_id = (string) $path_id;
+        if ($path_id === '') {
+            return;
+        }
+
+        $prefix = $this->get_gate_cookie_prefix();
+        $this->pending_cookies[$prefix . $path_id] = [
+            'value' => '',
+            'expires' => time() - HOUR_IN_SECONDS
+        ];
+    }
+
+    /**
      * 認証用セッションCookieの準備
      *
      * @param string $path_id パスID
@@ -89,11 +204,14 @@ class ESP_Cookie {
         if ($expires === null) {
             $expires = time() + DAY_IN_SECONDS;
         }
+        $path_id = (string) $path_id;
         $prefixes = $this->get_prefixes();
         $this->pending_cookies[$prefixes['session'] . $path_id] = [
             'value' => $token,
             'expires' => $expires
         ];
+
+        $this->queue_gate_cookie($path_id, $token, $expires);
     }
 
     /**
@@ -105,7 +223,7 @@ class ESP_Cookie {
      * @param int $expires 有効期限のタイムスタンプ
      */
     public function prepare_remember_cookies($path_settings, $user_id, $token, $expires) {
-        $path_id = $path_settings['id'];
+        $path_id = (string) $path_settings['id'];
         $prefixes = $this->get_prefixes();
         $this->pending_cookies[$prefixes['remember_id'] . $path_id] = [
             'value' => $user_id,
@@ -115,6 +233,8 @@ class ESP_Cookie {
             'value' => $token,
             'expires' => $expires
         ];
+
+        $this->queue_gate_cookie($path_id, $token, $expires);
     }
 
 
@@ -170,11 +290,14 @@ class ESP_Cookie {
      * @param string $path_id パスID
      */
     public function clear_session_cookie($path_id) {
+        $path_id = (string) $path_id;
         $prefixes = $this->get_prefixes();
         $this->pending_cookies[$prefixes['session'] . $path_id] = [
             'value' => '',
             'expires' => time() - HOUR_IN_SECONDS
         ];
+
+        $this->clear_gate_cookie($path_id);
     }
 
     /**
@@ -183,7 +306,7 @@ class ESP_Cookie {
      * @param array $path_settings パス設定
      */
     public function clear_remember_cookies_for_path($path_settings) {
-        $path_id = $path_settings['id'];
+        $path_id = (string) $path_settings['id'];
         $prefixes = $this->get_prefixes();
         foreach (array(
             $prefixes['remember_id'] . $path_id,
@@ -194,6 +317,8 @@ class ESP_Cookie {
                 'expires' => time() - HOUR_IN_SECONDS
             ];
         }
+
+        $this->clear_gate_cookie($path_id);
     }
 
     /**

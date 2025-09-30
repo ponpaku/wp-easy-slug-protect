@@ -460,6 +460,7 @@ class ESP_Media_Protection {
             'session_cookie_prefix' => $cookie_prefixes['session'],
             'remember_id_cookie_prefix' => $cookie_prefixes['remember_id'],
             'remember_token_cookie_prefix' => $cookie_prefixes['remember_token'],
+            'gate_cookie_prefix' => $cookie_prefixes['gate'],
             'document_root' => isset($_SERVER['DOCUMENT_ROOT']) ? $_SERVER['DOCUMENT_ROOT'] : '',
             'abs_path' => ABSPATH,
             'home_path' => $home_path,

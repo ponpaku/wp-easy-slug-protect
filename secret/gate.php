@@ -143,12 +143,18 @@ if (!$protected) {
 $session_cookie_prefix = isset($esp_gate_config['session_cookie_prefix']) ? $esp_gate_config['session_cookie_prefix'] : 'esp_auth_';
 $remember_id_prefix = isset($esp_gate_config['remember_id_cookie_prefix']) ? $esp_gate_config['remember_id_cookie_prefix'] : 'esp_remember_id_';
 $remember_token_prefix = isset($esp_gate_config['remember_token_cookie_prefix']) ? $esp_gate_config['remember_token_cookie_prefix'] : 'esp_remember_token_';
+$gate_cookie_prefix = isset($esp_gate_config['gate_cookie_prefix']) ? $esp_gate_config['gate_cookie_prefix'] : 'esp_gate_';
 
-$authorized = esp_gate_check_cookie_authorization($path_id, array(
-    $session_cookie_prefix,
-    $remember_id_prefix,
-    $remember_token_prefix,
-));
+$authorized = esp_gate_check_cookie_authorization(
+    $path_id,
+    array(
+        'session' => $session_cookie_prefix,
+        'remember_id' => $remember_id_prefix,
+        'remember_token' => $remember_token_prefix,
+        'gate' => $gate_cookie_prefix,
+    ),
+    $config_key
+);
 
 // 対象Cookieが存在すれば閲覧を許可する
 if ($authorized) {
@@ -237,25 +243,120 @@ function esp_gate_validate_deriver_context($context)
 }
 
 /**
- * Cookieを参照し保護対象へのアクセスを許可するか判定する。
+ * Cookieを用いたHMAC検証でアクセス可否を判断する。
  *
- * @param string $path_id   保護パスID。
- * @param array  $prefixes  確認するCookie接頭辞。
+ * @param string $path_id        保護パスID。
+ * @param array  $prefixes       使用するCookie接頭辞。
+ * @param string $media_gate_key ゲートキー。
  * @return bool 判定結果。
  */
-function esp_gate_check_cookie_authorization($path_id, array $prefixes)
+function esp_gate_check_cookie_authorization($path_id, array $prefixes, $media_gate_key)
 {
-    $suffix = (string) $path_id;
-    foreach ($prefixes as $prefix) {
-        if ($prefix === '') {
-            continue;
-        }
+    $path_id = (string) $path_id;
+    if ($path_id === '' || !is_string($media_gate_key) || $media_gate_key === '') {
+        return false;
+    }
 
-        $name = $prefix . $suffix;
-        if (isset($_COOKIE[$name]) && $_COOKIE[$name] !== '') {
-            return true;
+    $gate_cookie = esp_gate_extract_gate_cookie($path_id, $prefixes);
+    if ($gate_cookie === null) {
+        return false;
+    }
+
+    if ($gate_cookie['expires'] < time()) {
+        return false;
+    }
+
+    $token = esp_gate_resolve_login_token($path_id, $prefixes);
+    if ($token === null) {
+        return false;
+    }
+
+    $payload = $path_id . '|' . $token . '|' . $gate_cookie['expires'];
+    $expected_mac = hash_hmac('sha256', $payload, $media_gate_key);
+    if (!is_string($expected_mac) || $expected_mac === '') {
+        return false;
+    }
+
+    return hash_equals($expected_mac, $gate_cookie['mac']);
+}
+
+/**
+ * ゲートCookieを抽出してMACと有効期限を返す。
+ *
+ * @param string $path_id  保護パスID。
+ * @param array  $prefixes Cookie接頭辞。
+ * @return array|null macとexpiresを含む配列。
+ */
+function esp_gate_extract_gate_cookie($path_id, array $prefixes)
+{
+    if (!isset($prefixes['gate']) || $prefixes['gate'] === '') {
+        return null;
+    }
+
+    $cookie_name = $prefixes['gate'] . $path_id;
+    if (!isset($_COOKIE[$cookie_name])) {
+        return null;
+    }
+
+    $value = $_COOKIE[$cookie_name];
+    if (!is_string($value) || $value === '') {
+        return null;
+    }
+
+    $parts = explode('.', $value, 2);
+    if (count($parts) !== 2) {
+        return null;
+    }
+
+    list($mac, $exp) = $parts;
+    if ($mac === '' || $exp === '' || preg_match('/[^0-9]/', $exp)) {
+        return null;
+    }
+
+    if (!preg_match('/^[0-9a-f]{64}$/i', $mac)) {
+        return null;
+    }
+
+    $expires = (int) $exp;
+    if ($expires <= 0) {
+        return null;
+    }
+
+    return array(
+        'mac' => strtolower($mac),
+        'expires' => $expires,
+    );
+}
+
+/**
+ * セッション／記憶Cookieから検証用トークンを抽出する。
+ *
+ * @param string $path_id  保護パスID。
+ * @param array  $prefixes Cookie接頭辞。
+ * @return string|null トークン値。
+ */
+function esp_gate_resolve_login_token($path_id, array $prefixes)
+{
+    if (isset($prefixes['session']) && $prefixes['session'] !== '') {
+        $session_name = $prefixes['session'] . $path_id;
+        if (isset($_COOKIE[$session_name]) && $_COOKIE[$session_name] !== '') {
+            return (string) $_COOKIE[$session_name];
         }
     }
 
-    return false;
+    if (isset($prefixes['remember_token']) && $prefixes['remember_token'] !== '') {
+        $token_name = $prefixes['remember_token'] . $path_id;
+        if (isset($_COOKIE[$token_name]) && $_COOKIE[$token_name] !== '') {
+            if (isset($prefixes['remember_id']) && $prefixes['remember_id'] !== '') {
+                $id_name = $prefixes['remember_id'] . $path_id;
+                if (!isset($_COOKIE[$id_name]) || $_COOKIE[$id_name] === '') {
+                    return null;
+                }
+            }
+
+            return (string) $_COOKIE[$token_name];
+        }
+    }
+
+    return null;
 }

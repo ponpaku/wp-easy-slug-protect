@@ -256,7 +256,7 @@ class ESP_Auth {
         $table = $wpdb->prefix . ESP_Config::DB_TABLES['session'];
 
         $session = $wpdb->get_row($wpdb->prepare(
-            "SELECT id, path_id, password_version FROM $table WHERE token = %s AND expires > NOW()",
+            "SELECT id, path_id, password_version, UNIX_TIMESTAMP(expires) AS expires_ts FROM $table WHERE token = %s AND expires > NOW()",
             $token_hash
         ));
 
@@ -280,6 +280,11 @@ class ESP_Auth {
                 array('%d')
             );
             return false;
+        }
+
+        $expires_ts = isset($session->expires_ts) ? intval($session->expires_ts) : 0;
+        if ($expires_ts > time()) {
+            $this->cookie->queue_gate_cookie($path_id, $cookie_token, $expires_ts);
         }
 
         return true;
