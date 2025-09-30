@@ -252,6 +252,10 @@ class ESP_Media_Protection {
      * サイト固有のファイル名を生成
      */
     private static function build_site_specific_filename($base_filename) {
+        if (!self::should_skip_legacy_secret_files()) {
+            return $base_filename;
+        }
+
         $token = self::get_current_site_storage_token();
         $dot_position = strrpos($base_filename, '.');
 
