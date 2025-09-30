@@ -72,7 +72,7 @@ if ($protected_list_file === '') {
     $normalized_slug = esp_gate_normalize_site_token($site_slug);
     if ($normalized_slug !== '') {
         // サイト識別子に紐づく保護リストを最初に候補へ加える
-        $candidate = __DIR__ . '/protected-files-' . $normalized_slug . '.json';
+        $candidate = __DIR__ . '/protected-files-' . $normalized_slug . '.php';
         if (is_readable($candidate)) {
             $protected_list_file = $candidate;
         }
@@ -80,8 +80,8 @@ if ($protected_list_file === '') {
 }
 
 // サイト専用ファイルが無い場合は共通リストを参照する
-if ($protected_list_file === '' && is_readable(__DIR__ . '/protected-files.json')) {
-    $protected_list_file = __DIR__ . '/protected-files.json';
+if ($protected_list_file === '' && is_readable(__DIR__ . '/protected-files.php')) {
+    $protected_list_file = __DIR__ . '/protected-files.php';
 }
 
 // deriverから渡された相対パスを安全な形に整形する
@@ -200,24 +200,34 @@ function esp_gate_read_protected_map($protected_list_file)
         return array();
     }
 
+    if (substr($protected_list_file, -4) === '.php') {
+        // guard.phpで認証済みフラグが立っている場合のみリストが返る
+        $data = include $protected_list_file;
+        if (!is_array($data)) {
+            return array();
+        }
+
+        if (isset($data['items']) && is_array($data['items'])) {
+            return $data['items'];
+        }
+
+        return $data;
+    }
+
     $json = file_get_contents($protected_list_file);
     if (!is_string($json) || $json === '') {
-        // JSON文字列が取得できない場合は保護対象なしとみなす
         return array();
     }
 
     $decoded = json_decode($json, true);
     if (!is_array($decoded)) {
-        // デコードに失敗した場合も保護対象は存在しない扱いとする
         return array();
     }
 
     if (isset($decoded['items']) && is_array($decoded['items'])) {
-        // 新形式は items キー配下にマップを格納している
         return $decoded['items'];
     }
 
-    // 旧形式ではそのままマップが返される
     return $decoded;
 }
 

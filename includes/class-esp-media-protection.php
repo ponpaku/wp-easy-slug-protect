@@ -86,7 +86,7 @@ class ESP_Media_Protection {
     /**
      * 保護ファイルリストのファイル名
      */
-    private const PROTECTED_LIST_FILENAME = 'protected-files.json';
+    private const PROTECTED_LIST_FILENAME = 'protected-files.php';
 
     /**
      * 環境変数に利用するキー名
@@ -349,7 +349,7 @@ class ESP_Media_Protection {
     }
 
     /**
-     * 保護リストを書き出すためのJSON文字列
+     * 保護リストを書き出すためのPHPスクリプト文字列
      */
     private static function build_protected_list_payload(array $map) {
         $payload = array(
@@ -359,15 +359,21 @@ class ESP_Media_Protection {
             'items' => $map,
         );
 
-        $json = wp_json_encode($payload);
-        if ($json === false) {
-            $json = json_encode($payload);
-        }
-        if ($json === false) {
-            $json = '{"site_id":"","site_url":"","items":[]}';
+        $export = var_export($payload, true);
+        if (!is_string($export) || $export === '') {
+            $export = var_export(array(
+                'site_id' => '',
+                'site_url' => '',
+                'site_slug' => '',
+                'items' => array(),
+            ), true);
         }
 
-        return $json;
+        $php = "<?php\n";
+        $php .= "if (!defined('ESP_GATE_ENV_PASSED') || ESP_GATE_ENV_PASSED !== true) {\n    return array();\n}\n";
+        $php .= 'return ' . $export . ';' . "\n";
+
+        return $php;
     }
 
     /**
@@ -439,7 +445,7 @@ class ESP_Media_Protection {
         $protected_list_path = self::get_protected_list_path_static();
         if (!file_exists($protected_list_path)) {
             // 空の保護リストを強制生成
-            @file_put_contents($protected_list_path, self::build_protected_list_payload(array()));
+            @file_put_contents($protected_list_path, self::build_protected_list_payload(array()), LOCK_EX);
         }
 
         $home_path = parse_url(home_url('/'), PHP_URL_PATH);
@@ -472,12 +478,12 @@ class ESP_Media_Protection {
         $php .= "if (!defined('ESP_GATE_CONFIG_ALLOWED')) {\n    return array();\n}\n";
         $php .= 'return ' . $export . ';' . "\n";
 
-        @file_put_contents($config_path, $php);
+        @file_put_contents($config_path, $php, LOCK_EX);
 
         if (!self::should_skip_legacy_secret_files()) {
             $legacy_path = self::get_legacy_gate_config_path_static();
             if ($legacy_path !== $config_path) {
-                @file_put_contents($legacy_path, $php);
+                @file_put_contents($legacy_path, $php, LOCK_EX);
             }
         }
     }
@@ -496,12 +502,12 @@ class ESP_Media_Protection {
         $this->ensure_secret_directory_exists();
         $path = $this->get_protected_list_path();
         $payload = self::build_protected_list_payload($map);
-        @file_put_contents($path, $payload);
+        @file_put_contents($path, $payload, LOCK_EX);
 
         if (!self::should_skip_legacy_secret_files()) {
             $legacy_path = self::get_legacy_protected_list_path_static();
             if ($legacy_path !== $path) {
-                @file_put_contents($legacy_path, $payload);
+                @file_put_contents($legacy_path, $payload, LOCK_EX);
             }
         }
     }
@@ -1593,7 +1599,7 @@ class ESP_Media_Protection {
 
         if (!$write_success) {
             // フォールバックで直接書き込み
-            $bytes = @file_put_contents($htaccess_file, $new_rules);
+            $bytes = @file_put_contents($htaccess_file, $new_rules, LOCK_EX);
             $write_success = ($bytes !== false);
         }
 
