@@ -16,5 +16,6 @@ if ($context === null) {
     return;
 }
 
+esp_gate_clear_delivery_headers();
 header('X-Sendfile: ' . $context['file_path']);
 exit;

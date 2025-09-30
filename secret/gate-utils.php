@@ -40,6 +40,40 @@ function esp_gate_normalize_site_token($value)
 }
 
 /**
+ * LiteSpeedやNginx等へ制御ヘッダーを出力する前に不要なヘッダーを除去する。
+ *
+ * WordPress本体を起動しないゲート環境では、既に送出済みのヘッダーが残っていると
+ * X系ヘッダーによる転送指示と競合する恐れがあるため、事前に関連ヘッダーを削除する。
+ */
+function esp_gate_clear_delivery_headers()
+{
+    if (function_exists('header_remove')) {
+        $headers = array(
+            'Content-Type',
+            'Content-Length',
+            'Content-Encoding',
+            'Content-Range',
+            'Accept-Ranges',
+            'Content-Disposition',
+            'Cache-Control',
+            'Expires',
+            'Pragma',
+            'Last-Modified',
+            'ETag',
+        );
+
+        foreach ($headers as $header) {
+            header_remove($header);
+        }
+    }
+
+    if (function_exists('ini_set')) {
+        // 既定のContent-Type付与を抑止
+        ini_set('default_mimetype', '');
+    }
+}
+
+/**
  * サイトに対応する設定ファイルを読み込む。
  *
  * @param string $site_token サイト識別子のトークン。

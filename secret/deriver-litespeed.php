@@ -46,6 +46,7 @@ if ($redirect_path === '') {
     return;
 }
 
+esp_gate_clear_delivery_headers();
 header('X-LiteSpeed-Location: ' . $redirect_path);
 exit;
 

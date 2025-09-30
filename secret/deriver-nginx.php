@@ -31,5 +31,6 @@ if ($relative === '') {
 }
 
 $internal_path = $prefix . '/' . ltrim(str_replace('\\', '/', $relative), '/');
+esp_gate_clear_delivery_headers();
 header('X-Accel-Redirect: ' . $internal_path);
 exit;
