@@ -136,6 +136,11 @@ if ($absolute_path === '' || !is_file($absolute_path)) {
 
 // 保護対象リストを読み込みファイルごとのIDを取得する
 $protected_map = esp_gate_read_protected_map($protected_list_file);
+if ($protected_map === null) {
+    http_response_code(403);
+    return esp_gate_build_response(403, false, $absolute_path, $normalized_relative, true);
+}
+
 $path_id = isset($protected_map[$normalized_relative]) ? $protected_map[$normalized_relative] : null;
 $protected = $path_id !== null && $path_id !== '';
 
@@ -196,20 +201,20 @@ function esp_gate_build_response($status, $authorized, $file_path = null, $relat
  * 保護リストファイルを読み込む。
  *
  * @param string $protected_list_file 保護リストのパス。
- * @return array 保護対象のマップ。
+ * @return array|null 保護対象のマップ。読み込めない場合は null。
  */
 function esp_gate_read_protected_map($protected_list_file)
 {
     if ($protected_list_file === '' || !is_readable($protected_list_file)) {
-        // 読み込める保護リストがなければ空配列を返す
-        return array();
+        // 読み込める保護リストがなければ失敗扱いとする
+        return null;
     }
 
     if (substr($protected_list_file, -4) === '.php') {
         // guard.phpで認証済みフラグが立っている場合のみリストが返る
         $data = include $protected_list_file;
         if (!is_array($data)) {
-            return array();
+            return null;
         }
 
         if (isset($data['items']) && is_array($data['items'])) {
@@ -221,12 +226,12 @@ function esp_gate_read_protected_map($protected_list_file)
 
     $json = file_get_contents($protected_list_file);
     if (!is_string($json) || $json === '') {
-        return array();
+        return null;
     }
 
     $decoded = json_decode($json, true);
     if (!is_array($decoded)) {
-        return array();
+        return null;
     }
 
     if (isset($decoded['items']) && is_array($decoded['items'])) {
