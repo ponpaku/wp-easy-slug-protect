@@ -196,23 +196,28 @@ function esp_gate_build_response($status, $authorized, $file_path = null, $relat
 function esp_gate_read_protected_map($protected_list_file)
 {
     if ($protected_list_file === '' || !is_readable($protected_list_file)) {
+        // 読み込める保護リストがなければ空配列を返す
         return array();
     }
 
     $json = file_get_contents($protected_list_file);
     if (!is_string($json) || $json === '') {
+        // JSON文字列が取得できない場合は保護対象なしとみなす
         return array();
     }
 
     $decoded = json_decode($json, true);
     if (!is_array($decoded)) {
+        // デコードに失敗した場合も保護対象は存在しない扱いとする
         return array();
     }
 
     if (isset($decoded['items']) && is_array($decoded['items'])) {
+        // 新形式は items キー配下にマップを格納している
         return $decoded['items'];
     }
 
+    // 旧形式ではそのままマップが返される
     return $decoded;
 }
 
@@ -225,16 +230,19 @@ function esp_gate_read_protected_map($protected_list_file)
 function esp_gate_validate_deriver_context($context)
 {
     if (!is_array($context)) {
+        // gate.php から配列以外が渡された場合はサーバーエラー扱い
         http_response_code(500);
         return null;
     }
 
     if (empty($context['file_path']) || !is_file($context['file_path'])) {
+        // 実体となるファイルが無ければステータスに応じた404を返す
         http_response_code(isset($context['status']) ? (int) $context['status'] : 404);
         return null;
     }
 
     if (empty($context['authorized'])) {
+        // 未認証の場合はステータスに応じた403を返す
         http_response_code(isset($context['status']) ? (int) $context['status'] : 403);
         return null;
     }
@@ -254,26 +262,31 @@ function esp_gate_check_cookie_authorization($path_id, array $prefixes, $media_g
 {
     $path_id = (string) $path_id;
     if ($path_id === '' || !is_string($media_gate_key) || $media_gate_key === '') {
+        // 判定に必要なIDやゲートキーが欠落している
         return false;
     }
 
     $gate_cookie = esp_gate_extract_gate_cookie($path_id, $prefixes);
     if ($gate_cookie === null) {
+        // 対象パスのゲートCookieが存在しない
         return false;
     }
 
     if ($gate_cookie['expires'] < time()) {
+        // ゲートCookieの有効期限が切れている
         return false;
     }
 
     $token = esp_gate_resolve_login_token($path_id, $prefixes);
     if ($token === null) {
+        // セッション／リメンバートークンが取得できない
         return false;
     }
 
     $payload = $path_id . '|' . $token . '|' . $gate_cookie['expires'];
     $expected_mac = hash_hmac('sha256', $payload, $media_gate_key);
     if (!is_string($expected_mac) || $expected_mac === '') {
+        // HMAC生成に失敗した場合は認証不可
         return false;
     }
 
@@ -290,35 +303,42 @@ function esp_gate_check_cookie_authorization($path_id, array $prefixes, $media_g
 function esp_gate_extract_gate_cookie($path_id, array $prefixes)
 {
     if (!isset($prefixes['gate']) || $prefixes['gate'] === '') {
+        // ゲートCookieの接頭辞が渡されていない
         return null;
     }
 
     $cookie_name = $prefixes['gate'] . $path_id;
     if (!isset($_COOKIE[$cookie_name])) {
+        // 指定パスのゲートCookieが存在しない
         return null;
     }
 
     $value = $_COOKIE[$cookie_name];
     if (!is_string($value) || $value === '') {
+        // Cookie値が文字列でない、もしくは空の場合
         return null;
     }
 
     $parts = explode('.', $value, 2);
     if (count($parts) !== 2) {
+        // MACと有効期限のペアでない形式は無効
         return null;
     }
 
     list($mac, $exp) = $parts;
     if ($mac === '' || $exp === '' || preg_match('/[^0-9]/', $exp)) {
+        // MACまたは期限が空、もしくは期限が数値でない
         return null;
     }
 
     if (!preg_match('/^[0-9a-f]{64}$/i', $mac)) {
+        // MACがHMAC SHA-256の形式と一致しない
         return null;
     }
 
     $expires = (int) $exp;
     if ($expires <= 0) {
+        // 期限が正の整数でない
         return null;
     }
 
@@ -340,6 +360,7 @@ function esp_gate_resolve_login_token($path_id, array $prefixes)
     if (isset($prefixes['session']) && $prefixes['session'] !== '') {
         $session_name = $prefixes['session'] . $path_id;
         if (isset($_COOKIE[$session_name]) && $_COOKIE[$session_name] !== '') {
+            // セッションCookieが存在すればそれを利用する
             return (string) $_COOKIE[$session_name];
         }
     }
@@ -350,13 +371,16 @@ function esp_gate_resolve_login_token($path_id, array $prefixes)
             if (isset($prefixes['remember_id']) && $prefixes['remember_id'] !== '') {
                 $id_name = $prefixes['remember_id'] . $path_id;
                 if (!isset($_COOKIE[$id_name]) || $_COOKIE[$id_name] === '') {
+                    // トークンがあってもIDが欠けていれば破棄する
                     return null;
                 }
             }
 
+            // リメンバートークンとIDが揃っていればトークンを返す
             return (string) $_COOKIE[$token_name];
         }
     }
 
+    // いずれのCookieからもトークンを得られなかった
     return null;
 }
