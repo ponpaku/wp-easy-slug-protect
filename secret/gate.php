@@ -20,6 +20,11 @@ if (!is_array($esp_gate_config)) {
     $esp_gate_config = array();
 }
 
+$config_key = isset($esp_gate_config['media_gate_key']) ? $esp_gate_config['media_gate_key'] : '';
+if (!defined('ESP_GATE_EXPECTED_KEY')) {
+    define('ESP_GATE_EXPECTED_KEY', is_string($config_key) ? $config_key : '');
+}
+
 // 直アクセス防止フラグをguard.phpで検証する
 require __DIR__ . '/guard.php';
 if (!defined('ESP_GATE_ENV_PASSED') || ESP_GATE_ENV_PASSED !== true) {
@@ -29,7 +34,6 @@ if (!defined('ESP_GATE_ENV_PASSED') || ESP_GATE_ENV_PASSED !== true) {
 
 // 環境変数のゲートキーと設定ファイルのキーを比較する
 $env_key = esp_gate_read_server_env('ESP_MEDIA_GATE_KEY');
-$config_key = isset($esp_gate_config['media_gate_key']) ? $esp_gate_config['media_gate_key'] : '';
 if (!is_string($config_key) || $config_key === '' || !is_string($env_key) || $env_key === '') {
     http_response_code(403);
     return esp_gate_build_response(403, false);

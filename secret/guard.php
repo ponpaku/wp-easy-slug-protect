@@ -5,14 +5,29 @@
  * @package EasySlugProtect
  */
 
-require_once __DIR__ . '/gate-utils.php';
-
 if (defined('ESP_GATE_ENV_PASSED')) {
     return;
 }
 
-$env_key = esp_gate_read_server_env('ESP_MEDIA_GATE_KEY');
-if (!is_string($env_key) || $env_key === '') {
+$expected_key = defined('ESP_GATE_EXPECTED_KEY') ? (string) ESP_GATE_EXPECTED_KEY : '';
+if ($expected_key === '') {
+    http_response_code(403);
+    return;
+}
+
+$env_key = '';
+if (isset($_SERVER['ESP_MEDIA_GATE_KEY'])) {
+    $env_key = (string) $_SERVER['ESP_MEDIA_GATE_KEY'];
+} elseif (isset($_SERVER['REDIRECT_ESP_MEDIA_GATE_KEY'])) {
+    $env_key = (string) $_SERVER['REDIRECT_ESP_MEDIA_GATE_KEY'];
+} else {
+    $fetched = getenv('ESP_MEDIA_GATE_KEY');
+    if ($fetched !== false) {
+        $env_key = (string) $fetched;
+    }
+}
+
+if ($env_key === '' || !hash_equals($expected_key, $env_key)) {
     http_response_code(403);
     return;
 }
