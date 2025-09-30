@@ -27,7 +27,7 @@ if (isset($_SERVER['ESP_MEDIA_GATE_KEY'])) {
     }
 }
 
-if ($env_key === '' || !hash_equals($expected_key, $env_key)) {
+if ($env_key === '' || $env_key !== $expected_key) {
     http_response_code(403);
     return;
 }
