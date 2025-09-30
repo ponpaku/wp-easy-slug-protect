@@ -74,9 +74,9 @@ class ESP_Media_Protection {
     const OPTION_MEDIA_GATE_KEY = 'media_gate_key';
 
     /**
-     * ゲート用のシークレットフォルダ名
+     * ゲート用の配置フォルダ名
      */
-    private const SECRET_DIR_NAME = 'secret';
+    private const SECRET_DIR_NAME = 'gate';
 
     /**
      * ゲートの設定ファイル名
