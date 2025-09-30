@@ -104,9 +104,11 @@ class ESP_Cookie {
             if (is_array($settings)) {
                 $media_enabled = true;
                 if (array_key_exists('enabled', $settings)) {
+                    // メディア自体が無効なら高速ゲートも停止する
                     $media_enabled = (bool) $settings['enabled'];
                 }
 
+                // メディア保護と高速ゲートの両方が有効なときのみ起動
                 $enabled = $media_enabled && !empty($settings['fast_gate_enabled']);
             }
 
@@ -121,15 +123,18 @@ class ESP_Cookie {
      */
     private function build_gate_cookie_value($path_id, $token, $expires) {
         if (!class_exists('ESP_Media_Protection')) {
+            // ゲート用のキー管理が利用できない場合は中断
             return null;
         }
 
         $key = ESP_Media_Protection::get_media_gate_key_value();
         if ($key === '') {
+            // キー未生成ならここで生成を試みる
             $key = ESP_Media_Protection::ensure_media_gate_key_exists();
         }
 
         if ($key === '') {
+            // キーが確保できなければMACも発行しない
             return null;
         }
 
@@ -137,6 +142,7 @@ class ESP_Cookie {
         $mac = hash_hmac('sha256', $payload, $key);
 
         if (!is_string($mac) || $mac === '') {
+            // HMAC生成に失敗した場合はCookieを発行しない
             return null;
         }
 
@@ -149,25 +155,30 @@ class ESP_Cookie {
     public function queue_gate_cookie($path_id, $token, $expires) {
         $path_id = (string) $path_id;
         if ($path_id === '') {
+            // パスIDが無いリクエストは対象外
             return;
         }
 
         if (!$this->is_fast_gate_active()) {
+            // 高速ゲート無効時は既存Cookieを破棄する
             $this->clear_gate_cookie($path_id);
             return;
         }
 
         if (!is_string($token) || $token === '') {
+            // トークン未取得なら発行しない
             return;
         }
 
         $expires = intval($expires);
         if ($expires <= 0) {
+            // 有効期限が正しくない場合も中断
             return;
         }
 
         $value = $this->build_gate_cookie_value($path_id, $token, $expires);
         if ($value === null) {
+            // MAC生成に失敗した場合はCookie設定しない
             return;
         }
 
@@ -184,6 +195,7 @@ class ESP_Cookie {
     public function clear_gate_cookie($path_id) {
         $path_id = (string) $path_id;
         if ($path_id === '') {
+            // パスID不明なら処理しない
             return;
         }
 
