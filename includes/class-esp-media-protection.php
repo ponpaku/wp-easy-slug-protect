@@ -228,16 +228,14 @@ class ESP_Media_Protection {
      * シークレットディレクトリの相対パス（静的）
      */
     private static function get_secret_directory_relative_path_static() {
-        $plugin_root = dirname(__DIR__);
-        $relative = str_replace(ABSPATH, '', $plugin_root);
-        $relative = str_replace('\\', '/', $relative);
-        $relative = trim($relative, '/');
+        $secret_url = trailingslashit(ESP_URL) . self::SECRET_DIR_NAME . '/';
+        $path = wp_parse_url($secret_url, PHP_URL_PATH);
 
-        if ($relative !== '') {
-            $relative .= '/' . self::SECRET_DIR_NAME;
-        } else {
-            $relative = self::SECRET_DIR_NAME;
+        if (!is_string($path) || $path === '') {
+            return '';
         }
+
+        $relative = trim($path, '/');
 
         return $relative;
     }
