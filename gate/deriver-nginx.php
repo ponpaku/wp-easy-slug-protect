@@ -21,16 +21,36 @@ if (!isset($esp_gate_config) || !is_array($esp_gate_config)) {
     return;
 }
 
-$prefix = isset($esp_gate_config['nginx_internal_prefix']) ? $esp_gate_config['nginx_internal_prefix'] : '/protected-uploads';
-// 内部リダイレクト先のプレフィックスを余分なスラッシュ無しで扱う
-$prefix = rtrim($prefix, '/');
+$default_prefix = isset($esp_gate_config['nginx_internal_prefix']) ? $esp_gate_config['nginx_internal_prefix'] : '/protected-uploads';
+$default_prefix = rtrim($default_prefix, '/');
+$variant_prefix = isset($esp_gate_config['nginx_variants_prefix']) ? $esp_gate_config['nginx_variants_prefix'] : '';
+$variant_prefix = rtrim($variant_prefix, '/');
+
 $relative = isset($context['relative_path']) ? $context['relative_path'] : '';
 if ($relative === '') {
     http_response_code(500);
     return;
 }
 
-$internal_path = $prefix . '/' . ltrim(str_replace('\\', '/', $relative), '/');
+$variant_relative = isset($context['nginx_relative_path']) ? $context['nginx_relative_path'] : '';
+$delivery_content_type = isset($context['delivery_content_type']) ? $context['delivery_content_type'] : '';
+
+$selected_prefix = $default_prefix;
+$selected_relative = $relative;
+$use_variant_delivery = $variant_prefix !== '' && $variant_relative !== '';
+
+if ($use_variant_delivery) {
+    $selected_prefix = $variant_prefix;
+    $selected_relative = $variant_relative;
+} else {
+    $variant_relative = '';
+    $delivery_content_type = '';
+}
+
+$internal_path = $selected_prefix . '/' . ltrim(str_replace('\\', '/', $selected_relative), '/');
 esp_gate_clear_delivery_headers();
+if ($delivery_content_type !== '') {
+    header('Content-Type: ' . $delivery_content_type);
+}
 header('X-Accel-Redirect: ' . $internal_path);
 exit;

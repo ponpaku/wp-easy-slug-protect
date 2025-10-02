@@ -74,6 +74,273 @@ function esp_gate_clear_delivery_headers()
 }
 
 /**
+ * クエリストリングにoriginal指定が含まれる場合は画像変換を無効化する。
+ *
+ * .htaccessの `RewriteCond %{QUERY_STRING} original$` に相当する判定をゲート側で再現する。
+ *
+ * @return bool trueの場合は変換をスキップする。
+ */
+function esp_gate_should_skip_alternative_delivery()
+{
+    $query_string = (string) esp_gate_read_server_env('QUERY_STRING');
+    if ($query_string === '') {
+        return false;
+    }
+
+    return preg_match('/original$/', $query_string) === 1;
+}
+
+/**
+ * Acceptヘッダーに指定されたMIMEタイプをサポートするか判定する。
+ *
+ * @param string $accept Acceptヘッダーの値。
+ * @param string $mime   判定対象のMIMEタイプ。
+ * @return bool 対応している場合はtrue。
+ */
+function esp_gate_accepts_mime($accept, $mime)
+{
+    $accept = strtolower(trim((string) $accept));
+    $mime = strtolower(trim((string) $mime));
+
+    if ($accept === '' || $mime === '') {
+        return false;
+    }
+
+    $parts = explode(',', $accept);
+    foreach ($parts as $part) {
+        $item = trim($part);
+        if ($item === '') {
+            continue;
+        }
+
+        $segments = explode(';', $item);
+        $type = trim(array_shift($segments));
+        if ($type !== $mime) {
+            continue;
+        }
+
+        $quality = 1.0;
+        foreach ($segments as $segment) {
+            $segment = trim($segment);
+            if ($segment === '') {
+                continue;
+            }
+
+            $pair = explode('=', $segment, 2);
+            if (count($pair) !== 2) {
+                continue;
+            }
+
+            if (trim($pair[0]) === 'q') {
+                $quality = (float) trim($pair[1]);
+            }
+        }
+
+        if ($quality <= 0) {
+            continue;
+        }
+
+        return true;
+    }
+
+    return false;
+}
+
+/**
+ * 変換画像の相対パスを生成する。
+ *
+ * .htaccess での書き換えと同じく、対象ファイルの拡張子を小文字へ
+ * 正規化した上で変換フォーマットのサフィックスを連結する。
+ *
+ * @param string $relative_path 元の相対パス。
+ * @param string $extension     元ファイルの拡張子（小文字）。
+ * @param string $suffix        変換後ファイルのサフィックス（例: `.webp`）。
+ * @return string 生成した相対パス。生成できない場合は空文字。
+ */
+function esp_gate_build_variant_relative_path($relative_path, $extension, $suffix)
+{
+    $relative_path = trim(str_replace('\\', '/', (string) $relative_path), '/');
+    if ($relative_path === '') {
+        return '';
+    }
+
+    $extension = strtolower((string) $extension);
+    $suffix = (string) $suffix;
+
+    if ($extension === '' || $suffix === '') {
+        return '';
+    }
+
+    $normalized = preg_replace('/\.[^.]+$/', '.' . $extension, $relative_path, 1, $count);
+    if (!is_string($normalized) || $normalized === '') {
+        return '';
+    }
+
+    if ($count === 0) {
+        $normalized .= '.' . $extension;
+    }
+
+    return str_replace('\\', '/', $normalized . $suffix);
+}
+
+/**
+ * クライアントのAcceptヘッダーに応じて配信するファイルを決定する。
+ *
+ * .htaccessのWebP/AVIF書き換えルールと同等の判定をゲート環境で行い、
+ * 利用可能な変換画像が存在する場合はそちらを優先的に返す。
+ *
+ * @param string $absolute_path      元のファイルの絶対パス。
+ * @param string $relative_path      元のファイルの相対パス。
+ * @param array  $options            追加オプション。
+ * @return array 配信対象ファイルの情報。`nginx_relative` には変換済みファイルを `/protected-uploads-webpc` などの
+ *               内部プレフィックスに連結するための相対パスが入る。
+ */
+function esp_gate_resolve_media_variant($absolute_path, $relative_path, array $options = array())
+{
+    $result = array(
+        'path' => $absolute_path,
+        'relative' => $relative_path,
+        'content_type' => null,
+        'nginx_relative' => null,
+    );
+
+    if (!is_string($absolute_path) || $absolute_path === '') {
+        return $result;
+    }
+
+    if (esp_gate_should_skip_alternative_delivery()) {
+        return $result;
+    }
+
+    $accept = isset($options['accept']) ? $options['accept'] : esp_gate_read_server_env('HTTP_ACCEPT');
+    if (!is_string($accept) || $accept === '') {
+        return $result;
+    }
+
+    $extension = strtolower((string) pathinfo($absolute_path, PATHINFO_EXTENSION));
+    if ($extension === '') {
+        return $result;
+    }
+
+    $document_root = isset($options['document_root']) ? $options['document_root'] : esp_gate_read_server_env('DOCUMENT_ROOT');
+    $document_root = rtrim((string) $document_root, DIRECTORY_SEPARATOR);
+
+    $upload_base = isset($options['upload_base']) ? $options['upload_base'] : '';
+    $upload_base = rtrim((string) $upload_base, DIRECTORY_SEPARATOR);
+
+    $uploads_webpc_base = isset($options['uploads_webpc_base']) ? $options['uploads_webpc_base'] : '';
+    $uploads_webpc_base = rtrim((string) $uploads_webpc_base, DIRECTORY_SEPARATOR);
+
+    $relative_from_upload_base = '';
+    if ($upload_base !== '' && strpos($absolute_path, $upload_base) === 0) {
+        $relative_from_upload_base = ltrim(substr($absolute_path, strlen($upload_base)), DIRECTORY_SEPARATOR);
+    }
+
+    $normalized_relative = '';
+    if (is_string($relative_path) && $relative_path !== '') {
+        $normalized_relative = trim(str_replace('\\', '/', $relative_path), '/');
+    }
+
+    if ($normalized_relative === '' && $relative_from_upload_base !== '') {
+        $normalized_relative = trim(str_replace('\\', '/', $relative_from_upload_base), '/');
+    }
+
+    if ($normalized_relative === '' && $document_root !== '' && strpos($absolute_path, $document_root) === 0) {
+        $relative_from_root = ltrim(substr($absolute_path, strlen($document_root)), DIRECTORY_SEPARATOR);
+        $relative_from_root = trim(str_replace('\\', '/', $relative_from_root), '/');
+
+        if ($relative_from_root === 'wp-content/uploads') {
+            $relative_from_root = '';
+        } elseif (strpos($relative_from_root, 'wp-content/uploads/') === 0) {
+            $relative_from_root = substr($relative_from_root, strlen('wp-content/uploads/'));
+        }
+
+        if ($relative_from_root !== '') {
+            $normalized_relative = $relative_from_root;
+        }
+    }
+
+    $variants = array(
+        array(
+            'mime' => 'image/avif',
+            'suffix' => '.avif',
+            'extensions' => array('jpg', 'jpeg', 'png', 'webp'),
+        ),
+        array(
+            'mime' => 'image/webp',
+            'suffix' => '.webp',
+            'extensions' => array('jpg', 'jpeg', 'png'),
+        ),
+    );
+
+    foreach ($variants as $variant) {
+        if (!in_array($extension, $variant['extensions'], true)) {
+            continue;
+        }
+
+        if (!esp_gate_accepts_mime($accept, $variant['mime'])) {
+            continue;
+        }
+
+        $candidate_paths = array();
+        $variant_relative = '';
+        if ($normalized_relative !== '') {
+            $variant_relative = esp_gate_build_variant_relative_path(
+                $normalized_relative,
+                $extension,
+                $variant['suffix']
+            );
+        }
+
+        if ($variant_relative !== '') {
+            if ($uploads_webpc_base !== '') {
+                $absolute = $uploads_webpc_base . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $variant_relative);
+                $candidate_paths[] = array(
+                    'absolute' => $absolute,
+                    'nginx_relative' => $variant_relative,
+                );
+            }
+
+            if ($document_root !== '') {
+                $absolute = $document_root . DIRECTORY_SEPARATOR . 'wp-content' . DIRECTORY_SEPARATOR . 'uploads-webpc' . DIRECTORY_SEPARATOR . 'uploads' . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $variant_relative);
+                $candidate_paths[] = array(
+                    'absolute' => $absolute,
+                );
+            }
+        }
+
+        $visited = array();
+        foreach ($candidate_paths as $candidate) {
+            $absolute_candidate = isset($candidate['absolute']) ? $candidate['absolute'] : '';
+            if (!is_string($absolute_candidate) || $absolute_candidate === '') {
+                continue;
+            }
+
+            if (isset($visited[$absolute_candidate])) {
+                continue;
+            }
+            $visited[$absolute_candidate] = true;
+
+            if (!is_file($absolute_candidate)) {
+                continue;
+            }
+
+            $result['path'] = $absolute_candidate;
+            if (isset($candidate['nginx_relative'])) {
+                $result['nginx_relative'] = str_replace('\\', '/', $candidate['nginx_relative']);
+            } elseif ($variant_relative !== '') {
+                $result['nginx_relative'] = str_replace('\\', '/', $variant_relative);
+            }
+            $result['content_type'] = $variant['mime'];
+
+            return $result;
+        }
+    }
+
+    return $result;
+}
+
+/**
  * サイトに対応する設定ファイルを読み込む。
  *
  * @param string $site_token サイト識別子のトークン。

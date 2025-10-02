@@ -95,6 +95,7 @@ class ESP_Admin_Menu {
         $nginx_rules_meta = array(
             'media_enabled' => $media_enabled,
             'has_protected_media' => false,
+            'fast_gate_active' => false,
         );
 
         $is_nginx_server = class_exists('ESP_Media_Protection') && ESP_Media_Protection::is_nginx_server();
@@ -111,6 +112,9 @@ class ESP_Admin_Menu {
                 }
                 if (isset($nginx_rules_result['has_protected_media'])) {
                     $nginx_rules_meta['has_protected_media'] = (bool) $nginx_rules_result['has_protected_media'];
+                }
+                if (isset($nginx_rules_result['fast_gate_active'])) {
+                    $nginx_rules_meta['fast_gate_active'] = (bool) $nginx_rules_result['fast_gate_active'];
                 }
             }
         }
@@ -537,6 +541,15 @@ class ESP_Admin_Menu {
                                         <p class="description">
                                             <?php _e('serverディレクティブ内に貼り付け、設定反映後にNginxをリロードしてください。', $text_domain); ?>
                                         </p>
+                                        <?php if (!empty($nginx_rules_meta['fast_gate_active'])): ?>
+                                            <p class="description">
+                                                <?php _e('高速ゲートを利用する場合は、内部リダイレクト用の location を追加し、環境に合わせてパスを書き換えてください。', $text_domain); ?>
+                                            </p>
+                                            <textarea readonly class="large-text code" rows="10" onclick="this.select();"><?php echo esc_textarea("location /protected-uploads/ {\n    internal;\n    alias /path/to/wp-content/uploads/;\n}\n\nlocation /protected-uploads-webpc/ {\n    internal;\n    alias /path/to/wp-content/uploads-webpc/uploads/;\n}"); ?></textarea>
+                                            <p class="description">
+                                                <?php _e('alias には各サイトのアップロードディレクトリと WebP 変換ディレクトリの実パスを指定してください。', $text_domain); ?>
+                                            </p>
+                                        <?php endif; ?>
                                     <?php endif; ?>
                                 <?php endif; ?>
                             </td>

@@ -104,6 +104,11 @@ class ESP_Media_Protection {
     private const NGINX_INTERNAL_PREFIX = '/protected-uploads';
 
     /**
+     * Nginxで利用する変換ファイル用プレフィックス
+     */
+    private const NGINX_VARIANTS_PREFIX = '/protected-uploads-webpc';
+
+    /**
      * 保護対象のファイル拡張子
      */
     private const PROTECTED_EXTENSIONS = [
@@ -439,6 +444,11 @@ class ESP_Media_Protection {
             return;
         }
 
+        $webpc_uploads_base = '';
+        if (defined('WP_CONTENT_DIR')) {
+            $webpc_uploads_base = rtrim(WP_CONTENT_DIR, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'uploads-webpc' . DIRECTORY_SEPARATOR . 'uploads';
+        }
+
         // フォルダとキーの下準備
         self::ensure_secret_directory_exists_static();
         $config_path = self::get_gate_config_path_static();
@@ -475,6 +485,8 @@ class ESP_Media_Protection {
             'litespeed_query_key' => ESP_Config::LITESPEED_QUERY_KEY,
             'litespeed_access_key' => $litespeed_key,
             'nginx_internal_prefix' => self::get_nginx_internal_prefix_static(),
+            'nginx_variants_prefix' => self::get_nginx_variants_prefix_static(),
+            'uploads_webpc_base' => $webpc_uploads_base,
         );
 
         $export = var_export($config, true);
@@ -551,6 +563,13 @@ class ESP_Media_Protection {
      */
     private static function get_nginx_internal_prefix_static() {
         return self::NGINX_INTERNAL_PREFIX;
+    }
+
+    /**
+     * Nginx変換ファイル用プレフィックス（静的）
+     */
+    private static function get_nginx_variants_prefix_static() {
+        return self::NGINX_VARIANTS_PREFIX;
     }
 
     /**

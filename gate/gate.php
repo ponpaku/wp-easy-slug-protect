@@ -64,6 +64,7 @@ if ($site_token !== '') {
 define('ESP_GATE_VERIFIED', true);
 
 $upload_base = isset($esp_gate_config['upload_base']) ? $esp_gate_config['upload_base'] : '';
+$uploads_webpc_base = isset($esp_gate_config['uploads_webpc_base']) ? $esp_gate_config['uploads_webpc_base'] : '';
 $protected_list_file = isset($esp_gate_config['protected_list_file']) ? $esp_gate_config['protected_list_file'] : '';
 // 設定に保存されているサイト識別子を抽出する
 $site_slug = '';
@@ -144,9 +145,28 @@ if ($protected_map === null) {
 $path_id = isset($protected_map[$normalized_relative]) ? $protected_map[$normalized_relative] : null;
 $protected = $path_id !== null && $path_id !== '';
 
+$delivery_variant = esp_gate_resolve_media_variant(
+    $absolute_path,
+    $normalized_relative,
+    array(
+        'upload_base' => $upload_base,
+        'uploads_webpc_base' => $uploads_webpc_base,
+    )
+);
+
+$delivery_path = isset($delivery_variant['path']) ? $delivery_variant['path'] : $absolute_path;
+$delivery_relative = isset($delivery_variant['relative']) ? $delivery_variant['relative'] : $normalized_relative;
+$delivery_content_type = isset($delivery_variant['content_type']) ? $delivery_variant['content_type'] : null;
+$delivery_nginx_relative = isset($delivery_variant['nginx_relative']) ? $delivery_variant['nginx_relative'] : null;
+
 // 保護対象でなければそのまま配信を許可する
 if (!$protected) {
-    return esp_gate_build_response(200, true, $absolute_path, $normalized_relative, false);
+    return esp_gate_build_response(200, true, $delivery_path, $delivery_relative, false, null, array(
+        'requested_file_path' => $absolute_path,
+        'requested_relative_path' => $normalized_relative,
+        'content_type' => $delivery_content_type,
+        'nginx_relative_path' => $delivery_nginx_relative,
+    ));
 }
 
 // cookieプレフィックスを取得
@@ -168,7 +188,12 @@ $authorized = esp_gate_check_cookie_authorization(
 
 // 対象Cookieが存在すれば閲覧を許可する
 if ($authorized) {
-    return esp_gate_build_response(200, true, $absolute_path, $normalized_relative, true, $path_id);
+    return esp_gate_build_response(200, true, $delivery_path, $delivery_relative, true, $path_id, array(
+        'requested_file_path' => $absolute_path,
+        'requested_relative_path' => $normalized_relative,
+        'content_type' => $delivery_content_type,
+        'nginx_relative_path' => $delivery_nginx_relative,
+    ));
 }
 
 http_response_code(403);
@@ -185,15 +210,34 @@ return esp_gate_build_response(403, false, $absolute_path, $normalized_relative,
  * @param string|null $path_id         保護パスID。
  * @return array レスポンス配列。
  */
-function esp_gate_build_response($status, $authorized, $file_path = null, $relative_path = null, $protected = false, $path_id = null)
+function esp_gate_build_response($status, $authorized, $file_path = null, $relative_path = null, $protected = false, $path_id = null, array $delivery = array())
 {
+    $delivery_path = isset($delivery['path']) ? $delivery['path'] : null;
+    if (!is_string($delivery_path) || $delivery_path === '') {
+        $delivery_path = $file_path;
+    }
+
+    $delivery_relative = isset($delivery['relative']) ? $delivery['relative'] : null;
+    if (!is_string($delivery_relative) || $delivery_relative === '') {
+        $delivery_relative = $relative_path;
+    }
+
+    $requested_file_path = isset($delivery['requested_file_path']) ? $delivery['requested_file_path'] : $file_path;
+    $requested_relative_path = isset($delivery['requested_relative_path']) ? $delivery['requested_relative_path'] : $relative_path;
+    $content_type = isset($delivery['content_type']) ? $delivery['content_type'] : null;
+    $nginx_relative_path = isset($delivery['nginx_relative_path']) ? $delivery['nginx_relative_path'] : null;
+
     return array(
         'status' => (int) $status,
         'authorized' => (bool) $authorized,
-        'file_path' => $file_path,
-        'relative_path' => $relative_path,
+        'file_path' => $delivery_path,
+        'relative_path' => $delivery_relative,
         'protected' => (bool) $protected,
         'path_id' => $path_id,
+        'requested_file_path' => $requested_file_path,
+        'requested_relative_path' => $requested_relative_path,
+        'delivery_content_type' => $content_type,
+        'nginx_relative_path' => $nginx_relative_path,
     );
 }
 

@@ -17,5 +17,8 @@ if ($context === null) {
 }
 
 esp_gate_clear_delivery_headers();
+if (!empty($context['delivery_content_type'])) {
+    header('Content-Type: ' . $context['delivery_content_type']);
+}
 header('X-Sendfile: ' . $context['file_path']);
 exit;
