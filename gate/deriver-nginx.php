@@ -33,19 +33,24 @@ if ($relative === '') {
 }
 
 $variant_relative = isset($context['nginx_relative_path']) ? $context['nginx_relative_path'] : '';
+$delivery_content_type = isset($context['delivery_content_type']) ? $context['delivery_content_type'] : '';
 
 $selected_prefix = $default_prefix;
 $selected_relative = $relative;
+$use_variant_delivery = $variant_prefix !== '' && $variant_relative !== '';
 
-if ($variant_relative !== '' && $variant_prefix !== '') {
+if ($use_variant_delivery) {
     $selected_prefix = $variant_prefix;
     $selected_relative = $variant_relative;
+} else {
+    $variant_relative = '';
+    $delivery_content_type = '';
 }
 
 $internal_path = $selected_prefix . '/' . ltrim(str_replace('\\', '/', $selected_relative), '/');
 esp_gate_clear_delivery_headers();
-if (!empty($context['delivery_content_type'])) {
-    header('Content-Type: ' . $context['delivery_content_type']);
+if ($delivery_content_type !== '') {
+    header('Content-Type: ' . $delivery_content_type);
 }
 header('X-Accel-Redirect: ' . $internal_path);
 exit;
