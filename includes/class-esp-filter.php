@@ -54,6 +54,10 @@ class ESP_Filter {
             add_filter("rest_{$post_type}_query",     [$this, 'filter_rest_post_type_query'], 10, 2);
             add_filter("rest_prepare_{$post_type}",  [$this, 'check_rest_single_post_access'], 10, 3);
         }
+
+        // サイトマップでも除外を適用
+        add_filter('wp_sitemaps_posts_query_args', [$this, 'filter_sitemap_posts_query'], 10, 2);
+        add_filter('wp_sitemaps_taxonomies_query_args', [$this, 'filter_sitemap_taxonomies_query'], 10, 2);
     }
 
     /*----- handler ------*/
@@ -338,6 +342,102 @@ class ESP_Filter {
             $current_excluded     = isset($args['post__not_in']) ? (array) $args['post__not_in'] : [];
             $args['post__not_in'] = array_unique(array_merge($current_excluded, $excluded_post_ids));
         }
+        return $args;
+    }
+
+    /**
+     * サイトマップ用クエリの除外処理
+     * - post__not_in に除外IDをマージ
+     * @param array  $args
+     * @param string $post_type
+     * @return array
+     */
+    public function filter_sitemap_posts_query($args, $post_type) {
+        $args = (array) $args;
+
+        $excluded_post_ids = $this->get_excluded_post_ids();
+        if (!empty($excluded_post_ids)) {
+            $current_excluded     = isset($args['post__not_in']) ? (array) $args['post__not_in'] : [];
+            $args['post__not_in'] = array_unique(array_merge($current_excluded, $excluded_post_ids));
+        }
+
+        return $args;
+    }
+
+    /**
+     * サイトマップ用タクソノミークエリの除外処理
+     * - exclude に保護対象投稿が紐づくタームを追加
+     * @param array  $args
+     * @param string $taxonomy
+     * @return array
+     */
+    public function filter_sitemap_taxonomies_query($args, $taxonomy) {
+        $args = (array) $args;
+
+        $excluded_post_ids = $this->get_excluded_post_ids();
+        if (empty($excluded_post_ids)) {
+            return $args;
+        }
+
+        $taxonomy = (string) $taxonomy;
+        if ($taxonomy === '') {
+            return $args;
+        }
+
+        $excluded_term_ids = wp_get_object_terms($excluded_post_ids, $taxonomy, ['fields' => 'ids']);
+        if (is_wp_error($excluded_term_ids) || empty($excluded_term_ids)) {
+            return $args;
+        }
+
+        $excluded_term_ids = array_values(array_unique(array_map('intval', $excluded_term_ids)));
+
+        $taxonomy_object = get_taxonomy($taxonomy);
+        if ($taxonomy_object && !empty($taxonomy_object->object_type)) {
+            $object_types = (array) $taxonomy_object->object_type;
+        } else {
+            $object_types = get_post_types(['public' => true], 'names');
+            if (empty($object_types)) {
+                $object_types = 'any'; // 公開投稿タイプが見つからない場合のフォールバック
+            }
+        }
+
+        $post_statuses = ['publish'];
+        if ($object_types === 'any' || (is_array($object_types) && in_array('attachment', $object_types, true))) {
+            $post_statuses[] = 'inherit'; // 添付ファイルも考慮
+        }
+
+        $terms_to_exclude = [];
+        foreach ($excluded_term_ids as $term_id) {
+            $has_public_posts = get_posts([
+                'post_type'           => $object_types,
+                'post_status'         => $post_statuses,
+                'posts_per_page'      => 1,
+                'fields'              => 'ids',
+                'no_found_rows'       => true,
+                'update_post_meta_cache' => false,
+                'update_post_term_cache' => false,
+                'post__not_in'        => $excluded_post_ids,
+                'tax_query'           => [[
+                    'taxonomy'         => $taxonomy,
+                    'terms'            => $term_id,
+                    'include_children' => false,
+                ]],
+            ]);
+
+            if (!empty($has_public_posts)) {
+                continue; // 公開投稿が残っているタームは除外しない
+            }
+
+            $terms_to_exclude[] = $term_id;
+        }
+
+        if (empty($terms_to_exclude)) {
+            return $args;
+        }
+
+        $current_excluded = isset($args['exclude']) ? wp_parse_id_list($args['exclude']) : [];
+        $args['exclude']  = array_values(array_unique(array_merge($current_excluded, $terms_to_exclude)));
+
         return $args;
     }
 
