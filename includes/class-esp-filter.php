@@ -357,6 +357,7 @@ class ESP_Filter {
 
         $excluded_post_ids = $this->get_excluded_post_ids();
         if (!empty($excluded_post_ids)) {
+            // 既存指定がある場合でも配列化して統合
             $current_excluded     = isset($args['post__not_in']) ? (array) $args['post__not_in'] : [];
             $args['post__not_in'] = array_unique(array_merge($current_excluded, $excluded_post_ids));
         }
@@ -376,34 +377,34 @@ class ESP_Filter {
 
         $excluded_post_ids = $this->get_excluded_post_ids();
         if (empty($excluded_post_ids)) {
-            return $args;
+            return $args; // 除外対象がなければ処理不要
         }
 
         $taxonomy = (string) $taxonomy;
         if ($taxonomy === '') {
-            return $args;
+            return $args; // タクソノミー未指定なら何もしない
         }
 
         $excluded_term_ids = wp_get_object_terms($excluded_post_ids, $taxonomy, ['fields' => 'ids']);
         if (is_wp_error($excluded_term_ids) || empty($excluded_term_ids)) {
-            return $args;
+            return $args; // 紐づくタームが無ければ終了
         }
 
         $excluded_term_ids = array_values(array_unique(array_map('intval', $excluded_term_ids)));
 
         $taxonomy_object = get_taxonomy($taxonomy);
         if ($taxonomy_object && !empty($taxonomy_object->object_type)) {
-            $object_types = (array) $taxonomy_object->object_type;
+            $object_types = (array) $taxonomy_object->object_type; // 紐づく投稿タイプを利用
         } else {
-            $object_types = get_post_types(['public' => true], 'names');
+            $object_types = get_post_types(['public' => true], 'names'); // 定義が無ければ公開投稿タイプにフォールバック
             if (empty($object_types)) {
-                $object_types = 'any'; // 公開投稿タイプが見つからない場合のフォールバック
+                $object_types = 'any'; // さらに無ければ any を指定
             }
         }
 
         $post_statuses = ['publish'];
         if ($object_types === 'any' || (is_array($object_types) && in_array('attachment', $object_types, true))) {
-            $post_statuses[] = 'inherit'; // 添付ファイルも考慮
+            $post_statuses[] = 'inherit'; // 添付ファイルの公開判定を可能にする
         }
 
         $terms_to_exclude = [];
@@ -425,14 +426,14 @@ class ESP_Filter {
             ]);
 
             if (!empty($has_public_posts)) {
-                continue; // 公開投稿が残っているタームは除外しない
+                continue; // 公開投稿が残っているタームはサイトマップに保持
             }
 
-            $terms_to_exclude[] = $term_id;
+            $terms_to_exclude[] = $term_id; // 公開投稿が無いタームのみ除外対象へ
         }
 
         if (empty($terms_to_exclude)) {
-            return $args;
+            return $args; // 追加除外が無ければ既存設定を維持
         }
 
         $current_excluded = isset($args['exclude']) ? wp_parse_id_list($args['exclude']) : [];
