@@ -376,18 +376,21 @@ class ESP_Filter {
         $args = (array) $args;
 
         $excluded_post_ids = $this->get_excluded_post_ids();
+        // 除外対象がなければ追加処理は不要
         if (empty($excluded_post_ids)) {
-            return $args; // 除外対象がなければ処理不要
+            return $args;
         }
 
         $taxonomy = (string) $taxonomy;
+        // タクソノミー未指定の場合は既存挙動を維持
         if ($taxonomy === '') {
-            return $args; // タクソノミー未指定なら何もしない
+            return $args;
         }
 
         $excluded_term_ids = wp_get_object_terms($excluded_post_ids, $taxonomy, ['fields' => 'ids']);
+        // タームを取得できなければ除外は不要
         if (is_wp_error($excluded_term_ids) || empty($excluded_term_ids)) {
-            return $args; // 紐づくタームが無ければ終了
+            return $args;
         }
 
         $excluded_term_ids = array_values(array_unique(array_map('intval', $excluded_term_ids)));
@@ -397,14 +400,16 @@ class ESP_Filter {
             $object_types = (array) $taxonomy_object->object_type; // 紐づく投稿タイプを利用
         } else {
             $object_types = get_post_types(['public' => true], 'names'); // 定義が無ければ公開投稿タイプにフォールバック
+            // 公開投稿タイプが取得できなければ any を使用
             if (empty($object_types)) {
-                $object_types = 'any'; // さらに無ければ any を指定
+                $object_types = 'any';
             }
         }
 
         $post_statuses = ['publish'];
+        // 添付ファイルを含む場合は inherit を追加
         if ($object_types === 'any' || (is_array($object_types) && in_array('attachment', $object_types, true))) {
-            $post_statuses[] = 'inherit'; // 添付ファイルの公開判定を可能にする
+            $post_statuses[] = 'inherit';
         }
 
         $terms_to_exclude = [];
@@ -432,8 +437,9 @@ class ESP_Filter {
             $terms_to_exclude[] = $term_id; // 公開投稿が無いタームのみ除外対象へ
         }
 
+        // 追加で除外すべきタームが無ければ既存設定を維持
         if (empty($terms_to_exclude)) {
-            return $args; // 追加除外が無ければ既存設定を維持
+            return $args;
         }
 
         $current_excluded = isset($args['exclude']) ? wp_parse_id_list($args['exclude']) : [];
