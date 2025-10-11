@@ -517,7 +517,10 @@ class ESP_Filter {
      * - メモリ使用量を監視して安全に中断
      */
     public function regenerate_protected_posts_cache() {
-        if (wp_doing_cron() && !defined('ESP_DOING_CRON_INTEGRITY_CHECK')) {
+        if (wp_doing_cron()
+            && !defined('ESP_DOING_CRON_INTEGRITY_CHECK')
+            && !defined('ESP_DOING_CRON_CACHE_REFRESH')
+        ) {
             return; // 通常の Cron ではスキップ
         }
 

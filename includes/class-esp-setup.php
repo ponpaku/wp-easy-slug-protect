@@ -90,6 +90,9 @@ class ESP_Setup {
     public static function run_all_cache_refresh() {
         // 投稿保護キャッシュの更新
         if (class_exists('ESP_Filter')) {
+            if (!defined('ESP_DOING_CRON_CACHE_REFRESH')) {
+                define('ESP_DOING_CRON_CACHE_REFRESH', true);
+            }
             $filter = new ESP_Filter();
             $filter->regenerate_protected_posts_cache();
         }
@@ -217,7 +220,9 @@ class ESP_Setup {
         if (version_compare($current_version, ESP_VERSION, '<')) {
             // バージョンに応じた更新処理
             $this->update_check();
-            
+            // 新バージョンに合わせてCronを再登録
+            $this->schedule_cron_jobs();
+
             // バージョン情報を更新
             update_option(ESP_Config::VERSION_OPTION_KEY, ESP_VERSION);
         }

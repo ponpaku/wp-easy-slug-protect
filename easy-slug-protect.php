@@ -98,6 +98,10 @@ class Easy_Slug_Protect {
         
         // クリーンアップタスクの実行（Setupで登録したcronから呼び出される）
         add_action(ESP_Config::DAILY_CLEANUP_HOOK, ['ESP_Setup', 'run_cleanup_tasks']);
+        // メディアキャッシュ更新
+        add_action('esp_media_cache_refresh', ['ESP_Setup', 'run_media_cache_refresh']);
+        // 全キャッシュ更新
+        add_action('esp_all_cache_refresh', ['ESP_Setup', 'run_all_cache_refresh']);
 
         // AJAXアクションのフック
         add_action('wp_loaded', function() {
