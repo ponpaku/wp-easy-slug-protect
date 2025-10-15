@@ -116,14 +116,18 @@ class ESP_Core {
         // パスマッチャーを使用して保護対象のパスを取得
         $target_path = $this->path_matcher->match($current_path);
 
-        // ページ情報が取得出来ない場合終了
+        // 投稿情報がない場合は0として扱う
         global $post;
-        if (is_null($post) || !isset($post->ID)){
-            return;
+        $current_post_id = (isset($post) && is_object($post) && isset($post->ID)) ? (int) $post->ID : 0;
+        if (!$current_post_id && function_exists('get_queried_object')) {
+            $queried_object = get_queried_object();
+            if ($queried_object instanceof WP_Post && isset($queried_object->ID)) {
+                $current_post_id = (int) $queried_object->ID; // 投稿のみフォールバック
+            }
         }
-        
+
         // 現在のページがログインページかチェック
-        $is_login_page_setting = $this->is_login_page($post->ID);
+        $is_login_page_setting = $this->is_login_page($current_post_id);
 
         // 保護対象ページかつログインページ以外
         if ($target_path && !$is_login_page_setting) {
