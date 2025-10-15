@@ -3,7 +3,7 @@
  * Plugin Name: Easy Slug Protect
  * Plugin URI: https://github.com/ponpaku/wp-easy-slug-protect
  * Description: URLの階層（スラッグ）ごとにシンプルなパスワード保護を実現するプラグイン
- * Version: 0.7.32
+ * Version: 0.7.33
  * Author: ponpaku
  * Text Domain: easy-slug-protect
  * Domain Path: /languages
@@ -15,7 +15,7 @@ if (!defined('ABSPATH')) {
 }
 
 // プラグインの基本定数を定義
-define('ESP_VERSION', '0.7.32');
+define('ESP_VERSION', '0.7.33');
 define('ESP_PATH', plugin_dir_path(__FILE__));
 define('ESP_URL', plugin_dir_url(__FILE__));
 
