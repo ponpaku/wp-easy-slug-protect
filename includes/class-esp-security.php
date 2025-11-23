@@ -165,56 +165,57 @@ class ESP_Security {
 
         // トランザクション開始（MyISAMの場合は機能しないが、InnoDBでは有効）
         $wpdb->query('START TRANSACTION');
-        
-        try {
-            // 現在の試行回数を取得（ロック付き）
-            $current_attempts = $wpdb->get_var($wpdb->prepare(
-                "SELECT COUNT(*) 
-                FROM $table 
-                WHERE ip_address = %s 
-                AND path_id = %s 
-                AND time > DATE_SUB(NOW(), INTERVAL %d MINUTE)
-                FOR UPDATE",
-                $ip,
-                $path_id,
-                $settings['time_frame']
-            ));
 
-            // 既に閾値を超えている場合は記録せずに終了
-            if ($current_attempts >= $settings['attempts_threshold']) {
-                $wpdb->query('ROLLBACK');
-                return;
-            }
+        // 現在の試行回数を取得（ロック付き）
+        $current_attempts = $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*)
+            FROM $table
+            WHERE ip_address = %s
+            AND path_id = %s
+            AND time > DATE_SUB(NOW(), INTERVAL %d MINUTE)
+            FOR UPDATE",
+            $ip,
+            $path_id,
+            $settings['time_frame']
+        ));
 
-            // 新規レコードを追加
-            $result = $wpdb->insert(
-                $table,
-                array(
-                    'ip_address' => $ip,
-                    'path' => $path,
-                    'path_id' => $path_id,
-                    'time' => current_time('mysql')
-                ),
-                array('%s', '%s', '%s', '%s')
-            );
-
-            if ($result === false) {
-                $wpdb->query('ROLLBACK');
-                error_log('ESP_Security: Failed to insert login attempt record');
-                return;
-            }
-
-            // コミット
-            $wpdb->query('COMMIT');
-
-            // 試行回数が閾値に達した場合に通知
-            if (($current_attempts + 1) == $settings['attempts_threshold']) {
-                $this->send_brute_force_notification($ip, $path, $current_attempts + 1);
-            }
-
-        } catch (Exception $e) {
+        // クエリエラーチェック
+        if ($wpdb->last_error) {
             $wpdb->query('ROLLBACK');
-            error_log('ESP_Security: Transaction failed - ' . $e->getMessage());
+            error_log('ESP_Security: Failed to query login attempts - ' . $wpdb->last_error);
+            return;
+        }
+
+        // 既に閾値を超えている場合は記録せずに終了
+        if ($current_attempts >= $settings['attempts_threshold']) {
+            $wpdb->query('ROLLBACK');
+            return;
+        }
+
+        // 新規レコードを追加
+        $result = $wpdb->insert(
+            $table,
+            array(
+                'ip_address' => $ip,
+                'path' => $path,
+                'path_id' => $path_id,
+                'time' => current_time('mysql')
+            ),
+            array('%s', '%s', '%s', '%s')
+        );
+
+        if ($result === false) {
+            $wpdb->query('ROLLBACK');
+            error_log('ESP_Security: Failed to insert login attempt record - ' . $wpdb->last_error);
+            return;
+        }
+
+        // コミット
+        $wpdb->query('COMMIT');
+
+        // 試行回数が閾値に達した場合に通知
+        if (($current_attempts + 1) == $settings['attempts_threshold']) {
+            $this->send_brute_force_notification($ip, $path, $current_attempts + 1);
         }
 
         // 古いレコードを削除（トランザクション外で実行）

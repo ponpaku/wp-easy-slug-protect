@@ -507,7 +507,7 @@ class ESP_Core {
         if (!$this->is_valid_login_page($login_page_id_for_form)) {
             // フォームを表示しようとしているログインページ自体が無効な場合
             // このショートコードがlogin_pageに置かれていれば、このメッセージが表示
-            SP_Message::set_error(__('このページは現在有効ではありません。', ESP_Config::TEXT_DOMAIN));
+            ESP_Message::set_error(__('このページは現在有効ではありません。', ESP_Config::TEXT_DOMAIN));
             return;
         }
 

@@ -104,7 +104,9 @@ class ESP_Setup {
         }
 
         // ログ出力
-        // error_log('ESP: All caches refreshed at ' . current_time('mysql'));
+        if (defined('WP_DEBUG') && WP_DEBUG) {
+            error_log('ESP: All caches refreshed at ' . current_time('mysql'));
+        }
     }
 
     public function deactivate() {
