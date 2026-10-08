@@ -295,6 +295,27 @@ class ESP_Setup {
             if (!$this->update_check()) {
                 return;
             }
+            // AVIF対応以前のルールは .avif を捕捉しない。
+            // Apache / LiteSpeed ではアップデート時に既存の保護ルールを更新する。
+            // 書込み失敗時はバージョン更新を完了せず、次回リクエストで再試行する。
+            if (version_compare($current_version, '0.7.38', '<') &&
+                preg_match('/apache|litespeed/i', $_SERVER['SERVER_SOFTWARE'] ?? '') &&
+                class_exists('ESP_Media_Protection')) {
+                $media_protection = new ESP_Media_Protection();
+                $result = $media_protection->update_htaccess();
+                if ($result !== true) {
+                    error_log('ESP: Could not refresh media protection rewrite rules for AVIF on upgrade');
+                    return;
+                }
+            }
+
+            // WordPressが保存するルールも新しい拡張子一覧に同期する。
+            if (version_compare($current_version, '0.7.38', '<')) {
+                add_action('init', static function () {
+                    flush_rewrite_rules(false);
+                }, 99);
+            }
+
             // 新バージョンに合わせてCronを再登録
             $this->schedule_cron_jobs();
 

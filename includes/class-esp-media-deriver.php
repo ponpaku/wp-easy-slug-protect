@@ -493,7 +493,7 @@ class ESP_Media_Deriver {
      */
     private function should_inline($mime_type) {
         $inline_types = [
-            'image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml',
+            'image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp', 'image/avif', 'image/svg+xml',
             'text/plain', 'text/html', 'text/css', 'application/javascript',
             'application/pdf', 'video/mp4', 'audio/mpeg', 'audio/mp3'
         ];
