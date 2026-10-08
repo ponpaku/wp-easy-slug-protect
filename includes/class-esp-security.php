@@ -164,7 +164,10 @@ class ESP_Security {
         $table = $wpdb->prefix . ESP_Config::DB_TABLES['brute'];
 
         // トランザクション開始（MyISAMの場合は機能しないが、InnoDBでは有効）
-        $wpdb->query('START TRANSACTION');
+        if (false === $wpdb->query('START TRANSACTION')) {
+            error_log('ESP_Security: Failed to start login attempt transaction - ' . $wpdb->last_error);
+            return;
+        }
 
         // 現在の試行回数を取得（ロック付き）
         $current_attempts = $wpdb->get_var($wpdb->prepare(
@@ -179,10 +182,12 @@ class ESP_Security {
             $settings['time_frame']
         ));
 
-        // クエリエラーチェック
-        if ($wpdb->last_error) {
+        // COUNT(*) は成功すれば0件でも値を返す。DBエラー時は記録を中断する。
+        if ($current_attempts === null || $wpdb->last_error !== '') {
+            // ROLLBACK時のwpdb::query()でlast_errorが初期化されるため退避する。
+            $db_error = $wpdb->last_error ?: 'COUNT query returned no value';
             $wpdb->query('ROLLBACK');
-            error_log('ESP_Security: Failed to query login attempts - ' . $wpdb->last_error);
+            error_log('ESP_Security: Failed to query login attempts - ' . $db_error);
             return;
         }
 
@@ -205,13 +210,19 @@ class ESP_Security {
         );
 
         if ($result === false) {
+            $db_error = $wpdb->last_error ?: 'unknown database error';
             $wpdb->query('ROLLBACK');
-            error_log('ESP_Security: Failed to insert login attempt record - ' . $wpdb->last_error);
+            error_log('ESP_Security: Failed to insert login attempt record - ' . $db_error);
             return;
         }
 
-        // コミット
-        $wpdb->query('COMMIT');
+        // コミット成功後にのみ通知・クリーンアップを行う。
+        if (false === $wpdb->query('COMMIT')) {
+            $db_error = $wpdb->last_error ?: 'unknown database error';
+            $wpdb->query('ROLLBACK');
+            error_log('ESP_Security: Failed to commit login attempt transaction - ' . $db_error);
+            return;
+        }
 
         // 試行回数が閾値に達した場合に通知
         if (($current_attempts + 1) == $settings['attempts_threshold']) {
