@@ -57,16 +57,17 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build installable WordPress ZIP
         run: |
-          mkdir -p dist/wp-easy-slug-protect
-          rsync -a --exclude=.git --exclude=.github --exclude=tests --exclude=dist --exclude=README.md --exclude=.gitignore ./ dist/wp-easy-slug-protect/
-          test -f dist/wp-easy-slug-protect/easy-slug-protect.php
-          grep -q 'Version: 0.7.36' dist/wp-easy-slug-protect/easy-slug-protect.php
-          (cd dist && zip -qr wp-easy-slug-protect-0.7.36-pr30.zip wp-easy-slug-protect)
-          unzip -t dist/wp-easy-slug-protect-0.7.36-pr30.zip
+          mkdir -p dist/easy-slug-protect
+          rsync -a --exclude=.git --exclude=.github --exclude=tests --exclude=dist --exclude=README.md --exclude=.gitignore ./ dist/easy-slug-protect/
+          test -f dist/easy-slug-protect/easy-slug-protect.php
+          grep -q '^ \* Version: ' dist/easy-slug-protect/easy-slug-protect.php
+          (cd dist && zip -qr easy-slug-protect.zip easy-slug-protect)
+          unzip -t dist/easy-slug-protect.zip
+          unzip -Z1 dist/easy-slug-protect.zip | grep -q '^easy-slug-protect/easy-slug-protect.php
       - name: Upload WordPress installation ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: wp-easy-slug-protect-0.7.36-pr30
-          path: dist/wp-easy-slug-protect-0.7.36-pr30.zip
+          name: easy-slug-protect-wordpress-zip
+          path: dist/easy-slug-protect.zip
           if-no-files-found: error
           retention-days: 30
