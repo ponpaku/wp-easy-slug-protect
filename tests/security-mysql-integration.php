@@ -67,6 +67,8 @@ function create_schema($db) {
         attempts int unsigned NOT NULL DEFAULT 0,
         blocked_until bigint unsigned NOT NULL DEFAULT 0,
         updated_at bigint unsigned NOT NULL DEFAULT 0,
+        attempt_times longtext NULL,
+        last_attempt_token varchar(32) NOT NULL DEFAULT '',
         PRIMARY KEY (ip_address,path_id)
     ) ENGINE=InnoDB";
     if (!$db->query($sql)) {
@@ -135,6 +137,31 @@ foreach (['READ COMMITTED', 'REPEATABLE READ'] as $isolation) {
     assert_true(!$security->can_try_login($path), '11-minute window expiry must not lift block');
     $db->query('UPDATE esp_test_login_limits SET blocked_until = ' . (time() - 1));
     assert_true($security->can_try_login($path), 'attempt must be permitted after block expires');
+    // Reproduce crossing a fixed-window boundary: the last four timestamps
+    // are still within the rolling window even if window_started is old.
+    $now = time();
+    $recent = $db->real_escape_string(json_encode([$now - 599, $now - 598, $now - 597, $now - 596]));
+    $db->query("UPDATE esp_test_login_limits SET attempts = 4, window_started = " . ($now - 601)
+        . ", blocked_until = 0, attempt_times = '{$recent}'");
+    $security = new ESP_Security();
+    assert_true($security->can_try_login($path), 'rolling fifth attempt must be admitted');
+    assert_true(!$security->can_try_login($path), 'rolling sixth attempt must be denied');
+    $row = $db->query('SELECT attempts, blocked_until FROM esp_test_login_limits')->fetch_assoc();
+    assert_true((int) $row['attempts'] === 5 && (int) $row['blocked_until'] > time(), 'moving window block remains active');
+
+    // Deterministic interleaving: a successful earlier request must not erase
+    // the slot reserved by another later request.
+    $db->query('DELETE FROM esp_test_login_limits');
+    $first = new ESP_Security();
+    $second = new ESP_Security();
+    assert_true($first->can_try_login($path), 'earlier reservation admitted');
+    assert_true($second->can_try_login($path), 'later reservation admitted');
+    $first->reset_successful_attempts($path);
+    $row = $db->query('SELECT attempts FROM esp_test_login_limits')->fetch_assoc();
+    assert_true((int) $row['attempts'] === 2, 'earlier success cannot erase later reservation');
+    $second->reset_successful_attempts($path);
+    $row = $db->query('SELECT attempts FROM esp_test_login_limits')->fetch_assoc();
+    assert_true((int) $row['attempts'] === 0, 'latest success can clear attempts');
     $db->close();
     echo 'PASS MySQL 8 ' . $isolation . ': 20 concurrent requests, block lifetime and reset' . PHP_EOL;
 }
