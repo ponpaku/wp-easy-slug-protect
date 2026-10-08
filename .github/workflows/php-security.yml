@@ -24,6 +24,8 @@ jobs:
         run: php tests/security-rate-limit-test.php
       - name: Test InnoDB and rate limit schema validation
         run: php tests/security-schema-test.php
+      - name: Test AVIF media protection and rewrite coverage
+        run: php tests/security-avif-test.php
   mysql-integration:
     runs-on: ubuntu-latest
     services:

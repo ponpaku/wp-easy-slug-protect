@@ -6,7 +6,7 @@ define('ABSPATH', __DIR__ . '/');
 define('ESP_VERSION', '0.7.38');
 class ESP_Config { const TEXT_DOMAIN = 'easy-slug-protect'; }
 class ESP_Option {
-    public static function get_current_setting($name) { return $name === 'media' ? ['enabled' => true] : []; }
+    public static function get_current_setting($name) { return $name === 'media' ? ['enabled' => true, 'litespeed_key' => 'testkey123'] : []; }
 }
 class TestWPDB {
     public $postmeta = 'wp_postmeta';
@@ -18,7 +18,7 @@ class TestWPDB {
     }
     public function get_var($query) {
         if (strpos($query['sql'], 'COUNT(*)') !== false) { return 1; }
-        $target = $query['args'][0] ?? '';
+        $target = $query['args'][1] ?? '';
         foreach ($this->rows as $id => $path) { if ($path === $target) { return $id; } }
         return null;
     }
