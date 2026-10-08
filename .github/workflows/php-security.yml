@@ -63,7 +63,7 @@ jobs:
           grep -q '^ \* Version: ' dist/easy-slug-protect/easy-slug-protect.php
           (cd dist && zip -qr easy-slug-protect.zip easy-slug-protect)
           unzip -t dist/easy-slug-protect.zip
-          unzip -Z1 dist/easy-slug-protect.zip | grep -q '^easy-slug-protect/easy-slug-protect.php
+          unzip -Z1 dist/easy-slug-protect.zip | grep -Fq 'easy-slug-protect/easy-slug-protect.php'
       - name: Upload WordPress installation ZIP
         uses: actions/upload-artifact@v4
         with:
