@@ -200,7 +200,9 @@ class ESP_Setup {
         $table = $wpdb->prefix . ESP_Config::DB_TABLES['limit'];
         $charset = $wpdb->get_charset_collate();
         try {
-            require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+            if (!function_exists('dbDelta')) {
+                require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+            }
             $sql = "CREATE TABLE {$table} (
                 ip_address varchar(45) NOT NULL,
                 path_id varchar(50) NOT NULL,
