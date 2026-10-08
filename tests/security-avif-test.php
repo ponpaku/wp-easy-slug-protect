@@ -33,6 +33,7 @@ class TestWPDB {
 }
 $wpdb = new TestWPDB();
 function is_admin() { return true; }
+function sanitize_text_field($value) { return (string) $value; }
 function get_transient($name) { return []; }
 function add_filter(...$args) {}
 function add_action(...$args) {}
