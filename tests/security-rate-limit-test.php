@@ -51,7 +51,7 @@ class FakeWPDB {
         if (strpos($sql, 'INSERT IGNORE') !== false) {
             if ($this->row !== null) { return 0; }
             $this->row = ['attempts' => 0, 'window_started' => time(),
-                          'blocked_until' => 0];
+                          'blocked_until' => 0, 'attempt_times' => null, 'last_attempt_token' => ''];
             return 1;
         }
         if ($sql === 'START TRANSACTION') {
@@ -65,16 +65,24 @@ class FakeWPDB {
         }
         if ($sql === 'COMMIT') { return 0; }
         if (strpos($sql, 'UPDATE') !== false) {
-            if (preg_match('/SET attempts = (\d+), window_started = (\d+), blocked_until = (\d+)/', $sql, $m)) {
+            if (preg_match("/SET attempts = (\\d+), window_started = (\\d+), blocked_until = (\\d+), updated_at = \\d+, attempt_times = '([^']+)', last_attempt_token = '([^']+)'/", $sql, $m)) {
                 $this->row['attempts'] = (int) $m[1];
                 $this->row['window_started'] = (int) $m[2];
                 $this->row['blocked_until'] = (int) $m[3];
-            } elseif (preg_match('/SET attempts = 0, blocked_until = 0, window_started = (\d+)/', $sql, $m)) {
+                $this->row['attempt_times'] = $m[4];
+                $this->row['last_attempt_token'] = $m[5];
+                return 1;
+            }
+            if (preg_match("/SET attempts = 0, blocked_until = 0, window_started = (\\d+), updated_at = \\d+, attempt_times = '\\[\\]', last_attempt_token = '' WHERE .* last_attempt_token = '([^']+)'/", $sql, $m)) {
+                if ($this->row['last_attempt_token'] !== $m[2]) { return 0; }
                 $this->row['attempts'] = 0;
                 $this->row['blocked_until'] = 0;
                 $this->row['window_started'] = (int) $m[1];
+                $this->row['attempt_times'] = '[]';
+                $this->row['last_attempt_token'] = '';
+                return 1;
             }
-            return 1;
+            throw new RuntimeException('Unexpected UPDATE in FakeWPDB: ' . $sql);
         }
         return 1;
     }
@@ -110,6 +118,34 @@ check($security->can_try_login($path), 'allowed after block expiry');
 check($wpdb->row['attempts'] === 1, 'counter restarts after expiry');
 $security->reset_successful_attempts($path);
 check($wpdb->row['attempts'] === 0, 'success clears counter');
+$wpdb = new FakeWPDB();
+$now = time();
+// Oldest event belongs to the previous fixed window. Four recent ones must
+// still be counted even though window_started has already expired.
+$wpdb->row = ['attempts' => 4, 'window_started' => $now - 601,
+              'blocked_until' => 0, 'attempt_times' => json_encode([$now - 599, $now - 598, $now - 597, $now - 596]),
+              'last_attempt_token' => 'earlier'];
+$security = new ESP_Security();
+check($security->can_try_login($path), 'rolling window counts four recent reservations across old boundary');
+check($wpdb->row['attempts'] === 5, 'rolling threshold reached without fixed-window reset');
+check(!$security->can_try_login($path), 'rolling threshold rejects sixth attempt');
+
+$wpdb = new FakeWPDB();
+$first = new ESP_Security();
+$second = new ESP_Security();
+check($first->can_try_login($path), 'first concurrent reservation');
+check($second->can_try_login($path), 'later concurrent reservation');
+$first->reset_successful_attempts($path);
+check($wpdb->row['attempts'] === 2, 'earlier success preserves later reservation');
+$second->record_failed_attempt($path);
+check($wpdb->row['attempts'] === 2, 'later failure remains counted');
+$second->reset_successful_attempts($path);
+check($wpdb->row['attempts'] === 0, 'latest successful login can reset');
+
+$wpdb = new FakeWPDB();
+$wpdb->row = ['attempts' => 2, 'window_started' => $now, 'blocked_until' => 0,
+              'attempt_times' => 'not json', 'last_attempt_token' => ''];
+check(!(new ESP_Security())->can_try_login($path), 'invalid stored timestamps fail closed');
 foreach (['INSERT IGNORE', 'START TRANSACTION', 'SELECT attempts', 'UPDATE', 'COMMIT'] as $stage) {
     $wpdb = new FakeWPDB();
     $wpdb->fail = $stage;
