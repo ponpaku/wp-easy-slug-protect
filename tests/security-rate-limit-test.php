@@ -130,6 +130,20 @@ check($security->can_try_login($path), 'rolling window counts four recent reserv
 check($wpdb->row['attempts'] === 5, 'rolling threshold reached without fixed-window reset');
 check(!$security->can_try_login($path), 'rolling threshold rejects sixth attempt');
 
+// Simulate a v0.7.36 row immediately after its v6 schema upgrade: the new
+// timestamp column is NULL, but existing attempts and blocks still matter.
+$wpdb = new FakeWPDB();
+$wpdb->row = ['attempts' => 4, 'window_started' => time() - 30, 'blocked_until' => 0,
+              'attempt_times' => null, 'last_attempt_token' => ''];
+$security = new ESP_Security();
+check($security->can_try_login($path), 'v5 unexpired reservations inherited on v6 upgrade');
+check($wpdb->row['attempts'] === 5, 'v5 reservations reach threshold without being dropped');
+$wpdb = new FakeWPDB();
+$wpdb->row = ['attempts' => 5, 'window_started' => time() - 660,
+              'blocked_until' => time() + 3600, 'attempt_times' => null,
+              'last_attempt_token' => ''];
+check(!(new ESP_Security())->can_try_login($path), 'v5 active block preserved after v6 upgrade');
+
 $wpdb = new FakeWPDB();
 $first = new ESP_Security();
 $second = new ESP_Security();
