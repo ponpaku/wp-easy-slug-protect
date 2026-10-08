@@ -46,13 +46,14 @@ class ESP_Config {
             'delivery_method' => 'auto',
             'litespeed_key' => ''
         ),
-        'db_version' => 4 // DBバージョン
+        'db_version' => 5 // DBバージョン
 
     );
 
     const DB_TABLES = array(
         'remember' => 'esp_login_remember',
         'brute' => 'esp_login_attempts',
+        'limit' => 'esp_login_limits',
         'session' => 'esp_login_session'
     );
 }

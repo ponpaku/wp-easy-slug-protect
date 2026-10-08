@@ -1,0 +1,72 @@
+name: PHP security checks
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - fix/atomic-login-rate-limits
+jobs:
+  php:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        php: ['8.1', '8.3', '8.4']
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: none
+      - name: Lint PHP source files
+        run: find . -name '*.php' -print0 | xargs -0 -n1 php -l
+      - name: Test login attempt reservation behavior
+        run: php tests/security-rate-limit-test.php
+  mysql-integration:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: test-password
+          MYSQL_DATABASE: esp_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -ptest-password"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mysqli, pcntl
+          coverage: none
+      - name: Exercise concurrent attempts against InnoDB
+        env:
+          ESP_TEST_DB_HOST: 127.0.0.1
+          ESP_TEST_DB_USER: root
+          ESP_TEST_DB_PASSWORD: test-password
+          ESP_TEST_DB_NAME: esp_test
+        run: php tests/security-mysql-integration.php
+  package-plugin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build installable WordPress ZIP
+        run: |
+          mkdir -p dist/wp-easy-slug-protect
+          rsync -a --exclude=.git --exclude=.github --exclude=tests --exclude=dist --exclude=README.md --exclude=.gitignore ./ dist/wp-easy-slug-protect/
+          test -f dist/wp-easy-slug-protect/easy-slug-protect.php
+          grep -q 'Version: 0.7.36' dist/wp-easy-slug-protect/easy-slug-protect.php
+          (cd dist && zip -qr wp-easy-slug-protect-0.7.36-pr30.zip wp-easy-slug-protect)
+          unzip -t dist/wp-easy-slug-protect-0.7.36-pr30.zip
+      - name: Upload WordPress installation ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: wp-easy-slug-protect-0.7.36-pr30
+          path: dist/wp-easy-slug-protect-0.7.36-pr30.zip
+          if-no-files-found: error
+          retention-days: 30

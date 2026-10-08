@@ -138,56 +138,86 @@ class ESP_Setup {
         $table_session = $wpdb->prefix . ESP_Config::DB_TABLES['session'];
 
         // ブルートフォース対策用テーブル
-        $sql1 = "CREATE TABLE IF NOT EXISTS `{$table_brute}` (
-            `id` bigint(20) UNSIGNED NOT NULL AUTO_INCREMENT,
-            `ip_address` varchar(45) NOT NULL,
-            `path` varchar(255) NOT NULL,
-            `path_id` varchar(50) NOT NULL,
-            `time` datetime NOT NULL,
-            PRIMARY KEY (`id`),
-            KEY `ip_path_time` (`ip_address`, `path`, `time`),
-            KEY `ip_path_id` (`ip_address`, `path_id`)
+        $sql1 = "CREATE TABLE {$table_brute} (
+            id bigint(20) unsigned NOT NULL auto_increment,
+            ip_address varchar(45) NOT NULL,
+            path varchar(255) NOT NULL,
+            path_id varchar(50) NOT NULL,
+            time datetime NOT NULL,
+            PRIMARY KEY  (id),
+            KEY ip_path_time (ip_address, path, time),
+            KEY ip_path_id (ip_address, path_id)
         ) {$charset_collate};";
 
         // ログイン保持用テーブル
-        $sql2 = "CREATE TABLE IF NOT EXISTS `{$table_remember}` (
-            `id` bigint(20) UNSIGNED NOT NULL AUTO_INCREMENT,
-            `path` varchar(255) NOT NULL,
-            `path_id` varchar(50) NOT NULL,
-            `password_version` int(10) UNSIGNED NOT NULL DEFAULT 0,
-            `user_id` varchar(32) NOT NULL,
-            `token` varchar(64) NOT NULL,
-            `created` datetime NOT NULL,
-            `expires` datetime NOT NULL,
-            PRIMARY KEY (`id`),
-            KEY `user_token` (`user_id`, `token`),
-            KEY `path_expires` (`path`, `expires`),
-            KEY `path_id` (`path_id`)
+        $sql2 = "CREATE TABLE {$table_remember} (
+            id bigint(20) unsigned NOT NULL auto_increment,
+            path varchar(255) NOT NULL,
+            path_id varchar(50) NOT NULL,
+            password_version int(10) unsigned NOT NULL DEFAULT 0,
+            user_id varchar(32) NOT NULL,
+            token varchar(64) NOT NULL,
+            created datetime NOT NULL,
+            expires datetime NOT NULL,
+            PRIMARY KEY  (id),
+            KEY user_token (user_id, token),
+            KEY path_expires (path, expires),
+            KEY path_id (path_id)
         ) {$charset_collate};";
 
         // 通常ログインセッション用テーブル
-        $sql3 = "CREATE TABLE IF NOT EXISTS `{$table_session}` (
-            `id` bigint(20) UNSIGNED NOT NULL AUTO_INCREMENT,
-            `path_id` varchar(50) NOT NULL,
-            `password_version` int(10) UNSIGNED NOT NULL DEFAULT 0,
-            `token` varchar(64) NOT NULL,
-            `created` datetime NOT NULL,
-            `expires` datetime NOT NULL,
-            PRIMARY KEY (`id`),
-            UNIQUE KEY `token_unique` (`token`),
-            KEY `path_id` (`path_id`),
-            KEY `expires` (`expires`)
+        $sql3 = "CREATE TABLE {$table_session} (
+            id bigint(20) unsigned NOT NULL auto_increment,
+            path_id varchar(50) NOT NULL,
+            password_version int(10) unsigned NOT NULL DEFAULT 0,
+            token varchar(64) NOT NULL,
+            created datetime NOT NULL,
+            expires datetime NOT NULL,
+            PRIMARY KEY  (id),
+            UNIQUE KEY token_unique (token),
+            KEY path_id (path_id),
+            KEY expires (expires)
         ) {$charset_collate};";
 
         require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
         dbDelta($sql1);
         dbDelta($sql2);
         dbDelta($sql3);
+        $this->ensure_login_limits_table();
 
         // エラーチェック
         if ($wpdb->last_error) {
             error_log('ESP Table Creation Error: ' . $wpdb->last_error);
         }
+    }
+
+    /**
+     * Atomic rate-limit rows require InnoDB, not a history-table gap lock.
+     * dbDelta requires canonical CREATE TABLE syntax without IF NOT EXISTS.
+     */
+    private function ensure_login_limits_table() {
+        global $wpdb;
+        $table = $wpdb->prefix . ESP_Config::DB_TABLES['limit'];
+        $charset = $wpdb->get_charset_collate();
+        require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+        $sql = "CREATE TABLE {$table} (
+            ip_address varchar(45) NOT NULL,
+            path_id varchar(50) NOT NULL,
+            window_started bigint(20) unsigned NOT NULL DEFAULT 0,
+            attempts int(10) unsigned NOT NULL DEFAULT 0,
+            blocked_until bigint(20) unsigned NOT NULL DEFAULT 0,
+            updated_at bigint(20) unsigned NOT NULL DEFAULT 0,
+            PRIMARY KEY  (ip_address,path_id),
+            KEY updated_at (updated_at)
+        ) ENGINE=InnoDB {$charset};";
+        dbDelta($sql);
+
+        $found = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($table)));
+        if ($found !== $table) {
+            error_log('ESP_Setup: Failed to create InnoDB rate-limit table');
+            return false;
+        }
+        return true;
     }
 
     /**
@@ -207,9 +237,12 @@ class ESP_Setup {
         $required_db_version = ESP_Config::OPTION_DEFAULTS['db_version'];
         
         if ($current_db_version < $required_db_version) {
-            $this->migrate_to_version($current_db_version, $required_db_version);
+            if (!$this->migrate_to_version($current_db_version, $required_db_version)) {
+                return false;
+            }
             update_option('esp_db_version', $required_db_version);
         }
+        return true;
     }
 
     /**
@@ -221,7 +254,9 @@ class ESP_Setup {
         // バージョンが変更された場合の処理
         if (version_compare($current_version, ESP_VERSION, '<')) {
             // バージョンに応じた更新処理
-            $this->update_check();
+            if (!$this->update_check()) {
+                return;
+            }
             // 新バージョンに合わせてCronを再登録
             $this->schedule_cron_jobs();
 
@@ -246,7 +281,10 @@ class ESP_Setup {
         if ($from < 4 && $to >= 4) {
             $this->migrate_to_version_4();
         }
-        // 将来的に処理をここに追加
+        if ($from < 5 && $to >= 5 && !$this->ensure_login_limits_table()) {
+            return false;
+        }
+        return true;
     }
 
     /**
