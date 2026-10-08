@@ -163,64 +163,81 @@ class ESP_Security {
         global $wpdb;
         $table = $wpdb->prefix . ESP_Config::DB_TABLES['brute'];
 
-        // トランザクション開始（MyISAMの場合は機能しないが、InnoDBでは有効）
-        if (false === $wpdb->query('START TRANSACTION')) {
-            error_log('ESP_Security: Failed to start login attempt transaction - ' . $wpdb->last_error);
-            return;
-        }
+        $transaction_open = false;
+        try {
+            // トランザクション開始（MyISAMの場合は機能しないが、InnoDBでは有効）
+            if (false === $wpdb->query('START TRANSACTION')) {
+                error_log('ESP_Security: Failed to start login attempt transaction - ' . $wpdb->last_error);
+                return;
+            }
 
-        // 現在の試行回数を取得（ロック付き）
-        $current_attempts = $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(*)
-            FROM $table
-            WHERE ip_address = %s
-            AND path_id = %s
-            AND time > DATE_SUB(NOW(), INTERVAL %d MINUTE)
-            FOR UPDATE",
-            $ip,
-            $path_id,
-            $settings['time_frame']
-        ));
+            $transaction_open = true;
 
-        // COUNT(*) は成功すれば0件でも値を返す。DBエラー時は記録を中断する。
-        if ($current_attempts === null || $wpdb->last_error !== '') {
-            // ROLLBACK時のwpdb::query()でlast_errorが初期化されるため退避する。
-            $db_error = $wpdb->last_error ?: 'COUNT query returned no value';
-            $wpdb->query('ROLLBACK');
-            error_log('ESP_Security: Failed to query login attempts - ' . $db_error);
-            return;
-        }
+            // 現在の試行回数を取得（ロック付き）
+            $current_attempts = $wpdb->get_var($wpdb->prepare(
+                "SELECT COUNT(*)
+                FROM $table
+                WHERE ip_address = %s
+                AND path_id = %s
+                AND time > DATE_SUB(NOW(), INTERVAL %d MINUTE)
+                FOR UPDATE",
+                $ip,
+                $path_id,
+                $settings['time_frame']
+            ));
 
-        // 既に閾値を超えている場合は記録せずに終了
-        if ($current_attempts >= $settings['attempts_threshold']) {
-            $wpdb->query('ROLLBACK');
-            return;
-        }
+            // COUNT(*) は成功すれば0件でも値を返す。DBエラー時は記録を中断する。
+            if ($current_attempts === null || $wpdb->last_error !== '') {
+                // ROLLBACK時のwpdb::query()でlast_errorが初期化されるため退避する。
+                $db_error = $wpdb->last_error ?: 'COUNT query returned no value';
+                $wpdb->query('ROLLBACK');
+                error_log('ESP_Security: Failed to query login attempts - ' . $db_error);
+                return;
+            }
 
-        // 新規レコードを追加
-        $result = $wpdb->insert(
-            $table,
-            array(
-                'ip_address' => $ip,
-                'path' => $path,
-                'path_id' => $path_id,
-                'time' => current_time('mysql')
-            ),
-            array('%s', '%s', '%s', '%s')
-        );
+            // 既に閾値を超えている場合は記録せずに終了
+            if ($current_attempts >= $settings['attempts_threshold']) {
+                $wpdb->query('ROLLBACK');
+                return;
+            }
 
-        if ($result === false) {
-            $db_error = $wpdb->last_error ?: 'unknown database error';
-            $wpdb->query('ROLLBACK');
-            error_log('ESP_Security: Failed to insert login attempt record - ' . $db_error);
-            return;
-        }
+            // 新規レコードを追加
+            $result = $wpdb->insert(
+                $table,
+                array(
+                    'ip_address' => $ip,
+                    'path' => $path,
+                    'path_id' => $path_id,
+                    'time' => current_time('mysql')
+                ),
+                array('%s', '%s', '%s', '%s')
+            );
 
-        // コミット成功後にのみ通知・クリーンアップを行う。
-        if (false === $wpdb->query('COMMIT')) {
-            $db_error = $wpdb->last_error ?: 'unknown database error';
-            $wpdb->query('ROLLBACK');
-            error_log('ESP_Security: Failed to commit login attempt transaction - ' . $db_error);
+            if ($result === false) {
+                $db_error = $wpdb->last_error ?: 'unknown database error';
+                $wpdb->query('ROLLBACK');
+                error_log('ESP_Security: Failed to insert login attempt record - ' . $db_error);
+                return;
+            }
+
+            // コミット成功後にのみ通知・クリーンアップを行う。
+            if (false === $wpdb->query('COMMIT')) {
+                $db_error = $wpdb->last_error ?: 'unknown database error';
+                $wpdb->query('ROLLBACK');
+                error_log('ESP_Security: Failed to commit login attempt transaction - ' . $db_error);
+                return;
+            }
+            $transaction_open = false;
+
+        } catch (\Throwable $e) {
+            if ($transaction_open) {
+                try {
+                    $wpdb->query('ROLLBACK');
+                } catch (\Throwable $rollback_error) {
+                    error_log('ESP_Security: Failed to roll back login attempt transaction - ' . $rollback_error->getMessage());
+                }
+            }
+            error_log('ESP_Security: Exception while recording login attempt - ' . $e->getMessage());
             return;
         }
 
