@@ -236,14 +236,22 @@ class ESP_Security {
     public function cleanup_old_attempts() {
         global $wpdb;
         $settings = ESP_Option::get_current_setting('brute');
-        $table = $wpdb->prefix . ESP_Config::DB_TABLES['brute'];
-
-        // ブロック時間より古いレコードを削除
-        $wpdb->query($wpdb->prepare(
-            "DELETE FROM $table 
-            WHERE time < DATE_SUB(NOW(), INTERVAL %d MINUTE)",
-            $settings['block_time_frame']
-        ));
+        $history = $wpdb->prefix . ESP_Config::DB_TABLES['brute'];
+        $limits = $wpdb->prefix . ESP_Config::DB_TABLES['limit'];
+        // Long enough to avoid discarding an active block, even with custom settings.
+        $seconds = max(604800, ((int) $settings['block_time_frame'] + (int) $settings['time_frame']) * 60 + 3600);
+        try {
+            $wpdb->query($wpdb->prepare(
+                "DELETE FROM {$history} WHERE time < %s",
+                gmdate('Y-m-d H:i:s', time() - $seconds)
+            ));
+            $wpdb->query($wpdb->prepare(
+                "DELETE FROM {$limits} WHERE updated_at < %d AND blocked_until < %d",
+                time() - $seconds, time()
+            ));
+        } catch (\Throwable $e) {
+            error_log('ESP_Security: Rate limit cleanup exception - ' . $e->getMessage());
+        }
     }
 
     /**
