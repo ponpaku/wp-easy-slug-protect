@@ -19,7 +19,7 @@ class TestWPDB {
     }
     public function get_var($query) {
         if (strpos($query['sql'], 'COUNT(*)') !== false) { return 1; }
-        $target = $query['args'][1] ?? '';
+        $target = $query['args'][0] ?? '';
         foreach ($this->rows as $id => $path) { if ($path === $target) { return $id; } }
         return null;
     }
