@@ -237,7 +237,9 @@ class ESP_Setup {
         $required_db_version = ESP_Config::OPTION_DEFAULTS['db_version'];
         
         if ($current_db_version < $required_db_version) {
-            $this->migrate_to_version($current_db_version, $required_db_version);
+            if (!$this->migrate_to_version($current_db_version, $required_db_version)) {
+                return false;
+            }
             update_option('esp_db_version', $required_db_version);
         }
     }
@@ -251,7 +253,9 @@ class ESP_Setup {
         // バージョンが変更された場合の処理
         if (version_compare($current_version, ESP_VERSION, '<')) {
             // バージョンに応じた更新処理
-            $this->update_check();
+            if (!$this->update_check()) {
+                return;
+            }
             // 新バージョンに合わせてCronを再登録
             $this->schedule_cron_jobs();
 
@@ -276,7 +280,10 @@ class ESP_Setup {
         if ($from < 4 && $to >= 4) {
             $this->migrate_to_version_4();
         }
-        // 将来的に処理をここに追加
+        if ($from < 5 && $to >= 5 && !$this->ensure_login_limits_table()) {
+            return false;
+        }
+        return true;
     }
 
     /**
