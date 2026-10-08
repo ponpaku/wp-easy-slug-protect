@@ -242,6 +242,7 @@ class ESP_Setup {
             }
             update_option('esp_db_version', $required_db_version);
         }
+        return true;
     }
 
     /**
