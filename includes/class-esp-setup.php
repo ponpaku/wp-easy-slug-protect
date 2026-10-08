@@ -183,11 +183,41 @@ class ESP_Setup {
         dbDelta($sql1);
         dbDelta($sql2);
         dbDelta($sql3);
+        $this->ensure_login_limits_table();
 
         // エラーチェック
         if ($wpdb->last_error) {
             error_log('ESP Table Creation Error: ' . $wpdb->last_error);
         }
+    }
+
+    /**
+     * Atomic rate-limit rows require InnoDB, not a history-table gap lock.
+     * dbDelta requires canonical CREATE TABLE syntax without IF NOT EXISTS.
+     */
+    private function ensure_login_limits_table() {
+        global $wpdb;
+        $table = $wpdb->prefix . ESP_Config::DB_TABLES['limit'];
+        $charset = $wpdb->get_charset_collate();
+        require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+        $sql = "CREATE TABLE {$table} (
+            ip_address varchar(45) NOT NULL,
+            path_id varchar(50) NOT NULL,
+            window_started bigint(20) unsigned NOT NULL DEFAULT 0,
+            attempts int(10) unsigned NOT NULL DEFAULT 0,
+            blocked_until bigint(20) unsigned NOT NULL DEFAULT 0,
+            updated_at bigint(20) unsigned NOT NULL DEFAULT 0,
+            PRIMARY KEY  (ip_address,path_id),
+            KEY updated_at (updated_at)
+        ) ENGINE=InnoDB {$charset};";
+        dbDelta($sql);
+
+        $found = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($table)));
+        if ($found !== $table) {
+            error_log('ESP_Setup: Failed to create InnoDB rate-limit table');
+            return false;
+        }
+        return true;
     }
 
     /**
