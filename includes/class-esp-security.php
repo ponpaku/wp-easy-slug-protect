@@ -171,109 +171,36 @@ class ESP_Security {
     }
 
 
-    /**
-    * ログイン失敗を記録（トランザクション対応版）
-    * 
-    * @param array $path_settings 保護対象のパス設定
-    */
+    /** Store failure history for auditing; the counter was reserved before the password check. */
     public function record_failed_attempt($path_settings) {
         $ip = $this->get_ip();
         if (!$ip) {
             return;
         }
-
-        $path = $path_settings['path'];
-        $path_id = $path_settings['id'];
-        $settings = ESP_Option::get_current_setting('brute');
-
         global $wpdb;
         $table = $wpdb->prefix . ESP_Config::DB_TABLES['brute'];
-
-        $transaction_open = false;
         try {
-            // トランザクション開始（MyISAMの場合は機能しないが、InnoDBでは有効）
-            if (false === $wpdb->query('START TRANSACTION')) {
-                error_log('ESP_Security: Failed to start login attempt transaction - ' . $wpdb->last_error);
-                return;
+            $stored = $wpdb->insert($table, array(
+                'ip_address' => $ip,
+                'path' => $path_settings['path'],
+                'path_id' => $path_settings['id'],
+                'time' => gmdate('Y-m-d H:i:s')
+            ), array('%s', '%s', '%s', '%s'));
+            if ($stored === false) {
+                error_log('ESP_Security: Failure audit insert failed - ' . $wpdb->last_error);
             }
-
-            $transaction_open = true;
-
-            // 現在の試行回数を取得（ロック付き）
-            $current_attempts = $wpdb->get_var($wpdb->prepare(
-                "SELECT COUNT(*)
-                FROM $table
-                WHERE ip_address = %s
-                AND path_id = %s
-                AND time > DATE_SUB(NOW(), INTERVAL %d MINUTE)
-                FOR UPDATE",
-                $ip,
-                $path_id,
-                $settings['time_frame']
-            ));
-
-            // COUNT(*) は成功すれば0件でも値を返す。DBエラー時は記録を中断する。
-            if ($current_attempts === null || $wpdb->last_error !== '') {
-                // ROLLBACK時のwpdb::query()でlast_errorが初期化されるため退避する。
-                $db_error = $wpdb->last_error ?: 'COUNT query returned no value';
-                $wpdb->query('ROLLBACK');
-                error_log('ESP_Security: Failed to query login attempts - ' . $db_error);
-                return;
-            }
-
-            // 既に閾値を超えている場合は記録せずに終了
-            if ($current_attempts >= $settings['attempts_threshold']) {
-                $wpdb->query('ROLLBACK');
-                return;
-            }
-
-            // 新規レコードを追加
-            $result = $wpdb->insert(
-                $table,
-                array(
-                    'ip_address' => $ip,
-                    'path' => $path,
-                    'path_id' => $path_id,
-                    'time' => current_time('mysql')
-                ),
-                array('%s', '%s', '%s', '%s')
-            );
-
-            if ($result === false) {
-                $db_error = $wpdb->last_error ?: 'unknown database error';
-                $wpdb->query('ROLLBACK');
-                error_log('ESP_Security: Failed to insert login attempt record - ' . $db_error);
-                return;
-            }
-
-            // コミット成功後にのみ通知・クリーンアップを行う。
-            if (false === $wpdb->query('COMMIT')) {
-                $db_error = $wpdb->last_error ?: 'unknown database error';
-                $wpdb->query('ROLLBACK');
-                error_log('ESP_Security: Failed to commit login attempt transaction - ' . $db_error);
-                return;
-            }
-            $transaction_open = false;
-
         } catch (\Throwable $e) {
-            if ($transaction_open) {
-                try {
-                    $wpdb->query('ROLLBACK');
-                } catch (\Throwable $rollback_error) {
-                    error_log('ESP_Security: Failed to roll back login attempt transaction - ' . $rollback_error->getMessage());
-                }
+            error_log('ESP_Security: Failure audit exception - ' . $e->getMessage());
+        }
+        if ($this->notify_on_failed_attempt) {
+            $this->notify_on_failed_attempt = false;
+            try {
+                $settings = ESP_Option::get_current_setting('brute');
+                $this->send_brute_force_notification($ip, $path_settings['path'], (int) $settings['attempts_threshold']);
+            } catch (\Throwable $e) {
+                error_log('ESP_Security: Notification exception - ' . $e->getMessage());
             }
-            error_log('ESP_Security: Exception while recording login attempt - ' . $e->getMessage());
-            return;
         }
-
-        // 試行回数が閾値に達した場合に通知
-        if (($current_attempts + 1) == $settings['attempts_threshold']) {
-            $this->send_brute_force_notification($ip, $path, $current_attempts + 1);
-        }
-
-        // 古いレコードを削除（トランザクション外で実行）
-        $this->cleanup_old_attempts();
     }
 
     /**
