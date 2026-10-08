@@ -203,6 +203,33 @@ class ESP_Security {
         }
     }
 
+    /** Clear reservations after successful authentication and session creation. */
+    public function reset_successful_attempts($path_settings) {
+        $this->notify_on_failed_attempt = false;
+        $ip = $this->get_ip();
+        if (!$ip) {
+            return;
+        }
+        $settings = ESP_Option::get_current_setting('brute');
+        if ($this->is_ip_whitelisted($ip, $this->parse_whitelist($settings['whitelist_ips'] ?? ''))) {
+            return;
+        }
+        global $wpdb;
+        $table = $wpdb->prefix . ESP_Config::DB_TABLES['limit'];
+        try {
+            $now = time();
+            $result = $wpdb->query($wpdb->prepare(
+                "UPDATE {$table} SET attempts = 0, blocked_until = 0, window_started = %d, updated_at = %d WHERE ip_address = %s AND path_id = %s",
+                $now, $now, $ip, $path_settings['id']
+            ));
+            if ($result === false) {
+                error_log('ESP_Security: Rate limit reset failed - ' . $wpdb->last_error);
+            }
+        } catch (\Throwable $e) {
+            error_log('ESP_Security: Rate limit reset exception - ' . $e->getMessage());
+        }
+    }
+
     /**
      * 古いログイン試行記録の削除
      */
