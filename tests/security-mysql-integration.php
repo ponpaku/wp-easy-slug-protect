@@ -98,7 +98,7 @@ foreach (['READ COMMITTED', 'REPEATABLE READ'] as $isolation) {
         $pid = pcntl_fork();
         if ($pid < 0) { throw new RuntimeException('fork failed'); }
         if ($pid === 0) {
-            while (!file_exists($gate)) { usleep(1000); }
+            while (!file_exists($gate)) { clearstatcache(true, $gate); usleep(1000); }
             $child_db = connect_db();
             $child_db->query('SET SESSION TRANSACTION ISOLATION LEVEL ' . $isolation);
             $wpdb = new IntegrationWPDB($child_db);
