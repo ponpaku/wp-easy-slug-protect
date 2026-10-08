@@ -138,45 +138,45 @@ class ESP_Setup {
         $table_session = $wpdb->prefix . ESP_Config::DB_TABLES['session'];
 
         // ブルートフォース対策用テーブル
-        $sql1 = "CREATE TABLE IF NOT EXISTS `{$table_brute}` (
-            `id` bigint(20) UNSIGNED NOT NULL AUTO_INCREMENT,
-            `ip_address` varchar(45) NOT NULL,
-            `path` varchar(255) NOT NULL,
-            `path_id` varchar(50) NOT NULL,
-            `time` datetime NOT NULL,
-            PRIMARY KEY (`id`),
-            KEY `ip_path_time` (`ip_address`, `path`, `time`),
-            KEY `ip_path_id` (`ip_address`, `path_id`)
+        $sql1 = "CREATE TABLE {$table_brute} (
+            id bigint(20) unsigned NOT NULL auto_increment,
+            ip_address varchar(45) NOT NULL,
+            path varchar(255) NOT NULL,
+            path_id varchar(50) NOT NULL,
+            time datetime NOT NULL,
+            PRIMARY KEY  (id),
+            KEY ip_path_time (ip_address, path, time),
+            KEY ip_path_id (ip_address, path_id)
         ) {$charset_collate};";
 
         // ログイン保持用テーブル
-        $sql2 = "CREATE TABLE IF NOT EXISTS `{$table_remember}` (
-            `id` bigint(20) UNSIGNED NOT NULL AUTO_INCREMENT,
-            `path` varchar(255) NOT NULL,
-            `path_id` varchar(50) NOT NULL,
-            `password_version` int(10) UNSIGNED NOT NULL DEFAULT 0,
-            `user_id` varchar(32) NOT NULL,
-            `token` varchar(64) NOT NULL,
-            `created` datetime NOT NULL,
-            `expires` datetime NOT NULL,
-            PRIMARY KEY (`id`),
-            KEY `user_token` (`user_id`, `token`),
-            KEY `path_expires` (`path`, `expires`),
-            KEY `path_id` (`path_id`)
+        $sql2 = "CREATE TABLE {$table_remember} (
+            id bigint(20) unsigned NOT NULL auto_increment,
+            path varchar(255) NOT NULL,
+            path_id varchar(50) NOT NULL,
+            password_version int(10) unsigned NOT NULL DEFAULT 0,
+            user_id varchar(32) NOT NULL,
+            token varchar(64) NOT NULL,
+            created datetime NOT NULL,
+            expires datetime NOT NULL,
+            PRIMARY KEY  (id),
+            KEY user_token (user_id, token),
+            KEY path_expires (path, expires),
+            KEY path_id (path_id)
         ) {$charset_collate};";
 
         // 通常ログインセッション用テーブル
-        $sql3 = "CREATE TABLE IF NOT EXISTS `{$table_session}` (
-            `id` bigint(20) UNSIGNED NOT NULL AUTO_INCREMENT,
-            `path_id` varchar(50) NOT NULL,
-            `password_version` int(10) UNSIGNED NOT NULL DEFAULT 0,
-            `token` varchar(64) NOT NULL,
-            `created` datetime NOT NULL,
-            `expires` datetime NOT NULL,
-            PRIMARY KEY (`id`),
-            UNIQUE KEY `token_unique` (`token`),
-            KEY `path_id` (`path_id`),
-            KEY `expires` (`expires`)
+        $sql3 = "CREATE TABLE {$table_session} (
+            id bigint(20) unsigned NOT NULL auto_increment,
+            path_id varchar(50) NOT NULL,
+            password_version int(10) unsigned NOT NULL DEFAULT 0,
+            token varchar(64) NOT NULL,
+            created datetime NOT NULL,
+            expires datetime NOT NULL,
+            PRIMARY KEY  (id),
+            UNIQUE KEY token_unique (token),
+            KEY path_id (path_id),
+            KEY expires (expires)
         ) {$charset_collate};";
 
         require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
