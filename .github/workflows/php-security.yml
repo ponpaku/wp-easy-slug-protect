@@ -22,6 +22,8 @@ jobs:
         run: find . -name '*.php' -print0 | xargs -0 -n1 php -l
       - name: Test login attempt reservation behavior
         run: php tests/security-rate-limit-test.php
+      - name: Test InnoDB and rate limit schema validation
+        run: php tests/security-schema-test.php
   mysql-integration:
     runs-on: ubuntu-latest
     services:
