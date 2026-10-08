@@ -192,32 +192,68 @@ class ESP_Setup {
     }
 
     /**
-     * Atomic rate-limit rows require InnoDB, not a history-table gap lock.
-     * dbDelta requires canonical CREATE TABLE syntax without IF NOT EXISTS.
+     * Create or migrate the atomic rate-limit table. Row-level locking is
+     * a security requirement, so table existence alone is not sufficient.
      */
     private function ensure_login_limits_table() {
         global $wpdb;
         $table = $wpdb->prefix . ESP_Config::DB_TABLES['limit'];
         $charset = $wpdb->get_charset_collate();
-        require_once ABSPATH . 'wp-admin/includes/upgrade.php';
-        $sql = "CREATE TABLE {$table} (
-            ip_address varchar(45) NOT NULL,
-            path_id varchar(50) NOT NULL,
-            window_started bigint(20) unsigned NOT NULL DEFAULT 0,
-            attempts int(10) unsigned NOT NULL DEFAULT 0,
-            blocked_until bigint(20) unsigned NOT NULL DEFAULT 0,
-            updated_at bigint(20) unsigned NOT NULL DEFAULT 0,
-            PRIMARY KEY  (ip_address,path_id),
-            KEY updated_at (updated_at)
-        ) ENGINE=InnoDB {$charset};";
-        dbDelta($sql);
+        try {
+            require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+            $sql = "CREATE TABLE {$table} (
+                ip_address varchar(45) NOT NULL,
+                path_id varchar(50) NOT NULL,
+                window_started bigint(20) unsigned NOT NULL DEFAULT 0,
+                attempts int(10) unsigned NOT NULL DEFAULT 0,
+                blocked_until bigint(20) unsigned NOT NULL DEFAULT 0,
+                updated_at bigint(20) unsigned NOT NULL DEFAULT 0,
+                attempt_times longtext NULL,
+                last_attempt_token varchar(32) NOT NULL DEFAULT '',
+                PRIMARY KEY  (ip_address,path_id),
+                KEY updated_at (updated_at)
+            ) ENGINE=InnoDB {$charset};";
+            dbDelta($sql);
 
-        $found = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($table)));
-        if ($found !== $table) {
-            error_log('ESP_Setup: Failed to create InnoDB rate-limit table');
+            $engine = $wpdb->get_var($wpdb->prepare(
+                'SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s',
+                $table
+            ));
+            if (strcasecmp((string) $engine, 'InnoDB') !== 0 || $wpdb->last_error !== '') {
+                error_log('ESP_Setup: Rate-limit table must use InnoDB');
+                return false;
+            }
+
+            // Verify the columns and the uniqueness of the serialized lock row.
+            $quoted = str_replace('`', '``', $table);
+            $columns = $wpdb->get_col("SHOW COLUMNS FROM `{$quoted}`");
+            $required = ['ip_address', 'path_id', 'window_started', 'attempts',
+                         'blocked_until', 'updated_at', 'attempt_times', 'last_attempt_token'];
+            if (!is_array($columns) || array_diff($required, $columns) || $wpdb->last_error !== '') {
+                error_log('ESP_Setup: Rate-limit table is missing required columns');
+                return false;
+            }
+            $indexes = $wpdb->get_results(
+                "SHOW INDEX FROM `{$quoted}` WHERE Key_name = 'PRIMARY'", ARRAY_A
+            );
+            if (!is_array($indexes) || $wpdb->last_error !== '') {
+                error_log('ESP_Setup: Cannot inspect rate-limit primary key');
+                return false;
+            }
+            $primary = [];
+            foreach ($indexes as $index) {
+                $primary[(int) $index['Seq_in_index']] = $index['Column_name'];
+            }
+            ksort($primary);
+            if (array_values($primary) !== ['ip_address', 'path_id']) {
+                error_log('ESP_Setup: Rate-limit primary key must be (ip_address,path_id)');
+                return false;
+            }
+            return true;
+        } catch (\Throwable $e) {
+            error_log('ESP_Setup: Rate-limit table validation failed - ' . $e->getMessage());
             return false;
         }
-        return true;
     }
 
     /**
@@ -281,7 +317,7 @@ class ESP_Setup {
         if ($from < 4 && $to >= 4) {
             $this->migrate_to_version_4();
         }
-        if ($from < 5 && $to >= 5 && !$this->ensure_login_limits_table()) {
+        if ($from < 6 && $to >= 6 && !$this->ensure_login_limits_table()) {
             return false;
         }
         return true;
