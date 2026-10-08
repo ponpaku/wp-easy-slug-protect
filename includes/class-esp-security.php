@@ -9,6 +9,7 @@ if (!defined('ABSPATH')) {
  */
 class ESP_Security {
     private $notify_on_failed_attempt = false;
+    private $last_reservation_token = null;
 
     /**
      * IPアドレスの取得
@@ -46,11 +47,13 @@ class ESP_Security {
     }
 
     /**
-     * Reserve a login attempt before password verification. Fail closed on DB errors.
-     * A unique InnoDB row for each IP/path serializes concurrent reservations.
+     * Reserve an attempt before password verification. The single InnoDB row
+     * serializes requests for this IP/path; individual UTC timestamps enforce
+     * an exact rolling window rather than a first-attempt fixed window.
      */
     public function can_try_login($path_settings) {
         $this->notify_on_failed_attempt = false;
+        $this->last_reservation_token = null;
         $ip = $this->get_ip();
         if (!$ip) {
             return false;
@@ -83,31 +86,60 @@ class ESP_Security {
             }
             $active = true;
             $row = $wpdb->get_row($wpdb->prepare(
-                "SELECT attempts, window_started, blocked_until FROM {$table} WHERE ip_address = %s AND path_id = %s FOR UPDATE",
+                "SELECT attempts, window_started, blocked_until, attempt_times FROM {$table} WHERE ip_address = %s AND path_id = %s FOR UPDATE",
                 $ip, $path_settings['id']
             ), ARRAY_A);
             if (!is_array($row) || $wpdb->last_error !== '') {
                 return $this->abort_login_transaction($wpdb, 'Unable to read rate limit');
             }
+
             $blocked = (int) $row['blocked_until'];
             if ($blocked > $now) {
                 $this->rollback_login_transaction($wpdb);
                 return false;
             }
-            $attempts = (int) $row['attempts'];
-            $window_start = (int) $row['window_started'];
-            if ($blocked > 0 || $window_start <= 0 || $now - $window_start >= $window) {
-                $attempts = 0;
-                $window_start = $now;
+
+            // Rows created by v0.7.36 have no timestamp list. Preserve their
+            // existing unexpired reservations conservatively until they expire.
+            if ($blocked > 0) {
+                $times = [];
+            } elseif ($row['attempt_times'] === null) {
+                $started = (int) $row['window_started'];
+                $count = max(0, (int) $row['attempts']);
+                $times = ($started > $now - $window && $started <= $now)
+                    ? array_fill(0, min($count, $threshold), $started) : [];
+            } else {
+                $times = json_decode($row['attempt_times'], true);
+                if (!is_array($times)) {
+                    return $this->abort_login_transaction($wpdb, 'Invalid rate limit timestamp list');
+                }
             }
-            if ($attempts >= $threshold) {
-                return $this->abort_login_transaction($wpdb, 'Rate limit state exceeds threshold');
+
+            $recent = [];
+            foreach ($times as $timestamp) {
+                if (!is_int($timestamp) || $timestamp < 0) {
+                    return $this->abort_login_transaction($wpdb, 'Invalid rate limit timestamp');
+                }
+                if ($timestamp > $now - $window) {
+                    $recent[] = $timestamp;
+                }
             }
-            $next = $attempts + 1;
+            if (count($recent) >= $threshold) {
+                $this->rollback_login_transaction($wpdb);
+                return false;
+            }
+
+            $recent[] = $now;
+            $next = count($recent);
             $until = $next >= $threshold ? $now + $duration : 0;
+            $encoded = json_encode($recent);
+            if ($encoded === false) {
+                return $this->abort_login_transaction($wpdb, 'Unable to encode rate limit timestamps');
+            }
+            $token = bin2hex(random_bytes(16));
             $changed = $wpdb->query($wpdb->prepare(
-                "UPDATE {$table} SET attempts = %d, window_started = %d, blocked_until = %d, updated_at = %d WHERE ip_address = %s AND path_id = %s",
-                $next, $window_start, $until, $now, $ip, $path_settings['id']
+                "UPDATE {$table} SET attempts = %d, window_started = %d, blocked_until = %d, updated_at = %d, attempt_times = %s, last_attempt_token = %s WHERE ip_address = %s AND path_id = %s",
+                $next, $recent[0], $until, $now, $encoded, $token, $ip, $path_settings['id']
             ));
             if ($changed !== 1 || $wpdb->last_error !== '') {
                 return $this->abort_login_transaction($wpdb, 'Unable to update rate limit');
@@ -116,6 +148,7 @@ class ESP_Security {
                 return $this->abort_login_transaction($wpdb, 'Unable to commit rate limit');
             }
             $active = false;
+            $this->last_reservation_token = $token;
             $this->notify_on_failed_attempt = ($next === $threshold);
             return true;
         } catch (\Throwable $e) {
@@ -203,9 +236,15 @@ class ESP_Security {
         }
     }
 
-    /** Clear reservations after successful authentication and session creation. */
+    /**
+     * Clear only this request's reservations. If another request has reserved
+     * a later slot, its counter must not be overwritten by this login success.
+     */
     public function reset_successful_attempts($path_settings) {
         $this->notify_on_failed_attempt = false;
+        if ($this->last_reservation_token === null) {
+            return;
+        }
         $ip = $this->get_ip();
         if (!$ip) {
             return;
@@ -219,14 +258,16 @@ class ESP_Security {
         try {
             $now = time();
             $result = $wpdb->query($wpdb->prepare(
-                "UPDATE {$table} SET attempts = 0, blocked_until = 0, window_started = %d, updated_at = %d WHERE ip_address = %s AND path_id = %s",
-                $now, $now, $ip, $path_settings['id']
+                "UPDATE {$table} SET attempts = 0, blocked_until = 0, window_started = %d, updated_at = %d, attempt_times = '[]', last_attempt_token = '' WHERE ip_address = %s AND path_id = %s AND last_attempt_token = %s",
+                $now, $now, $ip, $path_settings['id'], $this->last_reservation_token
             ));
             if ($result === false) {
                 error_log('ESP_Security: Rate limit reset failed - ' . $wpdb->last_error);
             }
         } catch (\Throwable $e) {
             error_log('ESP_Security: Rate limit reset exception - ' . $e->getMessage());
+        } finally {
+            $this->last_reservation_token = null;
         }
     }
 
