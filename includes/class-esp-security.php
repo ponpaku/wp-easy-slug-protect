@@ -93,6 +93,9 @@ class ESP_Security {
                 return $this->abort_login_transaction($wpdb, 'Unable to read rate limit');
             }
 
+            // Take the timestamp after acquiring the row lock, not before
+            // waiting for concurrent reservations.
+            $now = time();
             $blocked = (int) $row['blocked_until'];
             if ($blocked > $now) {
                 $this->rollback_login_transaction($wpdb);
