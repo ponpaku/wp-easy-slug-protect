@@ -1,0 +1,24 @@
+name: PHP security checks
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - fix/atomic-login-rate-limits
+jobs:
+  php:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        php: ['8.1', '8.3', '8.4']
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: none
+      - name: Lint PHP source files
+        run: find . -name '*.php' -print0 | xargs -0 -n1 php -l
+      - name: Test login attempt reservation behavior
+        run: php tests/security-rate-limit-test.php
