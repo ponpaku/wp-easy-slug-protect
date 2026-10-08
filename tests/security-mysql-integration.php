@@ -3,7 +3,11 @@
 define('ABSPATH', __DIR__ . '/');
 define('ARRAY_A', 'ARRAY_A');
 class ESP_Config {
+    const OPTION_DEFAULTS = ['db_version' => 6];
     const DB_TABLES = ['limit' => 'login_limits', 'brute' => 'login_attempts'];
+}
+function get_option($key, $default = null) {
+    return $GLOBALS['mock_esp_db_version'] ?? 6;
 }
 class ESP_Option {
     public static function get_current_setting($section) {
