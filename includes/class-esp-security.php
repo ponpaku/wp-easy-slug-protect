@@ -54,6 +54,12 @@ class ESP_Security {
     public function can_try_login($path_settings) {
         $this->notify_on_failed_attempt = false;
         $this->last_reservation_token = null;
+        // A failed/partial schema migration must not leave authentication
+        // running against an unsafe non-InnoDB rate-limit table.
+        if ((int) get_option('esp_db_version', 0) < (int) ESP_Config::OPTION_DEFAULTS['db_version']) {
+            error_log('ESP_Security: Rate-limit database migration is incomplete');
+            return false;
+        }
         $ip = $this->get_ip();
         if (!$ip) {
             return false;
