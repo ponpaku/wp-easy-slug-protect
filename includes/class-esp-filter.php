@@ -289,7 +289,9 @@ class ESP_Filter {
     private function get_excluded_post_ids() {
         $cached_data = get_transient(self::CACHE_KEY);
         if ($cached_data === false) {
-            // error_log('ESP_Filter: Cache miss in get_excluded_post_ids. Regenerating on the fly.');
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                error_log('ESP_Filter: Cache miss in get_excluded_post_ids. Regenerating on the fly.');
+            }
             $this->regenerate_protected_posts_cache(); // 次回以降のために構築
             $cached_data = get_transient(self::CACHE_KEY);
         }
@@ -548,7 +550,9 @@ class ESP_Filter {
 
         while (true) {
             if (memory_get_usage(true) > $memory_threshold) {
-                // error_log('ESP_Filter: Memory usage high, stopping batch processing');
+                if (defined('WP_DEBUG') && WP_DEBUG) {
+                    error_log('ESP_Filter: Memory usage high, stopping batch processing');
+                }
                 break; // 多量サイトでの安全装置
             }
 
@@ -716,7 +720,9 @@ class ESP_Filter {
         $offset = isset($progress['offset']) ? absint($progress['offset']) : 0;
         $limit  = apply_filters('esp_integrity_check_cron_limit', 100);
 
-        // error_log(sprintf('ESP Cron Integrity Check: Starting batch from offset %d, limit %d.', $offset, $limit));
+        if (defined('WP_DEBUG') && WP_DEBUG) {
+            error_log(sprintf('ESP Cron Integrity Check: Starting batch from offset %d, limit %d.', $offset, $limit));
+        }
         update_option($option_name, ['offset' => $offset, 'last_run_start' => time(), 'total_fixed_this_session' => (int) $progress['total_fixed_this_session']]);
 
         $args = [
@@ -733,7 +739,9 @@ class ESP_Filter {
         if (empty($post_ids)) {
             // 全件処理済み
             $instance->regenerate_protected_posts_cache();
-            // error_log('ESP Cron Integrity Check: All posts processed. Total fixed in this session: ' . (int) $progress['total_fixed_this_session']);
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                error_log('ESP Cron Integrity Check: All posts processed. Total fixed in this session: ' . (int) $progress['total_fixed_this_session']);
+            }
             delete_option($option_name);
             return;
         }
@@ -765,7 +773,9 @@ class ESP_Filter {
             $instance->regenerate_protected_posts_cache(); // 差分があった場合のみ再生成
         }
 
-        // error_log(sprintf('ESP Cron Integrity Check: Processed %d posts in this batch (fixed %d). Next offset: %d. Total fixed this session: %d.', $checked_count_this_batch, $fixed_count_this_batch, $new_offset, $total_fixed_session));
+        if (defined('WP_DEBUG') && WP_DEBUG) {
+            error_log(sprintf('ESP Cron Integrity Check: Processed %d posts in this batch (fixed %d). Next offset: %d. Total fixed this session: %d.', $checked_count_this_batch, $fixed_count_this_batch, $new_offset, $total_fixed_session));
+        }
 
         update_option($option_name, [
             'offset'                  => $new_offset,

@@ -104,7 +104,9 @@ class ESP_Setup {
         }
 
         // ログ出力
-        // error_log('ESP: All caches refreshed at ' . current_time('mysql'));
+        if (defined('WP_DEBUG') && WP_DEBUG) {
+            error_log('ESP: All caches refreshed at ' . current_time('mysql'));
+        }
     }
 
     public function deactivate() {
@@ -136,55 +138,123 @@ class ESP_Setup {
         $table_session = $wpdb->prefix . ESP_Config::DB_TABLES['session'];
 
         // ブルートフォース対策用テーブル
-        $sql1 = "CREATE TABLE IF NOT EXISTS `{$table_brute}` (
-            `id` bigint(20) UNSIGNED NOT NULL AUTO_INCREMENT,
-            `ip_address` varchar(45) NOT NULL,
-            `path` varchar(255) NOT NULL,
-            `path_id` varchar(50) NOT NULL,
-            `time` datetime NOT NULL,
-            PRIMARY KEY (`id`),
-            KEY `ip_path_time` (`ip_address`, `path`, `time`),
-            KEY `ip_path_id` (`ip_address`, `path_id`)
+        $sql1 = "CREATE TABLE {$table_brute} (
+            id bigint(20) unsigned NOT NULL auto_increment,
+            ip_address varchar(45) NOT NULL,
+            path varchar(255) NOT NULL,
+            path_id varchar(50) NOT NULL,
+            time datetime NOT NULL,
+            PRIMARY KEY  (id),
+            KEY ip_path_time (ip_address, path, time),
+            KEY ip_path_id (ip_address, path_id)
         ) {$charset_collate};";
 
         // ログイン保持用テーブル
-        $sql2 = "CREATE TABLE IF NOT EXISTS `{$table_remember}` (
-            `id` bigint(20) UNSIGNED NOT NULL AUTO_INCREMENT,
-            `path` varchar(255) NOT NULL,
-            `path_id` varchar(50) NOT NULL,
-            `password_version` int(10) UNSIGNED NOT NULL DEFAULT 0,
-            `user_id` varchar(32) NOT NULL,
-            `token` varchar(64) NOT NULL,
-            `created` datetime NOT NULL,
-            `expires` datetime NOT NULL,
-            PRIMARY KEY (`id`),
-            KEY `user_token` (`user_id`, `token`),
-            KEY `path_expires` (`path`, `expires`),
-            KEY `path_id` (`path_id`)
+        $sql2 = "CREATE TABLE {$table_remember} (
+            id bigint(20) unsigned NOT NULL auto_increment,
+            path varchar(255) NOT NULL,
+            path_id varchar(50) NOT NULL,
+            password_version int(10) unsigned NOT NULL DEFAULT 0,
+            user_id varchar(32) NOT NULL,
+            token varchar(64) NOT NULL,
+            created datetime NOT NULL,
+            expires datetime NOT NULL,
+            PRIMARY KEY  (id),
+            KEY user_token (user_id, token),
+            KEY path_expires (path, expires),
+            KEY path_id (path_id)
         ) {$charset_collate};";
 
         // 通常ログインセッション用テーブル
-        $sql3 = "CREATE TABLE IF NOT EXISTS `{$table_session}` (
-            `id` bigint(20) UNSIGNED NOT NULL AUTO_INCREMENT,
-            `path_id` varchar(50) NOT NULL,
-            `password_version` int(10) UNSIGNED NOT NULL DEFAULT 0,
-            `token` varchar(64) NOT NULL,
-            `created` datetime NOT NULL,
-            `expires` datetime NOT NULL,
-            PRIMARY KEY (`id`),
-            UNIQUE KEY `token_unique` (`token`),
-            KEY `path_id` (`path_id`),
-            KEY `expires` (`expires`)
+        $sql3 = "CREATE TABLE {$table_session} (
+            id bigint(20) unsigned NOT NULL auto_increment,
+            path_id varchar(50) NOT NULL,
+            password_version int(10) unsigned NOT NULL DEFAULT 0,
+            token varchar(64) NOT NULL,
+            created datetime NOT NULL,
+            expires datetime NOT NULL,
+            PRIMARY KEY  (id),
+            UNIQUE KEY token_unique (token),
+            KEY path_id (path_id),
+            KEY expires (expires)
         ) {$charset_collate};";
 
         require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
         dbDelta($sql1);
         dbDelta($sql2);
         dbDelta($sql3);
+        $this->ensure_login_limits_table();
 
         // エラーチェック
         if ($wpdb->last_error) {
             error_log('ESP Table Creation Error: ' . $wpdb->last_error);
+        }
+    }
+
+    /**
+     * Create or migrate the atomic rate-limit table. Row-level locking is
+     * a security requirement, so table existence alone is not sufficient.
+     */
+    private function ensure_login_limits_table() {
+        global $wpdb;
+        $table = $wpdb->prefix . ESP_Config::DB_TABLES['limit'];
+        $charset = $wpdb->get_charset_collate();
+        try {
+            if (!function_exists('dbDelta')) {
+                require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+            }
+            $sql = "CREATE TABLE {$table} (
+                ip_address varchar(45) NOT NULL,
+                path_id varchar(50) NOT NULL,
+                window_started bigint(20) unsigned NOT NULL DEFAULT 0,
+                attempts int(10) unsigned NOT NULL DEFAULT 0,
+                blocked_until bigint(20) unsigned NOT NULL DEFAULT 0,
+                updated_at bigint(20) unsigned NOT NULL DEFAULT 0,
+                attempt_times longtext NULL,
+                last_attempt_token varchar(32) NOT NULL DEFAULT '',
+                PRIMARY KEY  (ip_address,path_id),
+                KEY updated_at (updated_at)
+            ) ENGINE=InnoDB {$charset};";
+            dbDelta($sql);
+
+            $engine = $wpdb->get_var($wpdb->prepare(
+                'SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s',
+                $table
+            ));
+            if (strcasecmp((string) $engine, 'InnoDB') !== 0 || $wpdb->last_error !== '') {
+                error_log('ESP_Setup: Rate-limit table must use InnoDB');
+                return false;
+            }
+
+            // Verify the columns and the uniqueness of the serialized lock row.
+            $quoted = str_replace('`', '``', $table);
+            $columns = $wpdb->get_col("SHOW COLUMNS FROM `{$quoted}`");
+            $required = ['ip_address', 'path_id', 'window_started', 'attempts',
+                         'blocked_until', 'updated_at', 'attempt_times', 'last_attempt_token'];
+            if (!is_array($columns) || array_diff($required, $columns) || $wpdb->last_error !== '') {
+                error_log('ESP_Setup: Rate-limit table is missing required columns');
+                return false;
+            }
+            $indexes = $wpdb->get_results(
+                "SHOW INDEX FROM `{$quoted}` WHERE Key_name = 'PRIMARY'", ARRAY_A
+            );
+            if (!is_array($indexes) || $wpdb->last_error !== '') {
+                error_log('ESP_Setup: Cannot inspect rate-limit primary key');
+                return false;
+            }
+            $primary = [];
+            foreach ($indexes as $index) {
+                $primary[(int) $index['Seq_in_index']] = $index['Column_name'];
+            }
+            ksort($primary);
+            if (array_values($primary) !== ['ip_address', 'path_id']) {
+                error_log('ESP_Setup: Rate-limit primary key must be (ip_address,path_id)');
+                return false;
+            }
+            return true;
+        } catch (\Throwable $e) {
+            error_log('ESP_Setup: Rate-limit table validation failed - ' . $e->getMessage());
+            return false;
         }
     }
 
@@ -205,9 +275,12 @@ class ESP_Setup {
         $required_db_version = ESP_Config::OPTION_DEFAULTS['db_version'];
         
         if ($current_db_version < $required_db_version) {
-            $this->migrate_to_version($current_db_version, $required_db_version);
+            if (!$this->migrate_to_version($current_db_version, $required_db_version)) {
+                return false;
+            }
             update_option('esp_db_version', $required_db_version);
         }
+        return true;
     }
 
     /**
@@ -219,7 +292,9 @@ class ESP_Setup {
         // バージョンが変更された場合の処理
         if (version_compare($current_version, ESP_VERSION, '<')) {
             // バージョンに応じた更新処理
-            $this->update_check();
+            if (!$this->update_check()) {
+                return;
+            }
             // 新バージョンに合わせてCronを再登録
             $this->schedule_cron_jobs();
 
@@ -244,7 +319,10 @@ class ESP_Setup {
         if ($from < 4 && $to >= 4) {
             $this->migrate_to_version_4();
         }
-        // 将来的に処理をここに追加
+        if ($from < 6 && $to >= 6 && !$this->ensure_login_limits_table()) {
+            return false;
+        }
+        return true;
     }
 
     /**

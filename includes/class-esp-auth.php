@@ -135,6 +135,8 @@ class ESP_Auth {
             }
         }
 
+        // A successful password check and persisted session clear the rate-limit state.
+        $this->security->reset_successful_attempts($path_settings);
         return true;
     }
 
