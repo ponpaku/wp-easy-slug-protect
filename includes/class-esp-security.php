@@ -8,6 +8,7 @@ if (!defined('ABSPATH')) {
  * セキュリティ関連の処理を管理するクラス
  */
 class ESP_Security {
+    private $notify_on_failed_attempt = false;
 
     /**
      * IPアドレスの取得
@@ -45,75 +46,100 @@ class ESP_Security {
     }
 
     /**
-    * ログイン試行が可能か確認（改善版）
-    * 
-    * @param array $path_settings 保護対象のパス設定
-    * @return bool 試行可能な場合はtrue
-    */
+     * Reserve a login attempt before password verification. Fail closed on DB errors.
+     * A unique InnoDB row for each IP/path serializes concurrent reservations.
+     */
     public function can_try_login($path_settings) {
+        $this->notify_on_failed_attempt = false;
         $ip = $this->get_ip();
         if (!$ip) {
             return false;
         }
-
-        $brute_settings = ESP_Option::get_current_setting('brute');
-        
-        // ホワイトリストのチェック（キャッシュ利用）
-        static $whitelist_cache = null;
-        if ($whitelist_cache === null) {
-            $whitelist_cache = $this->parse_whitelist($brute_settings['whitelist_ips'] ?? '');
-        }
-        
-        if ($this->is_ip_whitelisted($ip, $whitelist_cache)) {
+        $settings = ESP_Option::get_current_setting('brute');
+        $whitelist = $this->parse_whitelist($settings['whitelist_ips'] ?? '');
+        if ($this->is_ip_whitelisted($ip, $whitelist)) {
             return true;
         }
-
-        $path_id = $path_settings['id'];
 
         global $wpdb;
-        $table = $wpdb->prefix . ESP_Config::DB_TABLES['brute'];
-
-        // 試行回数カウント期間内のレコード数を取得（インデックス利用）
-        $count = $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(*) 
-            FROM $table 
-            WHERE ip_address = %s 
-            AND path_id = %s 
-            AND time > DATE_SUB(NOW(), INTERVAL %d MINUTE)",
-            $ip,
-            $path_id,
-            $brute_settings['time_frame']
-        ));
-
-        // 試行回数が上限未満なら許可
-        if ($count < $brute_settings['attempts_threshold']) {
+        $table = $wpdb->prefix . ESP_Config::DB_TABLES['limit'];
+        $now = time();
+        $window = max(1, (int) $settings['time_frame']) * 60;
+        $duration = max(1, (int) $settings['block_time_frame']) * 60;
+        $threshold = max(1, (int) $settings['attempts_threshold']);
+        $active = false;
+        try {
+            $created = $wpdb->query($wpdb->prepare(
+                "INSERT IGNORE INTO {$table} (ip_address, path_id, window_started, attempts, blocked_until, updated_at) VALUES (%s, %s, %d, 0, 0, %d)",
+                $ip, $path_settings['id'], $now, $now
+            ));
+            if ($created === false || $wpdb->last_error !== '') {
+                error_log('ESP_Security: Unable to initialize rate limit - ' . $wpdb->last_error);
+                return false;
+            }
+            if ($wpdb->query('START TRANSACTION') === false) {
+                error_log('ESP_Security: Unable to start rate limit transaction - ' . $wpdb->last_error);
+                return false;
+            }
+            $active = true;
+            $row = $wpdb->get_row($wpdb->prepare(
+                "SELECT attempts, window_started, blocked_until FROM {$table} WHERE ip_address = %s AND path_id = %s FOR UPDATE",
+                $ip, $path_settings['id']
+            ), ARRAY_A);
+            if (!is_array($row) || $wpdb->last_error !== '') {
+                return $this->abort_login_transaction($wpdb, 'Unable to read rate limit');
+            }
+            $blocked = (int) $row['blocked_until'];
+            if ($blocked > $now) {
+                $this->rollback_login_transaction($wpdb);
+                return false;
+            }
+            $attempts = (int) $row['attempts'];
+            $window_start = (int) $row['window_started'];
+            if ($blocked > 0 || $window_start <= 0 || $now - $window_start >= $window) {
+                $attempts = 0;
+                $window_start = $now;
+            }
+            if ($attempts >= $threshold) {
+                return $this->abort_login_transaction($wpdb, 'Rate limit state exceeds threshold');
+            }
+            $next = $attempts + 1;
+            $until = $next >= $threshold ? $now + $duration : 0;
+            $changed = $wpdb->query($wpdb->prepare(
+                "UPDATE {$table} SET attempts = %d, window_started = %d, blocked_until = %d, updated_at = %d WHERE ip_address = %s AND path_id = %s",
+                $next, $window_start, $until, $now, $ip, $path_settings['id']
+            ));
+            if ($changed !== 1 || $wpdb->last_error !== '') {
+                return $this->abort_login_transaction($wpdb, 'Unable to update rate limit');
+            }
+            if ($wpdb->query('COMMIT') === false) {
+                return $this->abort_login_transaction($wpdb, 'Unable to commit rate limit');
+            }
+            $active = false;
+            $this->notify_on_failed_attempt = ($next === $threshold);
             return true;
-        }
-
-        // ブロック期間のチェック
-        $latest_attempt = $wpdb->get_var($wpdb->prepare(
-            "SELECT time 
-            FROM $table 
-            WHERE ip_address = %s 
-            AND path_id = %s 
-            ORDER BY time DESC 
-            LIMIT 1",
-            $ip,
-            $path_id
-        ));
-
-        if (!$latest_attempt) {
-            return true;
-        }
-
-        $latest_attempt_timestamp = strtotime($latest_attempt);
-        if ($latest_attempt_timestamp === false) {
-            error_log("ESP_Security: Failed to parse latest_attempt time: {$latest_attempt}");
+        } catch (\Throwable $e) {
+            if ($active) {
+                $this->rollback_login_transaction($wpdb);
+            }
+            error_log('ESP_Security: Rate limit exception - ' . $e->getMessage());
             return false;
         }
-        
-        $block_end_time = $latest_attempt_timestamp + ($brute_settings['block_time_frame'] * 60);
-        return time() > $block_end_time;
+    }
+
+    private function rollback_login_transaction($wpdb) {
+        try {
+            $wpdb->query('ROLLBACK');
+        } catch (\Throwable $e) {
+            error_log('ESP_Security: Rollback exception - ' . $e->getMessage());
+        }
+    }
+
+    private function abort_login_transaction($wpdb, $reason) {
+        $error = $wpdb->last_error ?: 'no database error details';
+        $this->rollback_login_transaction($wpdb);
+        error_log('ESP_Security: ' . $reason . ' - ' . $error);
+        return false;
     }
 
     /**
