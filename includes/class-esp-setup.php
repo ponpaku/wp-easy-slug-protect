@@ -305,6 +305,13 @@ class ESP_Setup {
                 $result = $media_protection->update_htaccess();
                 if ($result !== true) {
                     error_log('ESP: Could not refresh media protection rewrite rules for AVIF on upgrade');
+                    add_action('admin_notices', static function () {
+                        if (current_user_can('manage_options')) {
+                            echo '<div class="notice notice-error"><p>'
+                                . esc_html__('Easy Slug Protect: AVIFの保護ルールを更新できませんでした。uploads/.htaccess の書込み権限を確認し、メディア設定からルールを再設定してください。修正までAVIFファイルが直接URLで公開される可能性があります。', ESP_Config::TEXT_DOMAIN)
+                                . '</p></div>';
+                        }
+                    });
                     return;
                 }
             }
