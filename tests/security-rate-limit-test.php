@@ -6,7 +6,11 @@
 define('ABSPATH', __DIR__ . '/');
 define('ARRAY_A', 'ARRAY_A');
 class ESP_Config {
+    const OPTION_DEFAULTS = ['db_version' => 6];
     const DB_TABLES = ['limit' => 'esp_login_limits', 'brute' => 'esp_login_attempts'];
+}
+function get_option($key, $default = null) {
+    return $GLOBALS['mock_esp_db_version'] ?? 6;
 }
 class ESP_Option {
     public static function get_current_setting($name) {
@@ -160,6 +164,9 @@ $wpdb = new FakeWPDB();
 $wpdb->row = ['attempts' => 2, 'window_started' => $now, 'blocked_until' => 0,
               'attempt_times' => 'not json', 'last_attempt_token' => ''];
 check(!(new ESP_Security())->can_try_login($path), 'invalid stored timestamps fail closed');
+$GLOBALS['mock_esp_db_version'] = 5;
+check(!(new ESP_Security())->can_try_login($path), 'incomplete DB migration denies login');
+$GLOBALS['mock_esp_db_version'] = 6;
 foreach (['INSERT IGNORE', 'START TRANSACTION', 'SELECT attempts', 'UPDATE', 'COMMIT'] as $stage) {
     $wpdb = new FakeWPDB();
     $wpdb->fail = $stage;
