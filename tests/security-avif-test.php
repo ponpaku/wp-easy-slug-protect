@@ -5,7 +5,7 @@
 define('ABSPATH', __DIR__ . '/');
 define('ESP_VERSION', '0.7.38');
 define('WEEK_IN_SECONDS', 7 * 24 * 60 * 60);
-class ESP_Config { const TEXT_DOMAIN = 'easy-slug-protect'; }
+require __DIR__ . '/../includes/class-esp-config.php';
 class ESP_Option {
     public static function get_current_setting($name) { return $name === 'media' ? ['enabled' => true, 'litespeed_key' => 'testkey123'] : []; }
 }
