@@ -46,7 +46,7 @@ class ESP_Config {
             'delivery_method' => 'auto',
             'litespeed_key' => ''
         ),
-        'db_version' => 5 // DBバージョン
+        'db_version' => 6 // DBバージョン
 
     );
 
