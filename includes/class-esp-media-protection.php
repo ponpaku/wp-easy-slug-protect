@@ -1039,8 +1039,12 @@ class ESP_Media_Protection {
         if (!preg_match('/apache|litespeed/i', $_SERVER['SERVER_SOFTWARE'] ?? '')) {
             return true; // Nginx uses its administrator-installed rule.
         }
-        $policy = 'always-route-v2:' . (self::is_media_protection_enabled() ? 'on' : 'off');
-        if (get_option('esp_rewrite_policy_version', '') === $policy) {
+        $enabled = self::is_media_protection_enabled();
+        $policy = 'always-route-v2:' . ($enabled ? 'on' : 'off');
+        // A saved version flag is not evidence that an external editor has
+        // left uploads/.htaccess intact. Check the actual file too.
+        if (get_option('esp_rewrite_policy_version', '') === $policy &&
+            self::rewrite_file_matches_policy($enabled)) {
             return true;
         }
         $media = new self();
@@ -1053,6 +1057,40 @@ class ESP_Media_Protection {
         update_option('esp_rewrite_policy_version', $policy, false);
         delete_option('esp_rewrite_last_error');
         return get_option('esp_rewrite_policy_version', '') === $policy;
+    }
+
+    /**
+     * Check the installed on-disk policy, not just its cached version flag.
+     * This cannot replace a real server-level HTTP test of Rewrite.
+     */
+    private static function rewrite_file_matches_policy($enabled) {
+        $dir = wp_upload_dir();
+        if (!empty($dir['error']) || empty($dir['basedir'])) {
+            return false;
+        }
+        $file = trailingslashit($dir['basedir']) . '.htaccess';
+        if (!is_file($file) || is_link($file)) {
+            return !$enabled && !file_exists($file);
+        }
+        $contents = @file_get_contents($file);
+        if ($contents === false) {
+            return false;
+        }
+        $start = strpos($contents, '# BEGIN ESP Media Protection');
+        if (!$enabled) {
+            return $start === false;
+        }
+        if ($start === false) {
+            return false;
+        }
+        $end = strpos($contents, '# END ESP Media Protection', $start);
+        if ($end === false) {
+            return false;
+        }
+        $block = substr($contents, $start, $end - $start);
+        return strpos($block, 'RewriteRule') !== false &&
+            strpos($block, 'esp-media=') !== false &&
+            strpos($block, 'avif') !== false;
     }
 
     /**
