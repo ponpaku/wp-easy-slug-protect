@@ -36,7 +36,7 @@ class ESP_Media_Protection {
     /**
      * @var string メディアキャッシュのトランジェントキー
      */
-    const MEDIA_CACHE_KEY = 'esp_protected_media';
+    const MEDIA_CACHE_KEY = 'esp_protected_media_v2';
 
     /**
      * @var int キャッシュの有効期間（秒）- 7日間に延長
@@ -1134,6 +1134,9 @@ class ESP_Media_Protection {
             if ($this->is_litespeed()) {
                 // LiteSpeed用の認証キーを必ず確保
                 $litespeed_key = $this->ensure_litespeed_key($force_litespeed_key_regeneration);
+                if (is_wp_error($litespeed_key)) {
+                    return $litespeed_key;
+                }
                 $escaped_key = preg_quote($litespeed_key, '/');
                 $query_key = ESP_Config::LITESPEED_QUERY_KEY;
 
@@ -1268,6 +1271,9 @@ class ESP_Media_Protection {
 
         $settings['media'][self::OPTION_LITESPEED_KEY] = $key;
         ESP_Option::update_settings($settings);
+        if (self::get_litespeed_key_value() !== $key) {
+            return new WP_Error('esp_litespeed_key_write', __('LiteSpeed認証キーを保存できません。', ESP_Config::TEXT_DOMAIN));
+        }
 
         return $key;
     }
@@ -1342,7 +1348,8 @@ class ESP_Media_Protection {
             self::META_KEY_PROTECTED_PATH
         ));
 
-        if ($count === null || (isset($wpdb->last_error) && $wpdb->last_error !== '')) {
+        if ((!is_int($count) && (!is_string($count) || !ctype_digit($count))) ||
+            (isset($wpdb->last_error) && $wpdb->last_error !== '')) {
             return null; // DB failure, never interpreted as an empty collection.
         }
         return (int) $count > 0;
