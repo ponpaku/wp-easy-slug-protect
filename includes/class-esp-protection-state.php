@@ -37,6 +37,9 @@ final class ESP_Protection_State {
                     (string) $wpdb->get_var('SELECT 1') === '1' &&
                     $wpdb->last_error === '';
             }
+            if ($ready && class_exists('ESP_Media_Protection')) {
+                $ready = ESP_Media_Protection::ensure_rewrite_policy() === true;
+            }
             if ($ready) {
                 return true;
             }
