@@ -50,6 +50,7 @@ class Easy_Slug_Protect {
         // コアクラスの読み込み
         require_once ESP_PATH . 'includes/class-esp-core.php';
         require_once ESP_PATH . 'includes/class-esp-setup.php';
+        require_once ESP_PATH . 'includes/class-esp-protection-state.php';
         require_once ESP_PATH . 'includes/class-esp-auth.php';
         require_once ESP_PATH . 'includes/class-esp-cookie.php';
         require_once ESP_PATH . 'includes/class-esp-logout.php';
@@ -73,8 +74,15 @@ class Easy_Slug_Protect {
      * プラグインの初期化
      */
     private function init() {
-        // バージョンチェックと更新は常に実行
-        $this->setup->check_plugin_version();
+        // Fail closed before initializing frontend routes or content caches.
+        $ready = ESP_Protection_State::boot($this->setup);
+        if (!$ready) {
+            // Retain the privileged administrative repair interface.
+            if (is_admin()) {
+                new ESP_Admin_page();
+            }
+            return;
+        }
 
         if (is_admin()) {
             // 管理画面の初期化
