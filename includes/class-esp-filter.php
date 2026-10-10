@@ -11,7 +11,7 @@ class ESP_Filter {
     private $auth;
 
     /** @var string トランジェントキー */
-    const CACHE_KEY = 'esp_protected_posts';
+    const CACHE_KEY = 'esp_protected_posts_v2';
 
     /** @var int キャッシュ有効期間（秒） */
     const CACHE_DURATION = DAY_IN_SECONDS;
