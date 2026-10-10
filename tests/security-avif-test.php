@@ -13,6 +13,7 @@ class TestWPDB {
     public $postmeta = 'wp_postmeta';
     public $rows = [];
     public $metadata = [];
+    public $last_error = '';
     public function prepare($sql, ...$args) {
         if (count($args) === 1 && is_array($args[0])) { $args = $args[0]; }
         return ['sql' => $sql, 'args' => $args];
