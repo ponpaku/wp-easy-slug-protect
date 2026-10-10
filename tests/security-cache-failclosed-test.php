@@ -23,11 +23,26 @@ function is_admin() { return false; }
 function get_transient($key) { return null; /* Corrupt or unreadable cache. */ }
 function current_user_can($capability) { return false; }
 function is_wp_error($value) { return false; }
+function get_option($name, $default = null) {
+    if ($name === ESP_Config::OPTION_KEY) {
+        return ['path' => ['test' => ['path' => '/protected']], 'media' => ['enabled' => true]];
+    }
+    return $default;
+}
+function wp_doing_cron() { return true; }
+class BrokenDB {
+    public $postmeta = 'wp_postmeta';
+    public $last_error = 'Database unavailable';
+    public function prepare($sql, ...$args) { return $sql; }
+    public function get_results($query) { return null; }
+}
+$wpdb = new BrokenDB();
 function __($msg, $domain = null) { return $msg; }
 function check($ok, $desc) {
     if (!$ok) { fwrite(STDERR, "FAIL: $desc\n"); exit(1); }
     echo "PASS: $desc\n";
 }
+require __DIR__ . '/../includes/class-esp-authorization-cache.php';
 require __DIR__ . '/../includes/class-esp-filter.php';
 require __DIR__ . '/../includes/class-esp-media-protection.php';
 
