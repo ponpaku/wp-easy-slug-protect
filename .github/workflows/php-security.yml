@@ -32,6 +32,8 @@ jobs:
         run: php tests/security-protection-state-test.php
       - name: Test unreadable authorization caches
         run: php tests/security-cache-failclosed-test.php
+      - name: Test authorization cache generations and empty states
+        run: php tests/security-authorization-generation-test.php
   mysql-integration:
     runs-on: ubuntu-latest
     services:
