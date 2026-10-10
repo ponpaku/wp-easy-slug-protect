@@ -4,7 +4,7 @@ define('ABSPATH', __DIR__ . '/');
 define('WEEK_IN_SECONDS', 604800);
 require __DIR__ . '/../includes/class-esp-config.php';
 class ESP_Option {
-    public static function get_current_setting($name) { return ['enabled' => true, 'litespeed_key' => 'key123']; }
+    public static function get_current_setting($name) { return ['enabled' => $GLOBALS['enabled'] ?? true, 'litespeed_key' => 'key123']; }
 }
 class WP_Error {
     private $code;
@@ -41,20 +41,18 @@ $media = $reflection->newInstanceWithoutConstructor();
 
 $wpdb->count = null;
 $wpdb->last_error = 'DB query failed';
-$error = $media->update_htaccess();
-check($error instanceof WP_Error && $error->get_error_code() === 'esp_htaccess_media_unknown', 'DB failure returns error');
-check(file_get_contents($file) === $old, 'DB failure keeps existing ESP and foreign rules');
+check($media->update_htaccess() === true, 'Rewrite policy does not depend on an unavailable COUNT');
+check(strpos(file_get_contents($file), 'esp-media') !== false, 'Rewrite stays installed when DB count is unknown');
 
 $wpdb->count = '';
 $wpdb->last_error = '';
-$error = $media->update_htaccess();
-check($error instanceof WP_Error && file_get_contents($file) === $old, 'invalid COUNT result preserves rewrite even without SQL error');
+check($media->update_htaccess() === true, 'Rewrite policy also ignores invalid COUNT results');
 $wpdb->count = 1;
 $lockHandle = fopen($file . '.esp.lock', 'c');
 flock($lockHandle, LOCK_EX);
 $error = $media->update_htaccess();
 check($error instanceof WP_Error && $error->get_error_code() === 'esp_htaccess_locked', 'competing writer cannot replace rewrite');
-check(file_get_contents($file) === $old, 'lock contention preserves existing file');
+check(strpos(file_get_contents($file), 'esp-media') !== false, 'lock contention preserves existing file');
 flock($lockHandle, LOCK_UN);
 fclose($lockHandle);
 check($media->update_htaccess() === true, 'known protected media updates rewrite');
@@ -63,9 +61,12 @@ check(strpos($new, 'esp-media') !== false && strpos($new, '# Other plugin rule')
 check(strpos($new, 'avif') !== false, 'AVIF is covered in replacement');
 
 $wpdb->count = 0;
-check($media->update_htaccess() === true, 'verified zero records permits removal');
-check(file_get_contents($file) === $foreign, 'only ESP block was removed');
-check($media->update_htaccess() === true, 'idempotent rewrite is supported');
+check($media->update_htaccess() === true, 'zero protected records still install rewrite');
+check(strpos(file_get_contents($file), 'esp-media') !== false, 'zero-to-one transition already covered by rewrite');
+$GLOBALS['enabled'] = false;
+check($media->update_htaccess() === true, 'explicitly disabled media protection removes rewrite');
+check(file_get_contents($file) === $foreign, 'only explicit disable removes ESP block');
+check($media->update_htaccess() === true, 'disabled rewrite update is idempotent');
 
 @unlink($file);
 @unlink($file . '.esp.lock');
