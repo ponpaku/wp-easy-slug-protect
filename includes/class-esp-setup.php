@@ -119,6 +119,8 @@ class ESP_Setup {
         // キャッシュのクリア
         delete_transient('esp_protected_posts');
         delete_transient('esp_protected_media');
+        delete_transient('esp_protected_posts_v2');
+        delete_transient('esp_protected_media_v2');
         
         // .htaccessからESPルールを削除
         if (class_exists('ESP_Media_Protection')) {
