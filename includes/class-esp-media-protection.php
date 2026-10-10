@@ -777,7 +777,7 @@ class ESP_Media_Protection {
             $relative_path
         ));
         
-        if ($wpdb->last_error !== '') {
+        if (($wpdb->last_error ?? '') !== '') {
             return new WP_Error('esp_attachment_lookup_failed', 'Unable to resolve media ownership');
         }
         if ($attachment_id) {
@@ -810,12 +810,12 @@ class ESP_Media_Protection {
             array_merge(['_wp_attached_file'], $candidates)
         ));
 
-        if (!is_array($candidate_ids) || $wpdb->last_error !== '') {
+        if (!is_array($candidate_ids) || ($wpdb->last_error ?? '') !== '') {
             return new WP_Error('esp_attachment_candidate_lookup_failed', 'Unable to resolve image derivatives');
         }
         foreach ($candidate_ids as $candidate_id) {
             $metadata = wp_get_attachment_metadata((int) $candidate_id);
-            if ($wpdb->last_error !== '') {
+            if (($wpdb->last_error ?? '') !== '') {
                 return new WP_Error('esp_attachment_metadata_failed', 'Unable to resolve image metadata');
             }
             if (!is_array($metadata) || !isset($metadata['file'], $metadata['sizes']) ||
