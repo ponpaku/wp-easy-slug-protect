@@ -39,6 +39,10 @@ foreach (ESP_Config::DB_TABLES as $table_name) {
 delete_option(ESP_Config::OPTION_KEY);
 delete_option(ESP_Config::VERSION_OPTION_KEY);
 delete_option('esp_db_version');
+delete_option('esp_post_auth_epoch');
+delete_option('esp_media_auth_epoch');
+delete_option('esp_rewrite_policy_version');
+delete_option('esp_rewrite_last_error');
 delete_option('esp_integrity_check_progress');
 
 // 投稿メタデータの削除
