@@ -50,6 +50,8 @@ class Easy_Slug_Protect {
         // コアクラスの読み込み
         require_once ESP_PATH . 'includes/class-esp-core.php';
         require_once ESP_PATH . 'includes/class-esp-setup.php';
+        require_once ESP_PATH . 'includes/class-esp-protection-state.php';
+        require_once ESP_PATH . 'includes/class-esp-authorization-cache.php';
         require_once ESP_PATH . 'includes/class-esp-auth.php';
         require_once ESP_PATH . 'includes/class-esp-cookie.php';
         require_once ESP_PATH . 'includes/class-esp-logout.php';
@@ -73,8 +75,16 @@ class Easy_Slug_Protect {
      * プラグインの初期化
      */
     private function init() {
-        // バージョンチェックと更新は常に実行
-        $this->setup->check_plugin_version();
+        if (is_admin()) {
+            add_action('admin_notices', ['ESP_Media_Protection', 'render_rewrite_admin_notice']);
+        }
+        // Fail closed before initializing frontend routes or content caches.
+        $ready = ESP_Protection_State::boot($this->setup);
+        if (!$ready) {
+            // Keep WordPress admin available for diagnosis, but do not load
+            // ESP settings forms that could overwrite unreadable data.
+            return;
+        }
 
         if (is_admin()) {
             // 管理画面の初期化

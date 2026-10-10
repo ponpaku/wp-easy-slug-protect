@@ -13,17 +13,24 @@ class TestWPDB {
     public $postmeta = 'wp_postmeta';
     public $rows = [];
     public $metadata = [];
+    public $last_error = '';
+    public $fail_primary = false;
+    public $fail_candidates = false;
     public function prepare($sql, ...$args) {
         if (count($args) === 1 && is_array($args[0])) { $args = $args[0]; }
         return ['sql' => $sql, 'args' => $args];
     }
     public function get_var($query) {
+        if ($this->fail_primary) { $this->fail_primary = false; $this->last_error = 'SQL error'; return null; }
+        $this->last_error = '';
         if (strpos($query['sql'], 'COUNT(*)') !== false) { return 1; }
         $target = $query['args'][0] ?? '';
         foreach ($this->rows as $id => $path) { if ($path === $target) { return $id; } }
         return null;
     }
     public function get_col($query) {
+        if ($this->fail_candidates) { $this->fail_candidates = false; $this->last_error = 'SQL error'; return null; }
+        $this->last_error = '';
         $matches = [];
         foreach ($this->rows as $id => $path) {
             if (in_array($path, array_slice($query['args'], 1), true)) { $matches[] = $id; }
@@ -32,6 +39,7 @@ class TestWPDB {
     }
 }
 $wpdb = new TestWPDB();
+class WP_Error { public $code; public function __construct($code, $message) { $this->code = $code; } }
 function is_admin() { return true; }
 function sanitize_text_field($value) { return (string) $value; }
 function get_transient($name) { return []; }
@@ -89,3 +97,11 @@ check_avif($lookup->invoke($media, $base . '2026/10/other-150x150.avif') === 456
 check_avif($lookup->invoke($media, $base . '2026/10/photo-320x240.avif') === false, 'Unregistered AVIF thumbnail is not attributed to unrelated media');
 check_avif($lookup->invoke($media, $base . '2026/11/photo-150x150.avif') === false, 'AVIF thumbnail cannot cross upload directories');
 check_avif($lookup->invoke($media, $base . '2026/10/nonexistent.avif') === false, 'Unregistered AVIF remains unprotected');
+
+$wpdb->fail_primary = true;
+$result = $lookup->invoke($media, $base . '2026/10/photo-150x150.avif');
+check_avif($result instanceof WP_Error && $result->code === 'esp_attachment_lookup_failed', 'Primary SQL error is not confused with an absent attachment');
+check_avif($lookup->invoke($media, $base . '2026/10/photo-150x150.avif') === 123, 'Normal lookup recovers after SQL failure');
+$wpdb->fail_candidates = true;
+$result = $lookup->invoke($media, $base . '2026/10/other-150x150.avif');
+check_avif($result instanceof WP_Error && $result->code === 'esp_attachment_candidate_lookup_failed', 'Candidate SQL error is not confused with a missing derivative');
