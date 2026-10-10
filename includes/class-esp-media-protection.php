@@ -179,7 +179,9 @@ class ESP_Media_Protection {
         ));
         
         if (!is_array($protected_media) || (isset($wpdb->last_error) && $wpdb->last_error !== '')) {
-            // Do not replace the last known cache with an empty one on SQL error.
+            // Last-known caches may omit newly protected media; invalidate
+            // them so REST consumers deny instead of using stale grants.
+            delete_transient(self::MEDIA_CACHE_KEY);
             error_log('ESP: protected media cache query failed');
             return;
         }
