@@ -1017,6 +1017,31 @@ class ESP_Media_Protection {
     }
 
     /**
+     * Reconcile old installations on their first request after this safety
+     * change, even if the historical plugin version number is unchanged.
+     * A zero-to-one transition must never depend on a delayed settings save.
+     */
+    public static function ensure_rewrite_policy() {
+        if (!preg_match('/apache|litespeed/i', $_SERVER['SERVER_SOFTWARE'] ?? '')) {
+            return true; // Nginx uses its administrator-installed rule.
+        }
+        $policy = 'always-route-v2:' . (self::is_media_protection_enabled() ? 'on' : 'off');
+        if (get_option('esp_rewrite_policy_version', '') === $policy) {
+            return true;
+        }
+        $media = new self();
+        $result = $media->update_htaccess();
+        if ($result !== true) {
+            update_option('esp_rewrite_last_error', $result instanceof WP_Error
+                ? $result->get_error_code() : 'esp_rewrite_unknown', false);
+            return false;
+        }
+        update_option('esp_rewrite_policy_version', $policy, false);
+        delete_option('esp_rewrite_last_error');
+        return get_option('esp_rewrite_policy_version', '') === $policy;
+    }
+
+    /**
      * .htaccessファイルを更新（Apache環境用）
      *
      * @param bool $force_litespeed_key_regeneration LiteSpeedキーを再生成するかどうか
@@ -1393,6 +1418,7 @@ class ESP_Media_Protection {
             return $result;
         }
         delete_option('esp_rewrite_last_error');
+        update_option('esp_rewrite_policy_version', 'always-route-v2:' . (self::is_media_protection_enabled() ? 'on' : 'off'), false);
 
         // リライトルールをフラッシュ
         flush_rewrite_rules();
