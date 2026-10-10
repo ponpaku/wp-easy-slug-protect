@@ -14,17 +14,23 @@ class TestWPDB {
     public $rows = [];
     public $metadata = [];
     public $last_error = '';
+    public $fail_primary = false;
+    public $fail_candidates = false;
     public function prepare($sql, ...$args) {
         if (count($args) === 1 && is_array($args[0])) { $args = $args[0]; }
         return ['sql' => $sql, 'args' => $args];
     }
     public function get_var($query) {
+        if ($this->fail_primary) { $this->fail_primary = false; $this->last_error = 'SQL error'; return null; }
+        $this->last_error = '';
         if (strpos($query['sql'], 'COUNT(*)') !== false) { return 1; }
         $target = $query['args'][0] ?? '';
         foreach ($this->rows as $id => $path) { if ($path === $target) { return $id; } }
         return null;
     }
     public function get_col($query) {
+        if ($this->fail_candidates) { $this->fail_candidates = false; $this->last_error = 'SQL error'; return null; }
+        $this->last_error = '';
         $matches = [];
         foreach ($this->rows as $id => $path) {
             if (in_array($path, array_slice($query['args'], 1), true)) { $matches[] = $id; }
@@ -33,6 +39,7 @@ class TestWPDB {
     }
 }
 $wpdb = new TestWPDB();
+class WP_Error { public $code; public function __construct($code, $message) { $this->code = $code; } }
 function is_admin() { return true; }
 function sanitize_text_field($value) { return (string) $value; }
 function get_transient($name) { return []; }
