@@ -30,6 +30,14 @@ final class ESP_Protection_State {
                 }
             }
             if ($ready) {
+                // WordPress may return option-cache values even after a DB
+                // outage. A live read distinguishes availability from defaults.
+                global $wpdb;
+                $ready = is_object($wpdb) &&
+                    (string) $wpdb->get_var('SELECT 1') === '1' &&
+                    $wpdb->last_error === '';
+            }
+            if ($ready) {
                 return true;
             }
         } catch (\Throwable $error) {
