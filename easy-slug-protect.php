@@ -51,6 +51,7 @@ class Easy_Slug_Protect {
         require_once ESP_PATH . 'includes/class-esp-core.php';
         require_once ESP_PATH . 'includes/class-esp-setup.php';
         require_once ESP_PATH . 'includes/class-esp-protection-state.php';
+        require_once ESP_PATH . 'includes/class-esp-authorization-cache.php';
         require_once ESP_PATH . 'includes/class-esp-auth.php';
         require_once ESP_PATH . 'includes/class-esp-cookie.php';
         require_once ESP_PATH . 'includes/class-esp-logout.php';
