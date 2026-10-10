@@ -26,6 +26,10 @@ jobs:
         run: php tests/security-schema-test.php
       - name: Test AVIF media protection and rewrite coverage
         run: php tests/security-avif-test.php
+      - name: Test fail-closed rewrite replacement
+        run: php tests/security-rewrite-failclosed-test.php
+      - name: Test failure boot and REST gate
+        run: php tests/security-protection-state-test.php
   mysql-integration:
     runs-on: ubuntu-latest
     services:
