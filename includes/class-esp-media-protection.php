@@ -777,7 +777,7 @@ class ESP_Media_Protection {
             $relative_path
         ));
         
-        if ($wpdb->last_error !== '' || $attachment_id === null && $wpdb->last_error !== '') {
+        if ($wpdb->last_error !== '') {
             return new WP_Error('esp_attachment_lookup_failed', 'Unable to resolve media ownership');
         }
         if ($attachment_id) {
@@ -1014,6 +1014,20 @@ class ESP_Media_Protection {
             sprintf('[%s] 保護メディアファイルの設定解除', get_bloginfo('name')),
             $message
         );
+    }
+
+    /**
+     * Persistent failure notice, including failures encountered before the
+     * plugin's normal admin settings screens could be initialized.
+     */
+    public static function render_rewrite_admin_notice() {
+        $error = get_option('esp_rewrite_last_error', '');
+        if (!$error || !current_user_can('manage_options')) {
+            return;
+        }
+        echo '<div class="notice notice-error"><p>' .
+            esc_html__('Easy Slug Protect: メディア保護Rewriteの適用に失敗しました。uploads/.htaccess の状態と書込権限を確認してください。次回のアクセス時に再適用を試みます。', ESP_Config::TEXT_DOMAIN) .
+            ' (' . esc_html((string) $error) . ')</p></div>';
     }
 
     /**
