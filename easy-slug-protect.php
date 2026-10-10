@@ -75,6 +75,9 @@ class Easy_Slug_Protect {
      * プラグインの初期化
      */
     private function init() {
+        if (is_admin()) {
+            add_action('admin_notices', ['ESP_Media_Protection', 'render_rewrite_admin_notice']);
+        }
         // Fail closed before initializing frontend routes or content caches.
         $ready = ESP_Protection_State::boot($this->setup);
         if (!$ready) {
