@@ -21,6 +21,7 @@ class WP_REST_Request {
 }
 function is_admin() { return false; }
 function get_transient($key) { return null; /* Corrupt or unreadable cache. */ }
+function delete_transient($key) { return true; }
 function current_user_can($capability) { return false; }
 function is_wp_error($value) { return false; }
 function get_option($name, $default = null) {
