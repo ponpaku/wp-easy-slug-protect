@@ -125,7 +125,10 @@ class ESP_Setup {
         // .htaccessからESPルールを削除
         if (class_exists('ESP_Media_Protection')) {
             $media_protection = new ESP_Media_Protection();
-            $media_protection->update_htaccess(); // 保護メディアがない場合、ルールが削除される
+            $result = $media_protection->update_htaccess(false, true);
+            if ($result !== true) {
+                error_log('ESP: Deactivation kept media Rewrite rules to prevent direct access to protected or unknown files');
+            }
         }
 
         flush_rewrite_rules();
