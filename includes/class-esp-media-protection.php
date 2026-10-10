@@ -165,10 +165,8 @@ class ESP_Media_Protection {
         global $wpdb;
 
         $protected_paths = ESP_Option::get_current_setting('path');
-        if (empty($protected_paths)) {
-            delete_transient(self::MEDIA_CACHE_KEY);
-            return;
-        }
+        // Preserve orphaned protected IDs. A missing path definition does not
+        // make a protected attachment public.
 
         // パスIDごとのメディアIDをグループ化
         $media_by_path = [];
@@ -180,13 +178,16 @@ class ESP_Media_Protection {
             self::META_KEY_PROTECTED_PATH
         ));
         
+        if (!is_array($protected_media) || (isset($wpdb->last_error) && $wpdb->last_error !== '')) {
+            // Do not replace the last known cache with an empty one on SQL error.
+            error_log('ESP: protected media cache query failed');
+            return;
+        }
         foreach ($protected_media as $media) {
-            if (isset($protected_paths[$media->path_id])) {
-                if (!isset($media_by_path[$media->path_id])) {
-                    $media_by_path[$media->path_id] = [];
-                }
-                $media_by_path[$media->path_id][] = (int) $media->post_id;
+            if (!isset($media_by_path[$media->path_id])) {
+                $media_by_path[$media->path_id] = [];
             }
+            $media_by_path[$media->path_id][] = (int) $media->post_id;
         }
         
         set_transient(self::MEDIA_CACHE_KEY, $media_by_path, self::MEDIA_CACHE_DURATION);
@@ -220,14 +221,14 @@ class ESP_Media_Protection {
         }
         
         if (!is_array($cached_data)) {
-            return [];
+            return null; // Unknown authorization data; callers must deny.
         }
-        
+
         $excluded_ids = [];
         $protected_paths = ESP_Option::get_current_setting('path');
         
         foreach ($cached_data as $path_id => $media_ids) {
-            if (isset($protected_paths[$path_id]) && !$this->auth->is_logged_in($protected_paths[$path_id])) {
+            if (!isset($protected_paths[$path_id]) || !$this->auth->is_logged_in($protected_paths[$path_id])) {
                 $excluded_ids = array_merge($excluded_ids, $media_ids);
             }
         }
@@ -328,7 +329,11 @@ class ESP_Media_Protection {
         
         // 保護されたメディアIDを取得（キャッシュ利用）
         $excluded_media_ids = $this->get_protected_media_ids_for_current_user();
-        
+        if ($excluded_media_ids === null) {
+            $args['post__in'] = [0]; // Empty result instead of leaking all media.
+            return $args;
+        }
+
         if (!empty($excluded_media_ids)) {
             $current_excluded = isset($args['post__not_in']) ? (array) $args['post__not_in'] : [];
             $args['post__not_in'] = array_unique(array_merge($current_excluded, $excluded_media_ids));
@@ -376,7 +381,10 @@ class ESP_Media_Protection {
         
         // キャッシュから保護されたメディアIDを取得して確認
         $excluded_media_ids = $this->get_protected_media_ids_for_current_user();
-        
+        if ($excluded_media_ids === null) {
+            return new WP_REST_Response(['code' => 'esp_media_state_unknown'], 503);
+        }
+
         if (in_array($post->ID, $excluded_media_ids)) {
             // 未認証の場合はエラーレスポンスを返す
             $error_data = [
@@ -614,6 +622,11 @@ class ESP_Media_Protection {
         
         // メディアIDを取得
         $attachment_id = $this->get_attachment_id_from_path($file_path);
+        global $wpdb;
+        if (isset($wpdb->last_error) && $wpdb->last_error !== '') {
+            $this->send_403();
+            return;
+        }
         if (!$attachment_id) {
             // メディアライブラリに登録されていないファイルは通常配信
             $this->deliver_media($file_path);
@@ -622,6 +635,10 @@ class ESP_Media_Protection {
         
         // 保護設定を確認
         $protected_path_id = get_post_meta($attachment_id, self::META_KEY_PROTECTED_PATH, true);
+        if (isset($wpdb->last_error) && $wpdb->last_error !== '') {
+            $this->send_403();
+            return;
+        }
         if (empty($protected_path_id)) {
             $this->deliver_media($file_path);
             return;
@@ -630,7 +647,8 @@ class ESP_Media_Protection {
         // 保護パス設定を取得
         $protected_paths = ESP_Option::get_current_setting('path');
         if (!isset($protected_paths[$protected_path_id])) {
-            $this->deliver_media($file_path);
+            // An orphaned reference is still marked protected; never deliver.
+            $this->send_403();
             return;
         }
         
