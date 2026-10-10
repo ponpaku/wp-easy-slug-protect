@@ -1134,7 +1134,7 @@ class ESP_Media_Protection {
             if ($this->is_litespeed()) {
                 // LiteSpeed用の認証キーを必ず確保
                 $litespeed_key = $this->ensure_litespeed_key($force_litespeed_key_regeneration);
-                if (is_wp_error($litespeed_key)) {
+                if ($litespeed_key instanceof WP_Error) {
                     return $litespeed_key;
                 }
                 $escaped_key = preg_quote($litespeed_key, '/');
