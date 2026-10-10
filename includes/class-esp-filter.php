@@ -271,6 +271,10 @@ class ESP_Filter {
 
         if ($query->is_search() || $query->is_archive() || $query->is_tag() || $query->is_feed() || (function_exists('is_sitemap') && is_sitemap())) {
             $excluded_post_ids = $this->get_excluded_post_ids();
+            if ($excluded_post_ids === null) {
+                $query->set('post__in', [0]);
+                return;
+            }
             if (!empty($excluded_post_ids)) {
                 $current_excluded = $query->get('post__not_in', []);
                 if (!is_array($current_excluded)) {
@@ -307,7 +311,7 @@ class ESP_Filter {
      */
     private function filter_cached_ids($cached_data) {
         if (!is_array($cached_data)) {
-            return [];
+            return null; // Unknown authorization cache, not 'no protected posts'.
         }
 
         $result = [];
@@ -340,6 +344,10 @@ class ESP_Filter {
         }
 
         $excluded_post_ids = $this->get_excluded_post_ids();
+        if ($excluded_post_ids === null) {
+            $args['post__in'] = [0];
+            return $args;
+        }
         if (!empty($excluded_post_ids)) {
             $current_excluded     = isset($args['post__not_in']) ? (array) $args['post__not_in'] : [];
             $args['post__not_in'] = array_unique(array_merge($current_excluded, $excluded_post_ids));
@@ -358,6 +366,10 @@ class ESP_Filter {
         $args = (array) $args;
 
         $excluded_post_ids = $this->get_excluded_post_ids();
+        if ($excluded_post_ids === null) {
+            $args['post__in'] = [0];
+            return $args;
+        }
         if (!empty($excluded_post_ids)) {
             // 既存指定がある場合でも配列化して統合
             $current_excluded     = isset($args['post__not_in']) ? (array) $args['post__not_in'] : [];
@@ -378,6 +390,10 @@ class ESP_Filter {
         $args = (array) $args;
 
         $excluded_post_ids = $this->get_excluded_post_ids();
+        if ($excluded_post_ids === null) {
+            $args['include'] = [0];
+            return $args;
+        }
         // 除外対象がなければ追加処理は不要
         if (empty($excluded_post_ids)) {
             return $args;
@@ -480,6 +496,9 @@ class ESP_Filter {
         }
 
         $excluded_post_ids = $this->get_excluded_post_ids();
+        if ($excluded_post_ids === null) {
+            return new WP_REST_Response(['code' => 'esp_post_state_unknown'], 503);
+        }
         if (in_array((int) $post->ID, $excluded_post_ids, true)) {
             $error_data = [
                 'code'    => 'esp_rest_forbidden',
@@ -553,7 +572,7 @@ class ESP_Filter {
                 if (defined('WP_DEBUG') && WP_DEBUG) {
                     error_log('ESP_Filter: Memory usage high, stopping batch processing');
                 }
-                break; // 多量サイトでの安全装置
+                return; // Never cache a truncated authorization map.
             }
 
             // 投稿IDをチャンク取得
@@ -567,12 +586,19 @@ class ESP_Filter {
                 'order'          => 'ASC',
             ]);
 
+            global $wpdb;
+            if (isset($wpdb->last_error) && $wpdb->last_error !== '') {
+                return; // Query failure is not end-of-results.
+            }
             if (empty($post_ids)) {
                 break; // 末尾
             }
 
             // メタを一括取得（N+1 回避）
             $meta_data = $this->get_post_meta_batch($post_ids, ESP_Config::PERMALINK_PATH_META_KEY);
+            if ($meta_data === null) {
+                return;
+            }
 
             // 各保護パスと突き合わせ（前方一致）
             foreach ($normalized_settings as $path_id => $configured_protection_path) {
@@ -642,6 +668,9 @@ class ESP_Filter {
         );
 
         $results = $wpdb->get_results($query, ARRAY_A);
+        if (!is_array($results) || (isset($wpdb->last_error) && $wpdb->last_error !== '')) {
+            return null;
+        }
 
         $meta_data = [];
         foreach ((array) $results as $row) {
