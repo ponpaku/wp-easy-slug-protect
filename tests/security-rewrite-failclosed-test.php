@@ -66,6 +66,21 @@ check(strpos($new, 'avif') !== false, 'AVIF is covered in replacement');
 $wpdb->count = 0;
 check($media->update_htaccess() === true, 'zero protected records still install rewrite');
 check(strpos(file_get_contents($file), 'esp-media') !== false, 'zero-to-one transition already covered by rewrite');
+$wpdb->count = 1;
+$error = $media->update_htaccess(false, true);
+check($error instanceof WP_Error && $error->get_error_code() === 'esp_deactivate_protected_media',
+    'Deactivation refuses to expose existing protected media');
+check(strpos(file_get_contents($file), 'esp-media') !== false,
+    'Deactivation leaves protection in place when protected files exist');
+$wpdb->count = null;
+$wpdb->last_error = 'DB unavailable';
+$error = $media->update_htaccess(false, true);
+check($error instanceof WP_Error, 'Deactivation fails closed when media count is unknown');
+check(strpos(file_get_contents($file), 'esp-media') !== false, 'Unknown DB state never removes routing');
+$wpdb->last_error = '';
+$wpdb->count = 0;
+check($media->update_htaccess(false, true) === true, 'Deactivation can remove Rewrite after verified zero media');
+check(file_get_contents($file) === $foreign, 'No protected media leaves other rules intact on deactivation');
 $GLOBALS['enabled'] = false;
 check($media->update_htaccess() === true, 'explicitly disabled media protection removes rewrite');
 check(file_get_contents($file) === $foreign, 'only explicit disable removes ESP block');
