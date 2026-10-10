@@ -52,6 +52,8 @@ if (defined('ESP_Media_Protection::META_KEY_PROTECTED_PATH')) {
 // トランジェントの削除
 delete_transient('esp_protected_posts');
 delete_transient('esp_protected_media');
+delete_transient('esp_protected_posts_v2');
+delete_transient('esp_protected_media_v2');
 delete_transient('esp_path_index');
 
 // Cronジョブのスケジュール解除
