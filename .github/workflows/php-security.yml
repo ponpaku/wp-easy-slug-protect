@@ -34,6 +34,8 @@ jobs:
         run: php tests/security-cache-failclosed-test.php
       - name: Test authorization cache generations and empty states
         run: php tests/security-authorization-generation-test.php
+      - name: Test zero protected paths and public REST
+        run: php tests/security-zero-protected-paths-test.php
   mysql-integration:
     runs-on: ubuntu-latest
     services:
