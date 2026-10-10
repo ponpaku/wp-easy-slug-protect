@@ -128,6 +128,11 @@ class ESP_Media_Protection {
         
         // アップロード時の自動保護設定
         add_action('add_attachment', [$this, 'auto_protect_on_upload']);
+        // All writers, including third-party calls to update_post_meta(),
+        // must invalidate cached authorization after protected metadata moves.
+        add_action('added_post_meta', [$this, 'on_protection_meta_mutation'], 10, 4);
+        add_action('updated_post_meta', [$this, 'on_protection_meta_mutation'], 10, 4);
+        add_action('deleted_post_meta', [$this, 'on_protection_meta_mutation'], 10, 4);
         
         // メディアの削除時にキャッシュを更新
         add_action('delete_attachment', [$this, 'regenerate_media_cache']);
@@ -899,6 +904,16 @@ class ESP_Media_Protection {
             
             // キャッシュを再生成
             $this->regenerate_media_cache();
+        }
+    }
+
+    /**
+     * Reject any previous media authorization snapshot after a protected
+     * postmeta write, even when the writer bypasses ESP's own save method.
+     */
+    public function on_protection_meta_mutation($meta_id, $post_id, $meta_key, $meta_value) {
+        if ($meta_key === self::META_KEY_PROTECTED_PATH) {
+            ESP_Authorization_Cache::invalidate('media', self::MEDIA_CACHE_KEY);
         }
     }
 
