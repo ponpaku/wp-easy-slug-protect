@@ -30,6 +30,8 @@ jobs:
         run: php tests/security-rewrite-failclosed-test.php
       - name: Test failure boot and REST gate
         run: php tests/security-protection-state-test.php
+      - name: Test unreadable authorization caches
+        run: php tests/security-cache-failclosed-test.php
   mysql-integration:
     runs-on: ubuntu-latest
     services:
