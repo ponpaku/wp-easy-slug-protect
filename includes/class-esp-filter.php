@@ -545,6 +545,8 @@ class ESP_Filter {
             return; // 通常の Cron ではスキップ
         }
 
+        // Invalidate first: a failed rebuild must not leave stale grants.
+        delete_transient(self::CACHE_KEY);
         $protected_paths_settings = ESP_Option::get_current_setting('path');
         if (empty($protected_paths_settings) || !is_array($protected_paths_settings)) {
             delete_transient(self::CACHE_KEY); // 設定が空ならキャッシュ不要
@@ -633,8 +635,13 @@ class ESP_Filter {
             unset($post_ids, $meta_data);
         }
 
-        // 遅延メタ更新を処理
+        // Missing permalink metadata means the map is not complete yet.
+        // Repair first and require a new, complete scan before publishing.
+        $had_pending_meta = !empty($this->pending_meta_updates);
         $this->process_pending_meta_updates();
+        if ($had_pending_meta) {
+            return;
+        }
 
         // 重複除去し配列を整形
         foreach ($all_protected_posts_map as $path_id => &$ids) {
