@@ -147,24 +147,30 @@ class ESP_Media_Protection {
             return;
         }
 
-        $cached_data = get_transient(self::MEDIA_CACHE_KEY);
-        if ($cached_data === false) {
-            $this->regenerate_media_cache();
+        if (ESP_Authorization_Cache::read('media', self::MEDIA_CACHE_KEY) === null) {
+            $this->regenerate_media_cache(false);
         }
     }
 
     /**
      * 保護されたメディアのキャッシュを再生成
      */
-    public function regenerate_media_cache() {
+    public function regenerate_media_cache($invalidate = true) {
         if (!$this->enabled) {
             delete_transient(self::MEDIA_CACHE_KEY);
             return;
         }
 
         global $wpdb;
+        if ($invalidate && !ESP_Authorization_Cache::invalidate('media', self::MEDIA_CACHE_KEY)) {
+            return;
+        }
+        $snapshot = ESP_Authorization_Cache::signature('media');
+        if ($snapshot === null) {
+            delete_transient(self::MEDIA_CACHE_KEY);
+            return;
+        }
 
-        $protected_paths = ESP_Option::get_current_setting('path');
         // Preserve orphaned protected IDs. A missing path definition does not
         // make a protected attachment public.
 
@@ -192,7 +198,7 @@ class ESP_Media_Protection {
             $media_by_path[$media->path_id][] = (int) $media->post_id;
         }
         
-        set_transient(self::MEDIA_CACHE_KEY, $media_by_path, self::MEDIA_CACHE_DURATION);
+        ESP_Authorization_Cache::publish('media', self::MEDIA_CACHE_KEY, $snapshot, $media_by_path, self::MEDIA_CACHE_DURATION);
 
         // デバッグ
         // error_log(print_r($media_by_path, true));
@@ -215,11 +221,10 @@ class ESP_Media_Protection {
             return [];
         }
 
-        $cached_data = get_transient(self::MEDIA_CACHE_KEY);
-
-        if ($cached_data === false) {
-            $this->regenerate_media_cache();
-            $cached_data = get_transient(self::MEDIA_CACHE_KEY);
+        $cached_data = ESP_Authorization_Cache::read('media', self::MEDIA_CACHE_KEY);
+        if ($cached_data === null) {
+            $this->regenerate_media_cache(false);
+            $cached_data = ESP_Authorization_Cache::read('media', self::MEDIA_CACHE_KEY);
         }
         
         if (!is_array($cached_data)) {
@@ -451,10 +456,10 @@ class ESP_Media_Protection {
                 update_post_meta($post['ID'], self::META_KEY_PROTECTED_PATH, sanitize_text_field($attachment['esp_protected_path']));
             }
             
-            // キャッシュを再生成
+            // Rebuild after updating the attachment's protected metadata.
             $this->regenerate_media_cache();
         }
-        
+
         return $post;
     }
 
