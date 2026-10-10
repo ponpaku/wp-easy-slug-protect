@@ -77,10 +77,8 @@ class Easy_Slug_Protect {
         // Fail closed before initializing frontend routes or content caches.
         $ready = ESP_Protection_State::boot($this->setup);
         if (!$ready) {
-            // Retain the privileged administrative repair interface.
-            if (is_admin()) {
-                new ESP_Admin_page();
-            }
+            // Keep WordPress admin available for diagnosis, but do not load
+            // ESP settings forms that could overwrite unreadable data.
             return;
         }
 
