@@ -1099,7 +1099,17 @@ class ESP_Media_Protection {
      * @param bool $force_litespeed_key_regeneration LiteSpeedキーを再生成するかどうか
      * @return bool 成功時true
      */
-    public function update_htaccess($force_litespeed_key_regeneration = false) {
+    public function update_htaccess($force_litespeed_key_regeneration = false, $deactivating = false) {
+        if ($deactivating) {
+            // The plugin will no longer run to authorize existing protected
+            // files. Never remove the last server-level barrier unless a
+            // successful SQL query confirms there are no protected records.
+            $records = self::has_any_protected_media_records();
+            if ($records !== false) {
+                return new WP_Error('esp_deactivate_protected_media',
+                    __('保護メディアが存在するか確認できないため、サーバー保護ルールを維持します。', ESP_Config::TEXT_DOMAIN));
+            }
+        }
         if (!$this->is_apache()) {
             return $this->enabled
                 ? new WP_Error('esp_htaccess_unsupported', __('ApacheまたはLiteSpeed環境でのみ利用できます。', ESP_Config::TEXT_DOMAIN))
@@ -1126,7 +1136,7 @@ class ESP_Media_Protection {
             // Keep the rewrite installed whenever media protection is enabled,
             // including the transition from zero to one protected attachments.
             // The enabled setting is the policy; a mutable COUNT is not.
-            $route_media = self::is_media_protection_enabled();
+            $route_media = !$deactivating && self::is_media_protection_enabled();
             if (is_link($htaccess_file)) {
                 return new WP_Error('esp_htaccess_symlink', __('シンボリックリンクの保護ルールは自動置換できません。', ESP_Config::TEXT_DOMAIN));
             }
