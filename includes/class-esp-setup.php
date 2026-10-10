@@ -279,6 +279,9 @@ class ESP_Setup {
                 return false;
             }
             update_option('esp_db_version', $required_db_version);
+            if ((int) get_option('esp_db_version', 0) !== (int) $required_db_version) {
+                return false;
+            }
         }
         return true;
     }
@@ -293,7 +296,7 @@ class ESP_Setup {
         if (version_compare($current_version, ESP_VERSION, '<')) {
             // バージョンに応じた更新処理
             if (!$this->update_check()) {
-                return;
+                return false;
             }
             // AVIF対応以前のルールは .avif を捕捉しない。
             // Apache / LiteSpeed ではアップデート時に既存の保護ルールを更新する。
@@ -312,7 +315,7 @@ class ESP_Setup {
                                 . '</p></div>';
                         }
                     });
-                    return;
+                    return false;
                 }
             }
 
@@ -328,7 +331,11 @@ class ESP_Setup {
 
             // バージョン情報を更新
             update_option(ESP_Config::VERSION_OPTION_KEY, ESP_VERSION);
+            if (get_option(ESP_Config::VERSION_OPTION_KEY) !== ESP_VERSION) {
+                return false;
+            }
         }
+        return true;
     }
 
     /**
