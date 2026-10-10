@@ -291,13 +291,13 @@ class ESP_Filter {
      * @return int[]
      */
     private function get_excluded_post_ids() {
-        $cached_data = get_transient(self::CACHE_KEY);
-        if ($cached_data === false) {
+        $cached_data = ESP_Authorization_Cache::read('post', self::CACHE_KEY);
+        if ($cached_data === null) {
             if (defined('WP_DEBUG') && WP_DEBUG) {
                 error_log('ESP_Filter: Cache miss in get_excluded_post_ids. Regenerating on the fly.');
             }
-            $this->regenerate_protected_posts_cache(); // 次回以降のために構築
-            $cached_data = get_transient(self::CACHE_KEY);
+            $this->regenerate_protected_posts_cache(false);
+            $cached_data = ESP_Authorization_Cache::read('post', self::CACHE_KEY);
         }
 
         return $this->filter_cached_ids($cached_data);
@@ -525,9 +525,8 @@ class ESP_Filter {
      * - 初回アクセス時のコールドスタートを吸収
      */
     private function check_and_generate_cache() {
-        $cached_ids = get_transient(self::CACHE_KEY);
-        if ($cached_ids === false) {
-            $this->regenerate_protected_posts_cache();
+        if (ESP_Authorization_Cache::read('post', self::CACHE_KEY) === null) {
+            $this->regenerate_protected_posts_cache(false);
         }
     }
 
@@ -537,7 +536,7 @@ class ESP_Filter {
      * - メタ欠落は遅延生成キューに積む
      * - メモリ使用量を監視して安全に中断
      */
-    public function regenerate_protected_posts_cache() {
+    public function regenerate_protected_posts_cache($invalidate = true) {
         if (wp_doing_cron()
             && !defined('ESP_DOING_CRON_INTEGRITY_CHECK')
             && !defined('ESP_DOING_CRON_CACHE_REFRESH')
@@ -545,11 +544,19 @@ class ESP_Filter {
             return; // 通常の Cron ではスキップ
         }
 
-        // Invalidate first: a failed rebuild must not leave stale grants.
-        delete_transient(self::CACHE_KEY);
-        $protected_paths_settings = ESP_Option::get_current_setting('path');
-        if (empty($protected_paths_settings) || !is_array($protected_paths_settings)) {
-            delete_transient(self::CACHE_KEY); // 設定が空ならキャッシュ不要
+        if ($invalidate && !ESP_Authorization_Cache::invalidate('post', self::CACHE_KEY)) {
+            return; // Cannot establish a fresh generation.
+        }
+        $snapshot = ESP_Authorization_Cache::signature('post');
+        if ($snapshot === null) {
+            delete_transient(self::CACHE_KEY);
+            return;
+        }
+        $settings = get_option(ESP_Config::OPTION_KEY, null);
+        $protected_paths_settings = $settings['path'];
+        if (empty($protected_paths_settings)) {
+            // Empty protected paths are a VALID snapshot, not an SQL failure.
+            ESP_Authorization_Cache::publish('post', self::CACHE_KEY, $snapshot, [], self::CACHE_DURATION);
             return;
         }
 
@@ -649,7 +656,7 @@ class ESP_Filter {
         }
         unset($ids);
 
-        set_transient(self::CACHE_KEY, $all_protected_posts_map, self::CACHE_DURATION);
+        ESP_Authorization_Cache::publish('post', self::CACHE_KEY, $snapshot, $all_protected_posts_map, self::CACHE_DURATION);
     }
 
     /**
