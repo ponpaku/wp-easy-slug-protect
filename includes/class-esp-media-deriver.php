@@ -12,6 +12,7 @@ class ESP_Media_Deriver {
      * メディアファイルを配信
      *
      * @param string $file_path ファイルパス
+     * @param bool $is_protected ESP認証が必要な保護ファイルかどうか（省略時は安全側）
      * @return bool 成功時true、失敗時false
      */
     public function deliver($file_path, $is_protected = true) {
@@ -138,8 +139,8 @@ class ESP_Media_Deriver {
     }
 
     /**
-     * For all internal sendfile strategies, clear earlier headers first and
-     * then apply the protected cache policy before delegating response bytes.
+     * Webサーバーへの内部配信委譲でも、先に競合ヘッダーを消去し、
+     * 保護対象にはキャッシュ保存禁止のヘッダーを再設定してから引き渡す。
      */
     private function attempt_web_server_delivery($delivery_method, $file_path, $is_protected = true) {
         $directive = '';
@@ -287,7 +288,7 @@ class ESP_Media_Deriver {
      * @return bool 成功時true
      */
     private function deliver_with_range($file_path, $file_size, $mime_type, $range, $is_protected = true) {
-        // 416 errors must not become cacheable private-content responses.
+        // 不正なRange指定で416を返す場合も、保護画像のキャッシュを許可しない。
         $this->set_cache_headers($mime_type, $is_protected);
         // Rangeヘッダーを単位と値に分割
         list($size_unit, $range_orig) = explode('=', $range, 2);
@@ -496,10 +497,10 @@ class ESP_Media_Deriver {
     }
 
     /**
-     * Cache policy is shared by ordinary PHP, Range and delegated responses.
-     * Keep public image caching unchanged; protected files may not be stored.
+     * PHP通常配信・Range配信・Webサーバー委譲でキャッシュ方針を統一する。
+     * 公開画像の従来の長期キャッシュは維持し、保護ファイルは保存を禁止する。
      *
-     * @return string[] HTTP response header lines
+     * @return string[] 送信するHTTPレスポンスヘッダー
      */
     private function get_cache_header_lines($mime_type, $is_protected) {
         if ($is_protected) {
@@ -527,7 +528,7 @@ class ESP_Media_Deriver {
     }
 
     /**
-     * Apply headers after any earlier server-delegation header cleanup.
+     * サーバー委譲時の既存ヘッダー削除を終えてから設定する。
      */
     private function set_cache_headers($mime_type, $is_protected = true) {
         foreach ($this->get_cache_header_lines($mime_type, $is_protected) as $line) {
