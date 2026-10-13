@@ -1,5 +1,5 @@
 <?php
-/** REST/listing authorization must fail closed on unreadable caches. */
+/** REST・一覧の認可キャッシュが読めない場合、公開せず拒否することを検証する。 */
 define('ABSPATH', __DIR__ . '/');
 define('DAY_IN_SECONDS', 86400);
 define('WEEK_IN_SECONDS', 604800);
@@ -64,8 +64,8 @@ check(($args['post__in'] ?? null) === [0], 'REST media collection is empty on un
 $response = $media->check_rest_media_access(new WP_REST_Response(), (object) ['ID' => 1], $request);
 check($response->get_status() === 503, 'REST single media returns 503 on unknown cache');
 
-// A user with the WordPress upload_files capability must not bypass ESP
-// protected-path authorization for media collections or single responses.
+// WordPressのupload_files権限があるユーザーでも、メディア一覧・単体取得で
+// ESP保護パスの認証を迂回できないことを検証する。
 $GLOBALS['can_upload'] = true;
 $args = $media->filter_rest_media_query([], $request);
 check(($args['post__in'] ?? null) === [0], 'uploader cannot bypass an unknown media cache');
