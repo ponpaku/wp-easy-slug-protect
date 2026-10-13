@@ -4,6 +4,7 @@
  * handoff. These are PHP unit checks, NOT an actual CDN/LiteSpeed HTTP test.
  */
 define('ABSPATH', __DIR__ . '/');
+ob_start(); // Keep output buffered so header() smoke tests can run in CLI.
 require __DIR__ . '/../includes/class-esp-config.php';
 
 class ESP_Option {
@@ -17,6 +18,7 @@ function check_cache_policy($pass, $message) {
     if (!$pass) { fwrite(STDERR, "FAIL: $message\n"); exit(1); }
     echo "PASS: $message\n";
 }
+function sanitize_text_field($text) { return (string) $text; }
 require __DIR__ . '/../includes/class-esp-media-deriver.php';
 require __DIR__ . '/../includes/class-esp-media-protection.php';
 
@@ -99,4 +101,10 @@ check_cache_policy(
         '/uploads/protected.avif', true),
     'Nginx internal redirect can be issued with protected policy'
 );
+check_cache_policy(
+    $delegate->invoke($deriver, ['type' => 'litespeed', 'path' => '/wp-content/uploads/a.avif'],
+        '/uploads/protected.avif', true),
+    'LiteSpeed internal redirection can be issued with protected policy'
+);
 echo "All protected media cache policy tests passed.\n";
+ob_end_flush();
