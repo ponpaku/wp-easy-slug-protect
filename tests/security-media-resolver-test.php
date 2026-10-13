@@ -128,6 +128,18 @@ unset($wpdb->metadata[32]);
 
 verify_esp(ESP_Media_File_Resolver::resolve('2026/10/not-registered.jpg')['state'] === 'unresolved',
     'Unregistered media is unresolved, not public');
+$wpdb->rows[] = ['post_id' => 30, 'meta_value' => '2026/10/CASEONLY.jpg'];
+$wpdb->metadata[30] = ['file' => '2026/10/CASEONLY.jpg'];
+verify_esp(ESP_Media_File_Resolver::resolve('2026/10/caseonly.jpg')['state'] === 'unresolved',
+    'Case-sensitive path ownership does not use case-insensitive DB equality');
+array_pop($wpdb->rows);
+$wpdb->rows[] = ['post_id' => 31, 'meta_value' => '2026/10/fake.jpg'];
+$wpdb->metadata[31] = ['file' => '2026/10/other.jpg',
+    'sizes' => ['thumbnail' => ['file' => 'fake-150x150.jpg']]];
+verify_esp(ESP_Media_File_Resolver::resolve('2026/10/fake-150x150.jpg')['state'] === 'unresolved',
+    'Inconsistent attachment root metadata cannot prove derivative ownership');
+array_pop($wpdb->rows);
+
 $wpdb->rows[] = ['post_id' => 20, 'meta_value' => '2026/10/photo-150x150.jpg'];
 verify_esp(ESP_Media_File_Resolver::resolve('2026/10/photo-150x150.jpg')['state'] === 'ambiguous',
     'Derivative and independent attachment collision is ambiguous');
