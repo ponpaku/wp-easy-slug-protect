@@ -4,6 +4,7 @@
  * handoff. These are PHP unit checks, NOT an actual CDN/LiteSpeed HTTP test.
  */
 define('ABSPATH', __DIR__ . '/');
+define('WEEK_IN_SECONDS', 604800);
 ob_start(); // Keep output buffered so header() smoke tests can run in CLI.
 require __DIR__ . '/../includes/class-esp-config.php';
 
