@@ -14,7 +14,7 @@ class ESP_Media_Deriver {
      * @param string $file_path ファイルパス
      * @return bool 成功時true、失敗時false
      */
-    public function deliver($file_path) {
+    public function deliver($file_path, $is_protected = true) {
         try {
             if (!is_string($file_path) || $file_path === '') {
                 // 無効なパスは処理しない
@@ -47,7 +47,7 @@ class ESP_Media_Deriver {
 
             // Webサーバー配信が可能な場合はヘッダー委譲のみで終了
             if ($delivery_method['type'] !== 'php') {
-                if ($this->attempt_web_server_delivery($delivery_method, $file_path)) {
+                if ($this->attempt_web_server_delivery($delivery_method, $file_path, $is_protected)) {
                     exit;
                 }
             }
@@ -58,7 +58,7 @@ class ESP_Media_Deriver {
             $range = isset($_SERVER['HTTP_RANGE']) ? $_SERVER['HTTP_RANGE'] : '';
             if ($range) {
                 // Rangeヘッダーがある場合は分割配信
-                if (!$this->deliver_with_range($file_path, $file_size, $mime_type, $range)) {
+                if (!$this->deliver_with_range($file_path, $file_size, $mime_type, $range, $is_protected)) {
                     return false;
                 }
                 exit;
@@ -71,7 +71,7 @@ class ESP_Media_Deriver {
             $disposition = $this->should_inline($mime_type) ? 'inline' : 'attachment';
             header('Content-Disposition: ' . $disposition . '; filename="' . basename($file_path) . '"');
 
-            $this->set_cache_headers($mime_type);
+            $this->set_cache_headers($mime_type, $is_protected);
 
             if (!$this->readfile_chunked($file_path)) {
                 return false;
@@ -138,54 +138,43 @@ class ESP_Media_Deriver {
     }
 
     /**
-     * Webサーバーにヘッダーを引き渡して配信させる
-     *
-     * @param array{type:string,path?:string} $delivery_method 判定済みの配信方法
-     * @param string $file_path 実ファイルパス
-     * @return bool ヘッダー送信に成功したらtrue
+     * For all internal sendfile strategies, clear earlier headers first and
+     * then apply the protected cache policy before delegating response bytes.
      */
-    private function attempt_web_server_delivery($delivery_method, $file_path) {
+    private function attempt_web_server_delivery($delivery_method, $file_path, $is_protected = true) {
+        $directive = '';
         switch ($delivery_method['type']) {
             case 'apache':
-                // X-Sendfileヘッダーを付与
-                $this->clear_header();
-                header('X-Sendfile: ' . $file_path);
-                return true;
-
+                $directive = 'X-Sendfile: ' . $file_path;
+                break;
             case 'nginx':
-                if (isset($delivery_method['path'])) {
-                    // X-Accel-Redirectで内部リダイレクト
-                    $this->clear_header();
-                    header('X-Accel-Redirect: ' . $delivery_method['path']);
-                    return true;
-                }
-                return false;
-
-            case 'litespeed':
-                // LiteSpeedでは内部リダイレクト先に認証キー付きのパスを指定する
-                $access_key = $this->get_litespeed_access_key();
-                if ($access_key === '') {
-                    error_log('ESP: LiteSpeed access key unavailable. Falling back to PHP delivery.');
-                    return false;
-                }
-
                 if (!isset($delivery_method['path'])) {
-                    error_log('ESP: LiteSpeed redirect path missing. Falling back to PHP delivery.');
                     return false;
                 }
-
+                $directive = 'X-Accel-Redirect: ' . $delivery_method['path'];
+                break;
+            case 'litespeed':
+                $access_key = $this->get_litespeed_access_key();
+                if ($access_key === '' || !isset($delivery_method['path'])) {
+                    error_log('ESP: LiteSpeed delivery unavailable. Falling back to PHP.');
+                    return false;
+                }
                 $redirect_path = $this->build_litespeed_redirect_path($delivery_method['path'], $access_key);
                 if ($redirect_path === '') {
-                    error_log('ESP: LiteSpeed redirect path unavailable. Falling back to PHP delivery.');
                     return false;
                 }
-
-                $this->clear_header();
-                header('X-LiteSpeed-Location: ' . $redirect_path);
-                return true;
+                $directive = 'X-LiteSpeed-Location: ' . $redirect_path;
+                break;
+            default:
+                return false;
         }
 
-        return false;
+        $this->clear_header();
+        if ($is_protected) {
+            $this->set_cache_headers('application/octet-stream', true);
+        }
+        header($directive);
+        return true;
     }
 
     /**
@@ -208,6 +197,9 @@ class ESP_Media_Deriver {
             'Pragma',
             'Last-Modified',
             'ETag',
+            'Surrogate-Control',
+            'CDN-Cache-Control',
+            'X-LiteSpeed-Cache-Control',
         ];
 
         foreach ($headers as $header) {
@@ -294,7 +286,9 @@ class ESP_Media_Deriver {
      * @param string $range     Rangeヘッダー
      * @return bool 成功時true
      */
-    private function deliver_with_range($file_path, $file_size, $mime_type, $range) {
+    private function deliver_with_range($file_path, $file_size, $mime_type, $range, $is_protected = true) {
+        // 416 errors must not become cacheable private-content responses.
+        $this->set_cache_headers($mime_type, $is_protected);
         // Rangeヘッダーを単位と値に分割
         list($size_unit, $range_orig) = explode('=', $range, 2);
 
@@ -421,7 +415,7 @@ class ESP_Media_Deriver {
         $disposition = $this->should_inline($mime_type) ? 'inline' : 'attachment';
         header('Content-Disposition: ' . $disposition . '; filename="' . basename($file_path) . '"');
 
-        $this->set_cache_headers($mime_type);
+
 
         $fp = @fopen($file_path, 'rb');
         if ($fp === false) {
@@ -502,19 +496,42 @@ class ESP_Media_Deriver {
     }
 
     /**
-     * キャッシュヘッダーを設定
+     * Cache policy is shared by ordinary PHP, Range and delegated responses.
+     * Keep public image caching unchanged; protected files may not be stored.
      *
-     * @param string $mime_type MIMEタイプ
+     * @return string[] HTTP response header lines
      */
-    private function set_cache_headers($mime_type) {
+    private function get_cache_header_lines($mime_type, $is_protected) {
+        if ($is_protected) {
+            return [
+                'Cache-Control: private, no-store, max-age=0',
+                'Pragma: no-cache',
+                'Expires: 0',
+                'Surrogate-Control: no-store',
+                'CDN-Cache-Control: no-store',
+                'X-LiteSpeed-Cache-Control: no-cache',
+            ];
+        }
         if (strpos($mime_type, 'image/') === 0 ||
             strpos($mime_type, 'text/css') === 0 ||
             strpos($mime_type, 'application/javascript') === 0) {
-            header('Cache-Control: public, max-age=31536000');
-            header('Expires: ' . gmdate('D, d M Y H:i:s', time() + 31536000) . ' GMT');
-        } else {
-            header('Cache-Control: private, max-age=3600');
-            header('Expires: ' . gmdate('D, d M Y H:i:s', time() + 3600) . ' GMT');
+            return [
+                'Cache-Control: public, max-age=31536000',
+                'Expires: ' . gmdate('D, d M Y H:i:s', time() + 31536000) . ' GMT',
+            ];
+        }
+        return [
+            'Cache-Control: private, max-age=3600',
+            'Expires: ' . gmdate('D, d M Y H:i:s', time() + 3600) . ' GMT',
+        ];
+    }
+
+    /**
+     * Apply headers after any earlier server-delegation header cleanup.
+     */
+    private function set_cache_headers($mime_type, $is_protected = true) {
+        foreach ($this->get_cache_header_lines($mime_type, $is_protected) as $line) {
+            header($line);
         }
     }
 
