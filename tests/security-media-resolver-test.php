@@ -27,8 +27,8 @@ class ResolverTestDB {
         foreach ($this->rows as $row) {
             foreach ($allowed as $part) {
                 $prefix = substr($part, 0, -1);
-                if ($part === $row['meta_value'] ||
-                    (substr($part, -1) === '%' && strncmp($row['meta_value'], $prefix, strlen($prefix)) === 0)) {
+                if (strcasecmp($part, $row['meta_value']) === 0 ||
+                    (substr($part, -1) === '%' && strncasecmp($row['meta_value'], $prefix, strlen($prefix)) === 0)) {
                     $results[] = $row;
                     break;
                 }
@@ -111,6 +111,20 @@ mkdir($base . '/uploads-backup');
 file_put_contents($base . '/uploads-backup/photo.jpg', 'other');
 verify_esp(ESP_Media_File_Resolver::relative_from_absolute(realpath($base . '/uploads-backup/photo.jpg')) === null,
     'Sibling prefix uploads-backup is not part of uploads');
+
+$wpdb->rows[] = ['post_id' => 31, 'meta_value' => '2026/10/CASE.JPG'];
+$wpdb->metadata[31] = ['file' => '2026/10/CASE.JPG'];
+verify_esp(ESP_Media_File_Resolver::resolve('2026/10/case.jpg')['state'] === 'unresolved',
+    'Case-insensitive SQL lookup does not authorize a differently cased file');
+array_pop($wpdb->rows);
+unset($wpdb->metadata[31]);
+
+$wpdb->rows[] = ['post_id' => 32, 'meta_value' => '2026/10/photo-rotated.jpg'];
+$wpdb->metadata[32] = ['file' => '2026/10/WRONG.jpg', 'sizes' =>
+    ['thumb' => ['file' => 'photo-150x150.jpg']]];
+expect_owner('2026/10/photo-150x150.jpg', 10);
+array_pop($wpdb->rows);
+unset($wpdb->metadata[32]);
 
 verify_esp(ESP_Media_File_Resolver::resolve('2026/10/not-registered.jpg')['state'] === 'unresolved',
     'Unregistered media is unresolved, not public');
