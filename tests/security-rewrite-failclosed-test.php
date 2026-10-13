@@ -23,6 +23,9 @@ function is_wp_error($value) { return $value instanceof WP_Error; }
 function home_url($path = '') { return 'https://example.test' . $path; }
 function wp_upload_dir() { return ['basedir' => $GLOBALS['test_dir'], 'error' => '']; }
 function trailingslashit($path) { return rtrim($path, '/') . '/'; }
+function get_option($key, $default = null) { return $GLOBALS['options'][$key] ?? $default; }
+function update_option($key, $value, $autoload = null) { $GLOBALS['options'][$key] = $value; return true; }
+function delete_option($key) { unset($GLOBALS['options'][$key]); return true; }
 function check($ok, $description) {
     if (!$ok) { fwrite(STDERR, "FAIL: $description\n"); exit(1); }
     echo "PASS: $description\n";
@@ -87,6 +90,18 @@ check(file_get_contents($file) === $foreign, 'only explicit disable removes ESP 
 check($matchesPolicy->invoke(null, true) === false, 'removed rule cannot pass enabled policy');
 check($matchesPolicy->invoke(null, false) === true, 'explicitly disabled policy matches no rule');
 check($media->update_htaccess() === true, 'disabled rewrite update is idempotent');
+
+// A disabled, already-unrouted site must not need write permissions merely
+// because the new policy-version option has not been initialized.
+@unlink($file . '.esp.lock');
+unset($GLOBALS['options']['esp_rewrite_policy_version']);
+chmod($GLOBALS['test_dir'], 0555);
+check(ESP_Media_Protection::ensure_rewrite_policy() === true,
+    'disabled site remains ready when a correct Rewrite state is read-only');
+check(get_option('esp_rewrite_policy_version') === 'always-route-v2:off',
+    'correct on-disk state synchronizes the policy marker');
+check(!file_exists($file . '.esp.lock'), 'no lock file is opened for a no-op policy');
+chmod($GLOBALS['test_dir'], 0700);
 
 @unlink($file);
 @unlink($file . '.esp.lock');
