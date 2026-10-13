@@ -12,6 +12,10 @@ if (!defined('ABSPATH')) {
  */
 final class ESP_Media_File_Resolver {
     private const MAX_CANDIDATES = 64;
+    // At most 5 stems (initial + 4 suffix removals) x 10 extensions
+    // x 3 filename variants = 150. Keep every candidate so an exact
+    // attachment cannot escape the collision checks or fail prematurely.
+    private const MAX_PATH_CANDIDATES = 160;
     private const PARENT_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'bmp', 'heic', 'heif', 'pdf'];
 
     public static function validate_request_path($requested) {
@@ -38,7 +42,7 @@ final class ESP_Media_File_Resolver {
             strncmp($absolute, $root . DIRECTORY_SEPARATOR, strlen($root) + 1) !== 0) {
             return null;
         }
-        return ['absolute' => $absolute, 'relative' => substr($absolute, strlen($root) + 1)];
+        return ['absolute' => $absolute, 'relative' => self::storage_relative_path(substr($absolute, strlen($root) + 1))];
     }
 
     public static function relative_from_absolute($absolute) {
@@ -52,8 +56,16 @@ final class ESP_Media_File_Resolver {
             return null;
         }
         $relative = substr($absolute, strlen($root) + 1);
-        $validated = self::validate_request_path(str_replace(DIRECTORY_SEPARATOR, '/', $relative));
+        $validated = self::validate_request_path(self::storage_relative_path($relative));
         return $validated && $validated['absolute'] === $absolute ? $validated['relative'] : null;
+    }
+
+    /**
+     * Disk paths follow the host OS; attachment metadata always uses '/'.
+     * Call only after canonical path confinement has been validated.
+     */
+    private static function storage_relative_path($path) {
+        return str_replace('\\', '/', $path);
     }
 
     private static function valid_relative($path) {
@@ -98,7 +110,7 @@ final class ESP_Media_File_Resolver {
                 $paths[$prefix . $part . '.' . $ext] = true;
                 $paths[$prefix . $part . '-scaled.' . $ext] = true;
                 $paths[$prefix . $part . '-rotated.' . $ext] = true;
-                if (count($paths) > 120) {
+                if (count($paths) > self::MAX_PATH_CANDIDATES) {
                     return [[], []];
                 }
             }
@@ -150,7 +162,7 @@ final class ESP_Media_File_Resolver {
             return ['state' => 'error'];
         }
         [$paths, $prefixes] = self::candidates($relative);
-        if (!$paths || count($paths) > 120) {
+        if (!$paths || count($paths) > self::MAX_PATH_CANDIDATES) {
             return ['state' => 'error'];
         }
         global $wpdb;
