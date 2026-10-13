@@ -612,12 +612,13 @@ class ESP_Media_Protection {
             return;
         }
         
-        // ファイルパスの検証とサニタイズ
-        $file_path = $this->validate_file_path($requested_file);
-        if (!$file_path) {
+        // Resolve the canonical uploads path once for both lookup and delivery.
+        $verified = ESP_Media_File_Resolver::validate_request_path($requested_file);
+        if ($verified === null) {
             $this->send_404();
             return;
         }
+        $file_path = $verified['absolute'];
 
         // 管理画面またはアップロード権限者はスキップ
         if (is_admin() || current_user_can('upload_files')) {
@@ -632,46 +633,32 @@ class ESP_Media_Protection {
             return;
         }
         
-        // メディアIDを取得
-        $attachment_id = $this->get_attachment_id_from_path($file_path);
+        // A missing or ambiguous owner is not proof that a file is public.
+        $resolution = ESP_Media_File_Resolver::resolve($verified['relative']);
+        if ($resolution['state'] !== 'resolved') {
+            $this->send_403();
+            return;
+        }
+
         global $wpdb;
-        if ($attachment_id instanceof WP_Error || (isset($wpdb->last_error) && $wpdb->last_error !== '')) {
+        $protected_path_id = get_post_meta($resolution['attachment_id'], self::META_KEY_PROTECTED_PATH, true);
+        if (($wpdb->last_error ?? '') !== '') {
             $this->send_403();
             return;
         }
-        if (!$attachment_id) {
-            // メディアライブラリに登録されていないファイルは通常配信
-            $this->deliver_media($file_path);
-            return;
-        }
-        
-        // 保護設定を確認
-        $protected_path_id = get_post_meta($attachment_id, self::META_KEY_PROTECTED_PATH, true);
-        if (isset($wpdb->last_error) && $wpdb->last_error !== '') {
+        $settings = get_option(ESP_Config::OPTION_KEY, null);
+        $protected_paths = is_array($settings) ? ($settings['path'] ?? null) : null;
+        $decision = ESP_Media_Access_Policy::decide($resolution, $protected_path_id, $protected_paths);
+        if ($decision['action'] === 'deny') {
             $this->send_403();
             return;
         }
-        if (empty($protected_path_id)) {
-            $this->deliver_media($file_path);
+        if ($decision['action'] === 'authenticate' &&
+            !$this->auth->is_logged_in($decision['settings'])) {
+            $this->redirect_to_login($decision['settings'], $requested_file);
             return;
         }
-        
-        // 保護パス設定を取得
-        $protected_paths = ESP_Option::get_current_setting('path');
-        if (!isset($protected_paths[$protected_path_id])) {
-            // An orphaned reference is still marked protected; never deliver.
-            $this->send_403();
-            return;
-        }
-        
-        $path_settings = $protected_paths[$protected_path_id];
-        
-        // 認証チェック
-        if (!$this->auth->is_logged_in($path_settings)) {
-            $this->redirect_to_login($path_settings, $requested_file);
-            return;
-        }
-        
+
         // 認証済みの場合はファイルを配信
         $this->deliver_media($file_path);
     }
@@ -691,151 +678,6 @@ class ESP_Media_Protection {
 
             $this->send_404();
         }
-    }
-
-    /**
-    * ファイルパスの検証とサニタイズ
-    *
-    * @param string $requested_file リクエストされたファイルパス
-    * @return string|false 検証済みのファイルパス、無効な場合はfalse
-    */
-    private function validate_file_path($requested_file) {
-        // nullバイト攻撃対策
-        $requested_file = str_replace("\0", '', $requested_file);
-        
-        // URLエンコードされた文字をデコード（複数回）
-        $max_decode = 3;
-        for ($i = 0; $i < $max_decode; $i++) {
-            $decoded = rawurldecode($requested_file);
-            if ($decoded === $requested_file) break;
-            $requested_file = $decoded;
-        }
-        
-        // ディレクトリトラバーサル対策（強化版）
-        // 様々なパターンの相対パス指定を除去
-        $patterns = [
-            '#(\.\.+[/\\\\])#',           // ../ または ..\
-            '#([/\\\\]\.\.+)#',           // /.. または \..
-            '#(\.\.+)#',                  // 連続した..
-            '#^[/\\\\]+#',                // 先頭のスラッシュ
-            '#[/\\\\]+$#',                // 末尾のスラッシュ
-            '#[/\\\\]{2,}#'               // 連続したスラッシュ
-        ];
-        
-        foreach ($patterns as $pattern) {
-            $requested_file = preg_replace($pattern, '', $requested_file);
-        }
-        
-        // 空文字になった場合は無効
-        if (empty($requested_file)) {
-            return false;
-        }
-        
-        // 安全なパス構築
-        $upload_dir = wp_upload_dir();
-        $base_path = realpath($upload_dir['basedir']);
-        
-        if ($base_path === false) {
-            return false;
-        }
-        
-        // ファイルパスを構築
-        $file_path = $base_path . DIRECTORY_SEPARATOR . $requested_file;
-        $file_path = realpath($file_path);
-        
-        // realpathが失敗した場合
-        if ($file_path === false) {
-            return false;
-        }
-        
-        // ベースディレクトリ外へのアクセスを防ぐ
-        if (strpos($file_path, $base_path) !== 0) {
-            return false;
-        }
-        
-        // ファイルが存在し、通常ファイルであることを確認
-        if (!file_exists($file_path) || !is_file($file_path) || is_link($file_path)) {
-            return false;
-        }
-        
-        return $file_path;
-    }
-
-    /**
-     * ファイルパスから添付ファイルIDを取得
-     *
-     * @param string $file_path ファイルパス
-     * @return int|false 添付ファイルID、見つからない場合はfalse
-     */
-    private function get_attachment_id_from_path($file_path) {
-        global $wpdb;
-        
-        $upload_dir = wp_upload_dir();
-        $relative_path = str_replace($upload_dir['basedir'] . '/', '', $file_path);
-        
-        // メタデータから検索
-        $attachment_id = $wpdb->get_var($wpdb->prepare(
-            "SELECT post_id FROM {$wpdb->postmeta} 
-            WHERE meta_key = '_wp_attached_file' 
-            AND meta_value = %s 
-            LIMIT 1",
-            $relative_path
-        ));
-        
-        if (($wpdb->last_error ?? '') !== '') {
-            return new WP_Error('esp_attachment_lookup_failed', 'Unable to resolve media ownership');
-        }
-        if ($attachment_id) {
-            return (int) $attachment_id;
-        }
-
-        // AVIFサムネイルは _wp_attached_file に登録されない場合がある。
-        // 親画像の候補を同じディレクトリから探し、メタデータに記録された
-        // サムネイル名と一致した場合だけ保護設定を継承する。
-        if (strtolower(pathinfo($relative_path, PATHINFO_EXTENSION)) !== 'avif') {
-            return false;
-        }
-
-        $thumbnail_name = basename($relative_path);
-        if (!preg_match('/^(.+)-[0-9]+x[0-9]+\\.avif$/i', $thumbnail_name, $matches)) {
-            return false;
-        }
-
-        $directory = dirname($relative_path);
-        $parent_prefix = ($directory === '.' ? '' : $directory . '/') . $matches[1];
-        $parent_extensions = ['avif', 'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'heic', 'heif'];
-        $candidates = [];
-        foreach ($parent_extensions as $extension) {
-            $candidates[] = $parent_prefix . '.' . $extension;
-        }
-
-        $placeholders = implode(', ', array_fill(0, count($candidates), '%s'));
-        $candidate_ids = $wpdb->get_col($wpdb->prepare(
-            "SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = %s AND meta_value IN ({$placeholders})",
-            array_merge(['_wp_attached_file'], $candidates)
-        ));
-
-        if (!is_array($candidate_ids) || ($wpdb->last_error ?? '') !== '') {
-            return new WP_Error('esp_attachment_candidate_lookup_failed', 'Unable to resolve image derivatives');
-        }
-        foreach ($candidate_ids as $candidate_id) {
-            $metadata = wp_get_attachment_metadata((int) $candidate_id);
-            if (($wpdb->last_error ?? '') !== '') {
-                return new WP_Error('esp_attachment_metadata_failed', 'Unable to resolve image metadata');
-            }
-            if (!is_array($metadata) || !isset($metadata['file'], $metadata['sizes']) ||
-                !is_array($metadata['sizes']) || dirname($metadata['file']) !== $directory) {
-                continue;
-            }
-
-            foreach ($metadata['sizes'] as $size) {
-                if (is_array($size) && isset($size['file']) && $size['file'] === $thumbnail_name) {
-                    return (int) $candidate_id;
-                }
-            }
-        }
-
-        return false;
     }
 
     /**
