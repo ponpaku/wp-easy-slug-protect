@@ -944,10 +944,13 @@ class ESP_Media_Protection {
         if ($end === false) {
             return false;
         }
-        $block = substr($contents, $start, $end - $start);
-        return strpos($block, 'RewriteRule') !== false &&
-            strpos($block, 'esp-media=') !== false &&
-            strpos($block, 'avif') !== false;
+        $block = substr($contents, $start, $end - $start + strlen('# END ESP Media Protection'));
+        $media = new self();
+        $expected = $media->get_htaccess_rules(false, true);
+        if (is_wp_error($expected)) {
+            return false;
+        }
+        return rtrim($block, "\r\n") === rtrim($expected, "\r\n");
     }
 
     /**
