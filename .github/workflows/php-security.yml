@@ -26,6 +26,8 @@ jobs:
         run: php tests/security-schema-test.php
       - name: Test AVIF media protection and rewrite coverage
         run: php tests/security-avif-test.php
+      - name: Test protected media cache policy across delivery strategies
+        run: php tests/security-media-cache-policy-test.php
       - name: Test canonical media ownership resolver and authorization
         run: php tests/security-media-resolver-test.php
       - name: Test fail-closed rewrite replacement
