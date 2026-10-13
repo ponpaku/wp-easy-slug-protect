@@ -945,7 +945,9 @@ class ESP_Media_Protection {
             return false;
         }
         $block = substr($contents, $start, $end - $start + strlen('# END ESP Media Protection'));
-        $media = new self();
+        // Pure rules comparison; avoid initializing cache and request hooks
+        // while validating the on-disk policy on every request.
+        $media = (new \ReflectionClass(self::class))->newInstanceWithoutConstructor();
         $expected = $media->get_htaccess_rules(false, true);
         if (is_wp_error($expected)) {
             return false;
