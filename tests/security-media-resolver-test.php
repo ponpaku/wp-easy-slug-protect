@@ -92,6 +92,27 @@ expect_owner('2026/10/book-pdf.jpg', 12);
 expect_owner('2026/10/edited-e1234567890-200x100.jpg', 13);
 expect_owner('2026/10/camera.jpg', 14);
 
+// Four suffixes create five candidate stems. A valid exact attachment must
+// not be rejected before SQL merely because 120 candidate paths were made.
+$complex = '2026/10/photo-rotated-scaled-e1234567890-150x150.jpg';
+$wpdb->rows[] = ['post_id' => 70, 'meta_value' => $complex];
+$wpdb->metadata[70] = ['file' => $complex];
+expect_owner($complex, 70);
+// An exact attachment and another attachment's derivative of the same path
+// are ambiguous; do not shortcut authorisation on the first exact row.
+$wpdb->rows[] = ['post_id' => 71, 'meta_value' => '2026/10/photo.jpg'];
+$wpdb->metadata[71] = ['file' => '2026/10/photo.jpg',
+    'sizes' => ['complex' => ['file' => basename($complex)]]];
+verify_esp(ESP_Media_File_Resolver::resolve($complex)['state'] === 'ambiguous',
+    'Complex filename retains exact-vs-derivative collision detection');
+array_pop($wpdb->rows);
+array_pop($wpdb->rows);
+unset($wpdb->metadata[70], $wpdb->metadata[71]);
+
+$normalizer = new ReflectionMethod('ESP_Media_File_Resolver', 'storage_relative_path');
+verify_esp($normalizer->invoke(null, '2026\\10\\photo-150x150.jpg') ===
+    '2026/10/photo-150x150.jpg',
+    'Windows realpath separators normalize to WordPress uploads metadata paths');
 $good = ESP_Media_File_Resolver::validate_request_path('2026/10/photo-150x150.jpg');
 verify_esp($good !== null && $good['relative'] === '2026/10/photo-150x150.jpg' &&
     $good['absolute'] === realpath($base . '/actual/2026/10/photo-150x150.jpg'),
