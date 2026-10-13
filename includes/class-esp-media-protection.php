@@ -660,17 +660,19 @@ class ESP_Media_Protection {
             return;
         }
 
-        // 認証済みの場合はファイルを配信
-        $this->deliver_media($file_path);
+        // Only this branch has passed an ESP protected-path decision.
+        // Public attachments keep their existing cache policy.
+        $this->deliver_media($file_path, $decision['action'] === 'authenticate');
     }
 
     /**
      * メディアファイルを配信（失敗時は404）
      *
      * @param string $file_path ファイルパス
+     * @param bool $is_protected True only after protected-path authentication
      */
-    private function deliver_media($file_path) {
-        if (!$this->deriver->deliver($file_path)) {
+    private function deliver_media($file_path, $is_protected = false) {
+        if (!$this->deriver->deliver($file_path, $is_protected)) {
             $status_code = function_exists('http_response_code') ? http_response_code() : null;
 
             if (416 === $status_code) {
