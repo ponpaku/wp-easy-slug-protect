@@ -41,6 +41,11 @@ class ESP_Filter {
         add_action('delete_post', [$this, 'handle_delete_post']);
         add_action('trash_post',  [$this, 'regenerate_protected_posts_cache']);
         add_action('untrash_post',[$this, 'regenerate_protected_posts_cache']);
+        // Third-party direct updates must invalidate generation-tagged
+        // authorization caches even when save_post is not executed.
+        add_action('added_post_meta', [$this, 'on_permalink_meta_mutation'], 10, 4);
+        add_action('updated_post_meta', [$this, 'on_permalink_meta_mutation'], 10, 4);
+        add_action('deleted_post_meta', [$this, 'on_permalink_meta_mutation'], 10, 4);
 
         // 設定変更に追随
         add_action('update_option_' . ESP_Config::OPTION_KEY, [$this, 'regenerate_protected_posts_cache']);
@@ -82,6 +87,16 @@ class ESP_Filter {
         }
 
         $this->regenerate_protected_posts_cache(); // 全体の整合性を確保
+    }
+
+    /**
+     * Invalidation only: the next read performs a full scan once. Rebuilding
+     * from every metadata hook would recursively trigger repeated scans.
+     */
+    public function on_permalink_meta_mutation($meta_id, $post_id, $meta_key, $meta_value) {
+        if ($meta_key === ESP_Config::PERMALINK_PATH_META_KEY) {
+            ESP_Authorization_Cache::invalidate('post', self::CACHE_KEY);
+        }
     }
 
     /**
