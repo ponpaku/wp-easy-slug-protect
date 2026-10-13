@@ -4,19 +4,17 @@ if (!defined('ABSPATH')) {
 }
 
 /**
- * Separate file ownership from authorization.
+ * ファイルの添付ID判定とアクセス許可の判断を分離する。
  *
- * A file that cannot be associated with a unique attachment is NOT the
- * same thing as an attachment explicitly confirmed to be public.
+ * 添付IDを一意に特定できないファイルは、公開と確認できた添付ファイルとは異なる。
  */
 final class ESP_Media_Access_Policy {
     public static function decide($resolution, $protected_path_id, $paths, $verified_zero_media = false) {
         if (!is_array($resolution) || !isset($resolution['state'])) {
             return ['action' => 'deny'];
         }
-        // A site with verified zero protected records has no ESP media
-        // memberships to leak. Preserve ordinary unmanaged uploads there.
-        // This is NOT a default allow for unknown ownership on protected sites.
+        // DBで保護対象0件と確認できた場合だけ、管理外ファイルの通常配信を維持する。
+        // 保護対象があるサイトで所有者不明を許可する一般ルールではない。
         if ($resolution['state'] === 'unresolved' && $verified_zero_media === true &&
             is_array($paths)) {
             return ['action' => 'allow'];
