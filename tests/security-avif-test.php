@@ -83,6 +83,6 @@ $inline = $deriver->getMethod('should_inline');
 $inline->setAccessible(true);
 check_avif($inline->invoke($deriver->newInstanceWithoutConstructor(), 'image/avif'), 'PHP media delivery displays AVIF inline');
 
-// Ownership resolution, including converted AVIF thumbnails, is now tested
-// in security-media-resolver-test.php against the shared Resolver contract.
+// 変換AVIFサムネイルを含む添付ID判定は、Resolver共通仕様に基づき
+// security-media-resolver-test.phpで検証する。
 echo "All AVIF format/Rewrite checks passed.\n";
