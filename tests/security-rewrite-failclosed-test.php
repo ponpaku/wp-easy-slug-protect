@@ -69,6 +69,19 @@ check(strpos($new, 'avif') !== false, 'AVIF is covered in replacement');
 $wpdb->count = 0;
 check($media->update_htaccess() === true, 'zero protected records still install rewrite');
 check(strpos(file_get_contents($file), 'esp-media') !== false, 'zero-to-one transition already covered by rewrite');
+
+// The version marker might be absent after a deployment. Existing correct
+// rules must be accepted without opening a writer lock.
+@unlink($file . '.esp.lock');
+unset($GLOBALS['options']['esp_rewrite_policy_version']);
+chmod($GLOBALS['test_dir'], 0555);
+check(ESP_Media_Protection::ensure_rewrite_policy() === true,
+    'enabled site with correct Rewrite remains ready in a read-only directory');
+check(get_option('esp_rewrite_policy_version') === 'always-route-v2:on',
+    'enabled on-disk policy synchronizes an absent version marker');
+check(!file_exists($file . '.esp.lock'), 'enabled no-op policy never opens a writer lock');
+chmod($GLOBALS['test_dir'], 0700);
+
 $wpdb->count = 1;
 $error = $media->update_htaccess(false, true);
 check($error instanceof WP_Error && $error->get_error_code() === 'esp_deactivate_protected_media',
