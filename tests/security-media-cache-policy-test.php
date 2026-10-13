@@ -1,7 +1,7 @@
 <?php
 /**
- * Regression for protected-media cache policy and explicit authorization
- * handoff. These are PHP unit checks, NOT an actual CDN/LiteSpeed HTTP test.
+ * 保護メディアのキャッシュ方針と認証結果の引き渡しを検証する回帰テスト。
+ * PHP単体テストであり、CDN・LiteSpeedの実HTTP検証には代わらない。
  */
 define('ABSPATH', __DIR__ . '/');
 define('WEEK_IN_SECONDS', 604800);
@@ -54,8 +54,8 @@ check_cache_policy(
     'Unprotected non-image delivery retains its previous cache policy'
 );
 
-// The helper must be called with an explicit decision by Media Protection.
-// If omitted by a legacy direct caller, Deriver defaults to private.
+// Media Protectionからは保護・公開の判定を明示して引き渡す。
+// 古い呼び出し元が省略した場合、Deriver側は安全側の非キャッシュ配信とする。
 check_cache_policy(
     $deriverClass->getMethod('deliver')->getParameters()[1]->getDefaultValue() === true,
     'Bare Deriver calls default to protected private delivery'
@@ -85,14 +85,14 @@ check_cache_policy(
     'Media Protection preserves public/private classification for Deriver'
 );
 
-// Internal sendfile strategies must be able to use the shared policy. The
-// actual web server may overwrite headers; manual HTTP testing remains a gate.
+// X-Sendfile等の内部配信も共通のキャッシュ方針を適用できることを確認する。
+// 実サーバーがヘッダーを上書きする可能性はあるため、実HTTP検証は別途必要。
 $delegate = $deriverClass->getMethod('attempt_web_server_delivery');
 check_cache_policy($delegate->getNumberOfParameters() === 3,
     'Internal delivery passes a protected flag through the delegate boundary');
 
-// CLI cannot inspect outgoing headers; smoke-test the Apache and Nginx paths
-// without emitting response bytes or relying on server modules.
+// CLIでは最終HTTPヘッダーを検査できないため、実Webサーバーに依存せず、
+// Apache・Nginx等への委譲経路を呼び出せることだけ確認する。
 check_cache_policy(
     $delegate->invoke($deriver, ['type' => 'apache'], '/uploads/protected.avif', true),
     'Apache sendfile directive can be issued with protected policy'
