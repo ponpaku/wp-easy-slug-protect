@@ -620,12 +620,10 @@ class ESP_Media_Protection {
         }
         $file_path = $verified['absolute'];
 
-        // 管理画面またはアップロード権限者はスキップ
-        if (is_admin() || current_user_can('upload_files')) {
-            $this->deliver_media($file_path);
-            return;
-        }
-        
+        // WordPress upload capability does not grant access to a separately
+        // ESP-protected attachment. Ownership and path authentication apply
+        // to all media requests, including logged-in uploaders.
+
         // ファイル拡張子の確認
         $extension = strtolower(pathinfo($file_path, PATHINFO_EXTENSION));
         if (!in_array($extension, self::PROTECTED_EXTENSIONS, true)) {
