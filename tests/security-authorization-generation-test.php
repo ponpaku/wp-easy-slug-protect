@@ -5,6 +5,7 @@ require __DIR__ . '/../includes/class-esp-config.php';
 define('WEEK_IN_SECONDS', 604800);
 require __DIR__ . '/../includes/class-esp-authorization-cache.php';
 require __DIR__ . '/../includes/class-esp-media-protection.php';
+require __DIR__ . '/../includes/class-esp-filter.php';
 $GLOBALS['options'] = [
     ESP_Config::OPTION_KEY => ['path' => [], 'media' => ['enabled' => true]],
 ];
@@ -50,6 +51,17 @@ check_auth(ESP_Authorization_Cache::read('media', 'media-cache') === ['one' => [
 $media->on_protection_meta_mutation(9, 42, ESP_Media_Protection::META_KEY_PROTECTED_PATH, 'one');
 check_auth(ESP_Authorization_Cache::read('media', 'media-cache') === null,
     'External protected-media meta mutation invalidates cached authorization');
+
+$filter = (new ReflectionClass('ESP_Filter'))->newInstanceWithoutConstructor();
+$postSignature = ESP_Authorization_Cache::signature('post');
+check_auth(ESP_Authorization_Cache::publish('post', 'post-cache', $postSignature, ['one' => [42]], 60),
+    'Post authorization snapshot is current');
+$filter->on_permalink_meta_mutation(1, 42, '_unrelated', 'x');
+check_auth(ESP_Authorization_Cache::read('post', 'post-cache') === ['one' => [42]],
+    'Unrelated postmeta does not invalidate post authorization');
+$filter->on_permalink_meta_mutation(1, 42, ESP_Config::PERMALINK_PATH_META_KEY, '/members/new');
+check_auth(ESP_Authorization_Cache::read('post', 'post-cache') === null,
+    'Direct permalink metadata mutation invalidates post authorization');
 
 unset($GLOBALS['options'][ESP_Config::OPTION_KEY]['path']);
 check_auth(ESP_Authorization_Cache::signature('post') === null, 'missing path settings remain an error');
