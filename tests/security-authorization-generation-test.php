@@ -1,5 +1,5 @@
 <?php
-/** Authorization cache contract: known-empty, settings change, stale writer. */
+/** 認可キャッシュの回帰テスト：確認済み空状態・設定更新・旧世代の書き戻し。 */
 define('ABSPATH', __DIR__ . '/');
 require __DIR__ . '/../includes/class-esp-config.php';
 define('DAY_IN_SECONDS', 86400);
