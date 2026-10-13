@@ -619,7 +619,7 @@ class ESP_Media_Protection {
         // ファイル拡張子の確認
         $extension = strtolower(pathinfo($file_path, PATHINFO_EXTENSION));
         if (!in_array($extension, self::PROTECTED_EXTENSIONS, true)) {
-            $this->deliver_media($file_path);
+            $this->deliver_media($file_path, false);
             return;
         }
         
@@ -636,7 +636,7 @@ class ESP_Media_Protection {
                 $resolution, '', $protected_paths, $empty_site
             );
             if ($unknown['action'] === 'allow') {
-                $this->deliver_media($file_path);
+                $this->deliver_media($file_path, false);
                 return;
             }
             $this->send_403();
@@ -671,7 +671,7 @@ class ESP_Media_Protection {
      * @param string $file_path ファイルパス
      * @param bool $is_protected True only after protected-path authentication
      */
-    private function deliver_media($file_path, $is_protected = false) {
+    private function deliver_media($file_path, $is_protected) {
         if (!$this->deriver->deliver($file_path, $is_protected)) {
             $status_code = function_exists('http_response_code') ? http_response_code() : null;
 
