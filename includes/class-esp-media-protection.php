@@ -128,8 +128,8 @@ class ESP_Media_Protection {
         
         // アップロード時の自動保護設定
         add_action('add_attachment', [$this, 'auto_protect_on_upload']);
-        // All writers, including third-party calls to update_post_meta(),
-        // must invalidate cached authorization after protected metadata moves.
+        // 他プラグインによるupdate_post_meta()を含め、保護情報の更新時には
+        // 認可キャッシュを必ず無効化する。
         add_action('added_post_meta', [$this, 'on_protection_meta_mutation'], 10, 4);
         add_action('updated_post_meta', [$this, 'on_protection_meta_mutation'], 10, 4);
         add_action('deleted_post_meta', [$this, 'on_protection_meta_mutation'], 10, 4);
@@ -176,8 +176,8 @@ class ESP_Media_Protection {
             return;
         }
 
-        // Preserve orphaned protected IDs. A missing path definition does not
-        // make a protected attachment public.
+        // 設定側に対応する保護パスがなくても、保護済み添付IDは保持する。
+        // パス設定の欠損を公開扱いに変換しない。
 
         // パスIDごとのメディアIDをグループ化
         $media_by_path = [];
@@ -190,8 +190,8 @@ class ESP_Media_Protection {
         ));
         
         if (!is_array($protected_media) || (isset($wpdb->last_error) && $wpdb->last_error !== '')) {
-            // Last-known caches may omit newly protected media; invalidate
-            // them so REST consumers deny instead of using stale grants.
+            // 古いキャッシュには追加直後の保護画像が含まれない可能性がある。
+            // REST側が古い許可情報を使わないよう無効化する。
             delete_transient(self::MEDIA_CACHE_KEY);
             error_log('ESP: protected media cache query failed');
             return;
@@ -334,7 +334,7 @@ class ESP_Media_Protection {
             return $args;
         }
         
-        // Upload capability is not ESP protected-path authorization.
+        // WordPressのupload_files権限だけではESPの保護パス認証を通過できない。
         // 保護されたメディアIDを取得（キャッシュ利用）
         $excluded_media_ids = $this->get_protected_media_ids_for_current_user();
         if ($excluded_media_ids === null) {
@@ -382,7 +382,7 @@ class ESP_Media_Protection {
             return $response;
         }
         
-        // Upload capability is not ESP protected-path authorization.
+        // WordPressのupload_files権限だけではESPの保護パス認証を通過できない。
         // キャッシュから保護されたメディアIDを取得して確認
         $excluded_media_ids = $this->get_protected_media_ids_for_current_user();
         if ($excluded_media_ids === null) {
@@ -453,7 +453,7 @@ class ESP_Media_Protection {
                 update_post_meta($post['ID'], self::META_KEY_PROTECTED_PATH, sanitize_text_field($attachment['esp_protected_path']));
             }
             
-            // Rebuild after updating the attachment's protected metadata.
+            // 添付ファイルの保護メタデータを更新してからキャッシュを再構築する。
             $this->regenerate_media_cache();
         }
 
@@ -604,7 +604,7 @@ class ESP_Media_Protection {
             return;
         }
         
-        // Resolve the canonical uploads path once for both lookup and delivery.
+        // 帰属判定と配信で同じ検証済みuploadsパスを使う。
         $verified = ESP_Media_File_Resolver::validate_request_path($requested_file);
         if ($verified === null) {
             $this->send_404();
@@ -612,9 +612,8 @@ class ESP_Media_Protection {
         }
         $file_path = $verified['absolute'];
 
-        // WordPress upload capability does not grant access to a separately
-        // ESP-protected attachment. Ownership and path authentication apply
-        // to all media requests, including logged-in uploaders.
+        // upload_files権限があってもESP保護画像には自動でアクセスを許可しない。
+        // ログイン済みの投稿者も、帰属判定と保護パス認証を必ず通す。
 
         // ファイル拡張子の確認
         $extension = strtolower(pathinfo($file_path, PATHINFO_EXTENSION));
@@ -623,13 +622,13 @@ class ESP_Media_Protection {
             return;
         }
         
-        // A missing or ambiguous owner is not proof that a file is public.
+        // 添付IDを特定できない、または候補が競合することは公開の証明にならない。
         $resolution = ESP_Media_File_Resolver::resolve($verified['relative']);
         $settings = get_option(ESP_Config::OPTION_KEY, null);
         $protected_paths = is_array($settings) ? ($settings['path'] ?? null) : null;
         if ($resolution['state'] !== 'resolved') {
-            // Only a VERIFIED zero-record site may serve unregistered files.
-            // Any protected record, ambiguous ownership, or DB failure denies.
+            // 保護画像が0件とDBで確認できたサイトだけ、未登録ファイルを通常配信する。
+            // 保護画像の存在・帰属の競合・DBエラー時は拒否する。
             $empty_site = $resolution['state'] === 'unresolved' &&
                 self::has_any_protected_media_records() === false;
             $unknown = ESP_Media_Access_Policy::decide(
@@ -660,8 +659,8 @@ class ESP_Media_Protection {
             return;
         }
 
-        // Only this branch has passed an ESP protected-path decision.
-        // Public attachments keep their existing cache policy.
+        // この経路では保護パス認証の要否が確定している。
+        // 公開画像には従来のキャッシュ設定を維持する。
         $this->deliver_media($file_path, $decision['action'] === 'authenticate');
     }
 
@@ -669,7 +668,7 @@ class ESP_Media_Protection {
      * メディアファイルを配信（失敗時は404）
      *
      * @param string $file_path ファイルパス
-     * @param bool $is_protected True only after protected-path authentication
+     * @param bool $is_protected ESPの保護パス認証を通過した画像だけtrue
      */
     private function deliver_media($file_path, $is_protected) {
         if (!$this->deriver->deliver($file_path, $is_protected)) {
@@ -753,8 +752,8 @@ class ESP_Media_Protection {
     }
 
     /**
-     * Reject any previous media authorization snapshot after a protected
-     * postmeta write, even when the writer bypasses ESP's own save method.
+     * ESP自身の保存処理を経由しないpostmeta更新でも、
+     * 古いメディア認可キャッシュを無効化する。
      */
     public function on_protection_meta_mutation($meta_id, $post_id, $meta_key, $meta_value) {
         if ($meta_key === self::META_KEY_PROTECTED_PATH) {
@@ -877,8 +876,8 @@ class ESP_Media_Protection {
     }
 
     /**
-     * Persistent failure notice, including failures encountered before the
-     * plugin's normal admin settings screens could be initialized.
+     * ESPの設定画面を初期化できない段階の失敗も含め、
+     * 管理者向けの警告を継続して表示する。
      */
     public static function render_rewrite_admin_notice() {
         $error = get_option('esp_rewrite_last_error', '');
@@ -891,9 +890,8 @@ class ESP_Media_Protection {
     }
 
     /**
-     * Reconcile old installations on their first request after this safety
-     * change, even if the historical plugin version number is unchanged.
-     * A zero-to-one transition must never depend on a delayed settings save.
+     * バージョン番号が変わらなくても、既存環境では初回アクセス時にルールを検証する。
+     * 保護画像が0件から1件になる際、設定保存の遅延に依存させない。
      */
     public static function ensure_rewrite_policy() {
         if (!preg_match('/apache|litespeed/i', $_SERVER['SERVER_SOFTWARE'] ?? '')) {
@@ -901,9 +899,8 @@ class ESP_Media_Protection {
         }
         $enabled = self::is_media_protection_enabled();
         $policy = 'always-route-v2:' . ($enabled ? 'on' : 'off');
-        // The installed rules are authoritative; a version flag is only
-        // bookkeeping. Never try to create a lock file when the current
-        // on-disk state already satisfies the policy (e.g. media disabled).
+        // .htaccessの実際の内容を正とし、バージョン印は管理用の目安とする。
+        // 保護無効など、実ファイルが既に正しければロック作成を試みない。
         if (self::rewrite_file_matches_policy($enabled)) {
             if (get_option('esp_rewrite_policy_version', '') !== $policy) {
                 update_option('esp_rewrite_policy_version', $policy, false);
@@ -924,8 +921,8 @@ class ESP_Media_Protection {
     }
 
     /**
-     * Check the installed on-disk policy, not just its cached version flag.
-     * This cannot replace a real server-level HTTP test of Rewrite.
+     * キャッシュ上のバージョン印だけでなく、配置済みルールの内容を検証する。
+     * 実際のWebサーバーでのRewrite動作検証に代わるものではない。
      */
     private static function rewrite_file_matches_policy($enabled) {
         $dir = wp_upload_dir();
@@ -952,8 +949,8 @@ class ESP_Media_Protection {
             return false;
         }
         $block = substr($contents, $start, $end - $start + strlen('# END ESP Media Protection'));
-        // Pure rules comparison; avoid initializing cache and request hooks
-        // while validating the on-disk policy on every request.
+        // リクエストごとのルール照合では、キャッシュや各種フックを初期化しない。
+        // .htaccessの内容を比較する処理だけを実行する。
         $media = (new \ReflectionClass(self::class))->newInstanceWithoutConstructor();
         $expected = $media->get_htaccess_rules(false, true);
         if (is_wp_error($expected)) {
@@ -970,9 +967,9 @@ class ESP_Media_Protection {
      */
     public function update_htaccess($force_litespeed_key_regeneration = false, $deactivating = false) {
         if ($deactivating) {
-            // The plugin will no longer run to authorize existing protected
-            // files. Never remove the last server-level barrier unless a
-            // successful SQL query confirms there are no protected records.
+            // プラグイン停止後は既存の保護画像を認証できなくなる。
+            // DB照会で保護対象0件を確認できない限り、Webサーバー側の
+            // 最後の保護ルールを削除しない。
             $records = self::has_any_protected_media_records();
             if ($records !== false) {
                 return new WP_Error('esp_deactivate_protected_media',
@@ -1002,9 +999,8 @@ class ESP_Media_Protection {
             if (!@flock($lock, LOCK_EX | LOCK_NB)) {
                 return new WP_Error('esp_htaccess_locked', __('別の保護ルール更新が進行中です。', ESP_Config::TEXT_DOMAIN));
             }
-            // Keep the rewrite installed whenever media protection is enabled,
-            // including the transition from zero to one protected attachments.
-            // The enabled setting is the policy; a mutable COUNT is not.
+            // 保護設定が有効なら、対象画像が0件から1件になる場合もRewriteを維持する。
+            // DBの件数ではなく、保護の有効設定に従ってルールを決める。
             $route_media = !$deactivating && self::is_media_protection_enabled();
             if (is_link($htaccess_file)) {
                 return new WP_Error('esp_htaccess_symlink', __('シンボリックリンクの保護ルールは自動置換できません。', ESP_Config::TEXT_DOMAIN));
@@ -1015,8 +1011,8 @@ class ESP_Media_Protection {
                 return new WP_Error('esp_htaccess_read_failed', __('既存の.htaccessを読み取れません。', ESP_Config::TEXT_DOMAIN));
             }
 
-            // Keep all unrelated rules byte-for-byte; never remove a block
-            // unless its replacement (or an explicitly disabled policy) is known.
+            // ESP以外のルールはバイト単位で維持し、置換内容が確定しないまま
+            // 既存のESPブロックを削除しない。
             $without_esp = preg_replace('/# BEGIN ESP Media Protection.*?# END ESP Media Protection[^\r\n]*(?:\r?\n)?/s', '', $old);
             if ($without_esp === null) {
                 return new WP_Error('esp_htaccess_parse_failed', __('保護ルールを解析できません。', ESP_Config::TEXT_DOMAIN));
@@ -1030,8 +1026,8 @@ class ESP_Media_Protection {
                 return true;
             }
 
-            // A single write to the live .htaccess could leave it truncated.
-            // Create and verify a same-directory file, then replace atomically.
+            // 実運用中の.htaccessへ直接書き込むと途中で破損するおそれがある。
+            // 同じディレクトリに一時ファイルを作成・検証してから置換する。
             $temp = @tempnam($upload_dir['basedir'], '.esp-');
             if (!$temp || dirname($temp) !== rtrim($upload_dir['basedir'], '/\\')) {
                 return new WP_Error('esp_htaccess_temp_failed', __('保護ルールの一時ファイルを作成できません。', ESP_Config::TEXT_DOMAIN));
@@ -1053,7 +1049,7 @@ class ESP_Media_Protection {
                 return new WP_Error('esp_htaccess_write_failed', __('保護ルールの一時ファイル書込・検証に失敗しました。', ESP_Config::TEXT_DOMAIN));
             }
 
-            // Catch external editors which do not participate in our lock.
+            // ESPのロックを使わない外部変更との競合も検出する。
             if ($exists !== file_exists($htaccess_file) ||
                 ($exists && @file_get_contents($htaccess_file) !== $old)) {
                 return new WP_Error('esp_htaccess_changed', __('更新中に.htaccessが変更されたため、置換しませんでした。', ESP_Config::TEXT_DOMAIN));
