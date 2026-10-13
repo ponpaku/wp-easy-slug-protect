@@ -148,6 +148,15 @@ $wpdb->fail = true;
 verify_esp(ESP_Media_File_Resolver::resolve('2026/10/photo-150x150.jpg')['state'] === 'error',
     'DB failure returns error rather than unresolved');
 $wpdb->fail = false;
+// Bounded candidate queries must never authorize from a truncated search.
+for ($i = 0; $i < 65; $i++) {
+    $wpdb->rows[] = ['post_id' => 500 + $i,
+        'meta_value' => '2026/10/crowd-e' . sprintf('%010d', $i) . '.jpg'];
+}
+verify_esp(ESP_Media_File_Resolver::resolve('2026/10/crowd-e1234567890-150x150.jpg')['state'] === 'error',
+    'Candidate result overflow denies rather than trusting a partial scan');
+$wpdb->rows = array_slice($wpdb->rows, 0, -65);
+
 verify_esp(ESP_Media_Access_Policy::decide(['state'=>'unresolved'], '', [])['action'] === 'deny',
     'Unknown ownership is denied');
 verify_esp(ESP_Media_Access_Policy::decide(['state'=>'unresolved'], '', [], true)['action'] === 'allow',
