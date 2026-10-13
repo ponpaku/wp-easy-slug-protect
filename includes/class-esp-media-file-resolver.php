@@ -187,28 +187,29 @@ final class ESP_Media_File_Resolver {
                 return ['state' => 'error'];
             }
             $id = (int) $row['post_id'];
-            if ($id <= 0 || isset($checked[$id])) {
-                continue;
-            }
-            $checked[$id] = true;
-            $exact = $row['meta_value'] === $relative;
-            // Unfiltered metadata: do not allow a plugin to inject an
-            // apparent owner via wp_get_attachment_metadata filters.
-            $metadata = wp_get_attachment_metadata($id, true);
-            if (($wpdb->last_error ?? '') !== '') {
+            if ($id <= 0) {
                 return ['state' => 'error'];
             }
-            // A derivative is owned only when the attachment's current
-            // metadata also agrees with its _wp_attached_file root. Never
-            // trust unrelated or stale metadata as authorization evidence.
-            $consistent = is_array($metadata) &&
-                isset($metadata['file']) &&
-                $metadata['file'] === $row['meta_value'];
-            if ($exact || ($consistent && self::matches_metadata($metadata, $relative))) {
+            $exact = $row['meta_value'] === $relative;
+            if ($exact) {
                 $found[$id] = true;
-                if (count($found) > 1) {
-                    return ['state' => 'ambiguous'];
+            } elseif (!isset($checked[$id])) {
+                $checked[$id] = true;
+                // The row and current unfiltered metadata must agree before
+                // a derivative filename can be attributed to the attachment.
+                $metadata = wp_get_attachment_metadata($id, true);
+                if (($wpdb->last_error ?? '') !== '') {
+                    return ['state' => 'error'];
                 }
+                $consistent = is_array($metadata) &&
+                    isset($metadata['file']) &&
+                    $metadata['file'] === $row['meta_value'];
+                if ($consistent && self::matches_metadata($metadata, $relative)) {
+                    $found[$id] = true;
+                }
+            }
+            if (count($found) > 1) {
+                return ['state' => 'ambiguous'];
             }
         }
         return $found
