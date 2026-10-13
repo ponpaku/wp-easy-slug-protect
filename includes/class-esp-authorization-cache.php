@@ -4,12 +4,11 @@ if (!defined('ABSPATH')) {
 }
 
 /**
- * Versioned authorization snapshots. Missing data and a verified empty
- * snapshot are deliberately different states.
+ * 世代付きの認可スナップショットを管理する。
+ * キャッシュ未取得と、保護対象が0件だと確認済みの状態は区別する。
  *
- * A writer can finish after an invalidation, but a reader will never accept
- * an old snapshot because both the settings fingerprint and mutation epoch
- * must match the current state.
+ * 無効化より後に旧世代の書き込みが完了しても、設定の指紋と更新世代が
+ * 現在値に一致しない限り、そのスナップショットは採用しない。
  */
 final class ESP_Authorization_Cache {
     public static function signature($scope) {
@@ -51,14 +50,14 @@ final class ESP_Authorization_Cache {
         if (!set_transient($key, ['signature' => $expected, 'value' => $value], $ttl)) {
             return false;
         }
-        // Detect a mutation which committed during transient publication.
-        // Readers independently enforce the same fingerprint.
+        // 一時キャッシュの保存中に保護設定が変更されていないか再確認する。
+        // 読み取り側でも同じ指紋を照合し、古いキャッシュの採用を防ぐ。
         return self::signature($scope) === $expected;
     }
 
     public static function invalidate($scope, $key) {
-        // Mutations must publish a new epoch BEFORE starting a rebuild.
-        // Readers reject stale data even if an old producer writes last.
+        // 再構築を始める前に更新世代を進め、旧キャッシュを先に無効化する。
+        // 旧世代の再構築が最後に完了しても、読み取り側で破棄する。
         $epoch = bin2hex(random_bytes(16));
         if (!update_option('esp_' . $scope . '_auth_epoch', $epoch, false) &&
             get_option('esp_' . $scope . '_auth_epoch', null) !== $epoch) {
