@@ -1,5 +1,5 @@
 <?php
-/** WordPress-free but filesystem-backed ownership and policy regression tests. */
+/** WordPressを起動せず、実ファイルを使って帰属判定と認可方針を検証する。 */
 define('ABSPATH', __DIR__ . '/');
 define('ARRAY_A', 'ARRAY_A');
 require __DIR__ . '/../includes/class-esp-config.php';
@@ -92,14 +92,14 @@ expect_owner('2026/10/book-pdf.jpg', 12);
 expect_owner('2026/10/edited-e1234567890-200x100.jpg', 13);
 expect_owner('2026/10/camera.jpg', 14);
 
-// Four suffixes create five candidate stems. A valid exact attachment must
-// not be rejected before SQL merely because 120 candidate paths were made.
+// 接尾辞を4回除去すると最大5種類の名前になる。120候補に達しても、
+// 正確な添付ファイルがSQL検索より前に拒否されないことを検証する。
 $complex = '2026/10/photo-rotated-scaled-e1234567890-150x150.jpg';
 $wpdb->rows[] = ['post_id' => 70, 'meta_value' => $complex];
 $wpdb->metadata[70] = ['file' => $complex];
 expect_owner($complex, 70);
-// An exact attachment and another attachment's derivative of the same path
-// are ambiguous; do not shortcut authorisation on the first exact row.
+// 同じパスが別の添付画像の派生ファイルにも一致する場合は帰属が競合する。
+// 最初の完全一致だけで認可を確定しないことを検証する。
 $wpdb->rows[] = ['post_id' => 71, 'meta_value' => '2026/10/photo.jpg'];
 $wpdb->metadata[71] = ['file' => '2026/10/photo.jpg',
     'sizes' => ['complex' => ['file' => basename($complex)]]];
@@ -169,7 +169,7 @@ $wpdb->fail = true;
 verify_esp(ESP_Media_File_Resolver::resolve('2026/10/photo-150x150.jpg')['state'] === 'error',
     'DB failure returns error rather than unresolved');
 $wpdb->fail = false;
-// Bounded candidate queries must never authorize from a truncated search.
+// 候補数制限で検索が途中で打ち切られた場合、誤って許可しないことを検証する。
 for ($i = 0; $i < 65; $i++) {
     $wpdb->rows[] = ['post_id' => 500 + $i,
         'meta_value' => '2026/10/crowd-e' . sprintf('%010d', $i) . '.jpg'];
