@@ -124,6 +124,12 @@ verify_esp(ESP_Media_File_Resolver::resolve('2026/10/photo-150x150.jpg')['state'
 $wpdb->fail = false;
 verify_esp(ESP_Media_Access_Policy::decide(['state'=>'unresolved'], '', [])['action'] === 'deny',
     'Unknown ownership is denied');
+verify_esp(ESP_Media_Access_Policy::decide(['state'=>'unresolved'], '', [], true)['action'] === 'allow',
+    'Only verified zero-protection sites retain unmanaged public media');
+verify_esp(ESP_Media_Access_Policy::decide(['state'=>'ambiguous'], '', [], true)['action'] === 'deny',
+    'Ownership collision is denied even on a site with no protected records');
+verify_esp(ESP_Media_Access_Policy::decide(['state'=>'error'], '', [], true)['action'] === 'deny',
+    'DB error is denied even with zero-protection compatibility permission');
 verify_esp(ESP_Media_Access_Policy::decide(['state'=>'ambiguous'], '', [])['action'] === 'deny',
     'Ambiguous ownership is denied');
 $resolved = ESP_Media_File_Resolver::resolve('2026/10/photo-150x150.jpg');
