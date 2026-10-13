@@ -1,5 +1,5 @@
 <?php
-/** End-to-end PHP-level regression: no protected paths is a normal state. */
+/** 保護パス0件も正常状態として扱うPHPレベルの回帰テスト。 */
 define('ABSPATH', __DIR__ . '/');
 define('DAY_IN_SECONDS', 86400);
 define('REST_REQUEST', true);
