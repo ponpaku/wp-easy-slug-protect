@@ -2,6 +2,7 @@
 /** Authorization cache contract: known-empty, settings change, stale writer. */
 define('ABSPATH', __DIR__ . '/');
 require __DIR__ . '/../includes/class-esp-config.php';
+define('DAY_IN_SECONDS', 86400);
 define('WEEK_IN_SECONDS', 604800);
 require __DIR__ . '/../includes/class-esp-authorization-cache.php';
 require __DIR__ . '/../includes/class-esp-media-protection.php';
