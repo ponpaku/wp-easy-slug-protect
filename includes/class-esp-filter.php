@@ -85,8 +85,8 @@ class ESP_Filter {
     }
 
     /**
-     * Invalidation only: the next read performs a full scan once. Rebuilding
-     * from every metadata hook would recursively trigger repeated scans.
+     * メタデータ更新時は無効化のみ行い、次の読み取りで全件再構築する。
+     * 更新フック内で再構築すると、再帰的な走査を繰り返すため。
      */
     public static function on_permalink_meta_mutation($meta_id, $post_id, $meta_key, $meta_value) {
         if ($meta_key === ESP_Config::PERMALINK_PATH_META_KEY) {
@@ -565,7 +565,7 @@ class ESP_Filter {
         $settings = get_option(ESP_Config::OPTION_KEY, null);
         $protected_paths_settings = $settings['path'];
         if (empty($protected_paths_settings)) {
-            // Empty protected paths are a VALID snapshot, not an SQL failure.
+            // 保護対象0件も正常な確認結果であり、SQLエラーとは区別する。
             ESP_Authorization_Cache::publish('post', self::CACHE_KEY, $snapshot, [], self::CACHE_DURATION);
             return;
         }
@@ -652,8 +652,8 @@ class ESP_Filter {
             unset($post_ids, $meta_data);
         }
 
-        // Missing permalink metadata means the map is not complete yet.
-        // Repair first and require a new, complete scan before publishing.
+        // パーマリンクのメタデータが欠けている場合、対応表は未完成とみなす。
+        // 先に不足分を修復し、全件再走査が成功してから公開する。
         $had_pending_meta = !empty($this->pending_meta_updates);
         $this->process_pending_meta_updates();
         if ($had_pending_meta) {
