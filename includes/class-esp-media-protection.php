@@ -334,11 +334,7 @@ class ESP_Media_Protection {
             return $args;
         }
         
-        // 管理者権限がある場合はスキップ
-        if (current_user_can('upload_files')) {
-            return $args;
-        }
-        
+        // Upload capability is not ESP protected-path authorization.
         // 保護されたメディアIDを取得（キャッシュ利用）
         $excluded_media_ids = $this->get_protected_media_ids_for_current_user();
         if ($excluded_media_ids === null) {
@@ -386,11 +382,7 @@ class ESP_Media_Protection {
             return $response;
         }
         
-        // 管理者権限がある場合はスキップ
-        if (current_user_can('upload_files')) {
-            return $response;
-        }
-        
+        // Upload capability is not ESP protected-path authorization.
         // キャッシュから保護されたメディアIDを取得して確認
         $excluded_media_ids = $this->get_protected_media_ids_for_current_user();
         if ($excluded_media_ids === null) {
@@ -907,10 +899,14 @@ class ESP_Media_Protection {
         }
         $enabled = self::is_media_protection_enabled();
         $policy = 'always-route-v2:' . ($enabled ? 'on' : 'off');
-        // A saved version flag is not evidence that an external editor has
-        // left uploads/.htaccess intact. Check the actual file too.
-        if (get_option('esp_rewrite_policy_version', '') === $policy &&
-            self::rewrite_file_matches_policy($enabled)) {
+        // The installed rules are authoritative; a version flag is only
+        // bookkeeping. Never try to create a lock file when the current
+        // on-disk state already satisfies the policy (e.g. media disabled).
+        if (self::rewrite_file_matches_policy($enabled)) {
+            if (get_option('esp_rewrite_policy_version', '') !== $policy) {
+                update_option('esp_rewrite_policy_version', $policy, false);
+            }
+            delete_option('esp_rewrite_last_error');
             return true;
         }
         $media = new self();
