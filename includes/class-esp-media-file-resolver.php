@@ -4,17 +4,17 @@ if (!defined('ABSPATH')) {
 }
 
 /**
- * WordPress uploads file ownership. No authorization decisions live here.
- * Failures and ambiguous matches must never be mistaken for public files.
+ * uploads内の実ファイルをWordPressの添付ファイルIDへ対応付ける。
+ * このクラスではアクセス許可を判断しない。
+ * 照合失敗や複数候補の一致を、公開ファイルと誤判定しない。
  *
- * Candidate bounds protect against an unexpectedly large or corrupt metadata
- * set; this is not a full-directory or full-attachment scan.
+ * 候補数に上限を設け、異常なメタデータで検索が膨らむのを防ぐ。
+ * ディレクトリや全添付ファイルを総当たりする処理ではない。
  */
 final class ESP_Media_File_Resolver {
     private const MAX_CANDIDATES = 64;
-    // At most 5 stems (initial + 4 suffix removals) x 10 extensions
-    // x 3 filename variants = 150. Keep every candidate so an exact
-    // attachment cannot escape the collision checks or fail prematurely.
+    // 最大5種類の名前（元名＋接尾辞の除去4回）×拡張子10種×表記3種＝150候補。
+    // 正確な一致を除外したり、競合確認より先に失敗したりしない上限にする。
     private const MAX_PATH_CANDIDATES = 160;
     private const PARENT_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'bmp', 'heic', 'heif', 'pdf'];
 
@@ -28,8 +28,8 @@ final class ESP_Media_File_Resolver {
             return null;
         }
         $root = rtrim($root, '/\\');
-        // The uploads root itself may be a symlink. Reject nested symlinks:
-        // realpath() alone would conceal their presence.
+        // uploadsのルート自体はシンボリックリンクを許容するが、内部のリンクは拒否する。
+        // realpath()だけでは途中のリンクを見落とすため。
         $cursor = $root;
         foreach (explode('/', $requested) as $component) {
             $cursor .= DIRECTORY_SEPARATOR . $component;
@@ -61,8 +61,8 @@ final class ESP_Media_File_Resolver {
     }
 
     /**
-     * Disk paths follow the host OS; attachment metadata always uses '/'.
-     * Call only after canonical path confinement has been validated.
+     * ディスク上のパス区切りはOS依存だが、添付メタデータは「/」で統一する。
+     * 実パスがuploads配下だと検証した後にのみ呼び出す。
      */
     private static function storage_relative_path($path) {
         return str_replace('\\', '/', $path);
@@ -93,8 +93,8 @@ final class ESP_Media_File_Resolver {
             return [[$relative], []];
         }
         $stems = [$stem => true];
-        // Remove recognized suffixes only; names nominate candidates but
-        // cannot prove ownership without metadata comparison.
+        // 既知の接尾辞だけを除去する。ファイル名は候補の抽出に用いるが、
+        // 帰属は添付メタデータとの照合が成立して初めて確定する。
         for ($round = 0; $round < 4; $round++) {
             foreach (array_keys($stems) as $part) {
                 $short = preg_replace('/(?:-[0-9]{1,5}x[0-9]{1,5}|-scaled|-rotated|-e[0-9]{8,14}|-pdf|-preview)$/i', '', $part);
@@ -114,8 +114,8 @@ final class ESP_Media_File_Resolver {
                     return [[], []];
                 }
             }
-            // Edited originals may carry unknown -e1234567890 suffixes.
-            // Bounded LIKE results are verified against attachment metadata.
+            // 編集後の元画像には「-e1234567890」のような接尾辞が付くことがある。
+            // LIKE検索の候補も、件数を制限したうえで添付メタデータと照合する。
             $like[] = $prefix . $part . '-e';
         }
         return [array_keys($paths), array_slice(array_unique($like), 0, 8)];
@@ -155,7 +155,8 @@ final class ESP_Media_File_Resolver {
 
     /**
      * @return array{state:string,attachment_id?:int}
-     * States: resolved, unresolved, ambiguous, error.
+     * 状態：resolved（一意に解決）/ unresolved（該当なし）/
+     * ambiguous（複数候補）/ error（照合エラー）。
      */
     public static function resolve($relative) {
         if (!self::valid_relative($relative)) {
@@ -207,8 +208,8 @@ final class ESP_Media_File_Resolver {
                 $found[$id] = true;
             } elseif (!isset($checked[$id])) {
                 $checked[$id] = true;
-                // The row and current unfiltered metadata must agree before
-                // a derivative filename can be attributed to the attachment.
+                // DBの候補行と現在の添付メタデータが一致した場合に限り、
+                // 派生ファイルをその添付IDへ帰属させる。
                 $metadata = wp_get_attachment_metadata($id, true);
                 if (($wpdb->last_error ?? '') !== '') {
                     return ['state' => 'error'];
