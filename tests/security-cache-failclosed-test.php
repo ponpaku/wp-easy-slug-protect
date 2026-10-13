@@ -20,9 +20,9 @@ class WP_REST_Request {
     public function get_method() { return 'GET'; }
 }
 function is_admin() { return false; }
-function get_transient($key) { return null; /* Corrupt or unreadable cache. */ }
+function get_transient($key) { return $GLOBALS['transients'][$key] ?? null; /* Initially unreadable. */ }
 function delete_transient($key) { return true; }
-function current_user_can($capability) { return false; }
+function current_user_can($capability) { return !empty($GLOBALS['can_upload']) && $capability === 'upload_files'; }
 function is_wp_error($value) { return false; }
 function get_option($name, $default = null) {
     if ($name === ESP_Config::OPTION_KEY) {
@@ -63,4 +63,26 @@ $args = $media->filter_rest_media_query([], $request);
 check(($args['post__in'] ?? null) === [0], 'REST media collection is empty on unknown cache');
 $response = $media->check_rest_media_access(new WP_REST_Response(), (object) ['ID' => 1], $request);
 check($response->get_status() === 503, 'REST single media returns 503 on unknown cache');
+
+// A user with the WordPress upload_files capability must not bypass ESP
+// protected-path authorization for media collections or single responses.
+$GLOBALS['can_upload'] = true;
+$args = $media->filter_rest_media_query([], $request);
+check(($args['post__in'] ?? null) === [0], 'uploader cannot bypass an unknown media cache');
+$response = $media->check_rest_media_access(new WP_REST_Response(), (object) ['ID' => 11], $request);
+check($response->get_status() === 503, 'uploader still receives 503 on unknown authorization state');
+
+$authProperty = (new ReflectionClass('ESP_Media_Protection'))->getProperty('auth');
+$authProperty->setValue($media, new class {
+    public function is_logged_in($path) { return false; }
+});
+$GLOBALS['transients'][ESP_Media_Protection::MEDIA_CACHE_KEY] = [
+    'signature' => ESP_Authorization_Cache::signature('media'),
+    'value' => ['path_test' => [11]],
+];
+$args = $media->filter_rest_media_query([], $request);
+check(($args['post__not_in'] ?? null) === [11], 'uploader collection excludes media protected by ESP');
+$response = $media->check_rest_media_access(new WP_REST_Response(), (object) ['ID' => 11], $request);
+check($response->get_status() === 403, 'uploader single media requires ESP path authorization');
+
 echo "All cache fail-closed tests passed.\n";
