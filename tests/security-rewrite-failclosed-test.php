@@ -1,5 +1,5 @@
 <?php
-/** Isolated .htaccess failure and atomic replacement tests. */
+/** .htaccessの更新失敗時の拒否と、安全な置換処理を検証する単体テスト。 */
 define('ABSPATH', __DIR__ . '/');
 define('WEEK_IN_SECONDS', 604800);
 require __DIR__ . '/../includes/class-esp-config.php';
@@ -70,8 +70,8 @@ $wpdb->count = 0;
 check($media->update_htaccess() === true, 'zero protected records still install rewrite');
 check(strpos(file_get_contents($file), 'esp-media') !== false, 'zero-to-one transition already covered by rewrite');
 
-// The version marker might be absent after a deployment. Existing correct
-// rules must be accepted without opening a writer lock.
+// デプロイ後にバージョン印がなくても、既存ルールが正しければ
+// 書き込みロックを作らず、そのまま利用できることを検証する。
 @unlink($file . '.esp.lock');
 unset($GLOBALS['options']['esp_rewrite_policy_version']);
 chmod($GLOBALS['test_dir'], 0555);
@@ -104,8 +104,8 @@ check($matchesPolicy->invoke(null, true) === false, 'removed rule cannot pass en
 check($matchesPolicy->invoke(null, false) === true, 'explicitly disabled policy matches no rule');
 check($media->update_htaccess() === true, 'disabled rewrite update is idempotent');
 
-// A disabled, already-unrouted site must not need write permissions merely
-// because the new policy-version option has not been initialized.
+// 保護無効かつRewrite未設定のサイトでは、バージョン印が未初期化でも
+// .htaccessへの書き込み権限を要求しないことを検証する。
 @unlink($file . '.esp.lock');
 unset($GLOBALS['options']['esp_rewrite_policy_version']);
 chmod($GLOBALS['test_dir'], 0555);
