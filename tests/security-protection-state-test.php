@@ -1,5 +1,5 @@
 <?php
-/** Isolated authorization boot failure tests. */
+/** 起動時の保護状態が不明な場合に、安全側で拒否する単体テスト。 */
 define('ABSPATH', __DIR__ . '/');
 require __DIR__ . '/../includes/class-esp-config.php';
 class TestSetup {
