@@ -83,25 +83,6 @@ $inline = $deriver->getMethod('should_inline');
 $inline->setAccessible(true);
 check_avif($inline->invoke($deriver->newInstanceWithoutConstructor(), 'image/avif'), 'PHP media delivery displays AVIF inline');
 
-$lookup = $media_class->getMethod('get_attachment_id_from_path');
-$lookup->setAccessible(true);
-$wpdb->rows = [123 => '2026/10/photo.avif', 456 => '2026/10/other.jpg'];
-$wpdb->metadata = [
-    123 => ['file' => '2026/10/photo.avif', 'sizes' => ['thumbnail' => ['file' => 'photo-150x150.avif']]],
-    456 => ['file' => '2026/10/other.jpg', 'sizes' => ['thumbnail' => ['file' => 'other-150x150.avif']]],
-];
-$base = '/var/www/wp-content/uploads/';
-check_avif($lookup->invoke($media, $base . '2026/10/photo.avif') === 123, 'AVIF original resolves to attachment');
-check_avif($lookup->invoke($media, $base . '2026/10/photo-150x150.avif') === 123, 'AVIF thumbnail resolves to protected parent');
-check_avif($lookup->invoke($media, $base . '2026/10/other-150x150.avif') === 456, 'Converted AVIF thumbnail resolves to original JPEG parent');
-check_avif($lookup->invoke($media, $base . '2026/10/photo-320x240.avif') === false, 'Unregistered AVIF thumbnail is not attributed to unrelated media');
-check_avif($lookup->invoke($media, $base . '2026/11/photo-150x150.avif') === false, 'AVIF thumbnail cannot cross upload directories');
-check_avif($lookup->invoke($media, $base . '2026/10/nonexistent.avif') === false, 'Unregistered AVIF remains unprotected');
-
-$wpdb->fail_primary = true;
-$result = $lookup->invoke($media, $base . '2026/10/photo-150x150.avif');
-check_avif($result instanceof WP_Error && $result->code === 'esp_attachment_lookup_failed', 'Primary SQL error is not confused with an absent attachment');
-check_avif($lookup->invoke($media, $base . '2026/10/photo-150x150.avif') === 123, 'Normal lookup recovers after SQL failure');
-$wpdb->fail_candidates = true;
-$result = $lookup->invoke($media, $base . '2026/10/other-150x150.avif');
-check_avif($result instanceof WP_Error && $result->code === 'esp_attachment_candidate_lookup_failed', 'Candidate SQL error is not confused with a missing derivative');
+// Ownership resolution, including converted AVIF thumbnails, is now tested
+// in security-media-resolver-test.php against the shared Resolver contract.
+echo "All AVIF format/Rewrite checks passed.\n";
