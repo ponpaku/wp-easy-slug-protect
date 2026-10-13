@@ -65,8 +65,6 @@ class Easy_Slug_Protect {
         require_once ESP_PATH . 'includes/class-esp-media-deriver.php';
         require_once ESP_PATH . 'includes/class-esp-media-file-resolver.php';
         require_once ESP_PATH . 'includes/class-esp-media-access-policy.php';
-        require_once ESP_PATH . 'includes/class-esp-media-file-resolver.php';
-        require_once ESP_PATH . 'includes/class-esp-media-access-policy.php';
         require_once ESP_PATH . 'includes/class-esp-media-protection.php';
 
         // 管理画面クラスの読み込み
@@ -79,6 +77,11 @@ class Easy_Slug_Protect {
      * プラグインの初期化
      */
     private function init() {
+        // Register postmeta invalidation in both admin and public requests.
+        // ESP_Filter::init() is frontend-only and too late for some writers.
+        foreach (['added_post_meta', 'updated_post_meta', 'deleted_post_meta'] as $hook) {
+            add_action($hook, ['ESP_Filter', 'on_permalink_meta_mutation'], 10, 4);
+        }
         if (is_admin()) {
             add_action('admin_notices', ['ESP_Media_Protection', 'render_rewrite_admin_notice']);
         }
