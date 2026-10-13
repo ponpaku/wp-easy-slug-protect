@@ -635,7 +635,20 @@ class ESP_Media_Protection {
         
         // A missing or ambiguous owner is not proof that a file is public.
         $resolution = ESP_Media_File_Resolver::resolve($verified['relative']);
+        $settings = get_option(ESP_Config::OPTION_KEY, null);
+        $protected_paths = is_array($settings) ? ($settings['path'] ?? null) : null;
         if ($resolution['state'] !== 'resolved') {
+            // Only a VERIFIED zero-record site may serve unregistered files.
+            // Any protected record, ambiguous ownership, or DB failure denies.
+            $empty_site = $resolution['state'] === 'unresolved' &&
+                self::has_any_protected_media_records() === false;
+            $unknown = ESP_Media_Access_Policy::decide(
+                $resolution, '', $protected_paths, $empty_site
+            );
+            if ($unknown['action'] === 'allow') {
+                $this->deliver_media($file_path);
+                return;
+            }
             $this->send_403();
             return;
         }
@@ -646,8 +659,6 @@ class ESP_Media_Protection {
             $this->send_403();
             return;
         }
-        $settings = get_option(ESP_Config::OPTION_KEY, null);
-        $protected_paths = is_array($settings) ? ($settings['path'] ?? null) : null;
         $decision = ESP_Media_Access_Policy::decide($resolution, $protected_path_id, $protected_paths);
         if ($decision['action'] === 'deny') {
             $this->send_403();
