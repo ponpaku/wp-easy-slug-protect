@@ -96,6 +96,8 @@ final class ESP_Media_File_Resolver {
         foreach (array_keys($stems) as $part) {
             foreach (self::PARENT_EXTENSIONS as $ext) {
                 $paths[$prefix . $part . '.' . $ext] = true;
+                $paths[$prefix . $part . '-scaled.' . $ext] = true;
+                $paths[$prefix . $part . '-rotated.' . $ext] = true;
                 if (count($paths) > 120) {
                     return [[], []];
                 }
@@ -196,7 +198,13 @@ final class ESP_Media_File_Resolver {
             if (($wpdb->last_error ?? '') !== '') {
                 return ['state' => 'error'];
             }
-            if ($exact || self::matches_metadata($metadata, $relative)) {
+            // A derivative is owned only when the attachment's current
+            // metadata also agrees with its _wp_attached_file root. Never
+            // trust unrelated or stale metadata as authorization evidence.
+            $consistent = is_array($metadata) &&
+                isset($metadata['file']) &&
+                $metadata['file'] === $row['meta_value'];
+            if ($exact || ($consistent && self::matches_metadata($metadata, $relative))) {
                 $found[$id] = true;
                 if (count($found) > 1) {
                     return ['state' => 'ambiguous'];
