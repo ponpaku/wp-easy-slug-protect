@@ -41,6 +41,42 @@ Before activating this policy on a live site:
 5. Roll out only after restoration and rollback procedures have been exercised
    without removing protections on existing private media.
 
+## Protected media cache policy and migration
+
+ESP-protected files are private even **after successful ESP authentication**.
+PHP full-body, HTTP 206 Range (including rejected 416), and Apache
+`X-Sendfile`, Nginx `X-Accel-Redirect`, LiteSpeed `X-LiteSpeed-Location`
+responses must use `Cache-Control: private, no-store, max-age=0` and a
+matching reverse-proxy/cache policy. Public images retain their original
+`Cache-Control: public, max-age=31536000`.
+
+**A no-store header only affects new responses.** Images previously delivered
+with `Cache-Control: public`, or cached while not protected, can remain in
+shared caches after installing PR #45 or marking an attachment protected.
+Before enabling this version or adding protection to previously public media:
+
+1. Purge the exact original and every known resized/converted URL from
+   LiteSpeed Cache, any CDN/reverse proxy, and related image optimization
+   caches. Where targeted purging cannot cover unknown older derivatives,
+   purge the affected uploads cache scope; do not publish a supposedly private
+   URL until caches are invalidated.
+2. Ensure web server sendfile/internal redirect handlers do not overwrite the
+   private/no-store headers. Confirm `X-LiteSpeed-Cache-Control: no-cache`
+   is effective on the site's actual LiteSpeed configuration.
+3. Request protected originals and sizes with an authorized ESP session.
+   Confirm successful full-body and Range responses with **private/no-store**
+   headers. A browser redirect alone is insufficient.
+4. Re-request the exact same URLs in an isolated browser with no cookies,
+   **after** authorized requests have warmed potential shared caches. Test
+   CDN HIT and MISS, Range, conditional requests and after logging out.
+   There must be **no protected file bytes** in the response body.
+5. Recheck whenever changing public -> protected, changing membership,
+   modifying rewrite rules, or changing caching plugins/CDN configuration.
+
+This WordPress/PHP code cannot prove that a CDN or static web server will
+preserve its headers. Keep PR #45 unmerged until the deployment configuration
+and any cache-purge runbook have been validated.
+
 ## HTTP acceptance matrix (not yet run)
 
 Use an isolated site with the same LiteSpeed/Apache version, WordPress version,
