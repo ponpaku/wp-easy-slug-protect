@@ -1258,6 +1258,8 @@ class ESP_Media_Protection {
                         __('旧Rewrite設定を復元する準備に失敗しました。退避ファイルを保持します。', ESP_Config::TEXT_DOMAIN));
                 }
                 if (@file_get_contents($htaccess_file) !== $new_rules || !@rename($backup, $htaccess_file)) {
+                    // 復元を断念して退避ファイルを残すときは権限を狭め直す。
+                    @chmod($backup, 0600);
                     $keep_backup = true;
                     return new WP_Error('esp_htaccess_restore_failed',
                         __('旧Rewrite設定を復元できませんでした。退避ファイルを保持します。', ESP_Config::TEXT_DOMAIN));
