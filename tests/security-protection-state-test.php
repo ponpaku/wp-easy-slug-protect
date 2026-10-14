@@ -40,9 +40,27 @@ function check($ok, $msg) {
 require __DIR__ . '/../includes/class-esp-protection-state.php';
 $wpdb = new BootTestDB();
 $setup = new TestSetup();
-$GLOBALS['options'] = ['esp_settings' => ['path' => [], 'media' => ['enabled' => true]]];
+$GLOBALS['options'] = [
+    'esp_settings' => ['path' => [], 'media' => ['enabled' => true]],
+    'esp_db_version' => ESP_Config::OPTION_DEFAULTS['db_version'],
+];
 check(ESP_Protection_State::boot($setup) === true, 'valid configuration is ready');
 check(!isset($GLOBALS['actions']['template_redirect']), 'ready state does not intercept frontend');
+$required_db = ESP_Config::OPTION_DEFAULTS['db_version'];
+$GLOBALS['options']['esp_db_version'] = $required_db - 1;
+check(ESP_Protection_State::boot($setup) === false,
+    'stored plugin version cannot make an outdated DB schema READY');
+unset($GLOBALS['options']['esp_db_version']);
+check(ESP_Protection_State::boot($setup) === false,
+    'missing DB migration version is unknown, not READY');
+$GLOBALS['options']['esp_db_version'] = $required_db + 1;
+check(ESP_Protection_State::boot($setup) === false,
+    'unexpected future DB migration version is not READY');
+$GLOBALS['options']['esp_db_version'] = (string) $required_db;
+check(ESP_Protection_State::boot($setup) === true,
+    'digit-string schema version is accepted');
+$GLOBALS['options']['esp_db_version'] = $required_db;
+
 
 $setup->ok = false;
 check(ESP_Protection_State::boot($setup) === false, 'migration failure is not ready');
