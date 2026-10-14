@@ -11,7 +11,7 @@ class ESP_Path_Matcher {
     /**
      * @var string トランジェントのキー
      */
-    private static $cache_key = 'esp_path_index';
+    private static $cache_key = 'esp_path_index_v2';
 
     /**
      * @var int キャッシュの有効期間（秒）
@@ -36,11 +36,21 @@ class ESP_Path_Matcher {
      * @return array パス設定の配列
      */
     public static function all() {
-        $index = get_transient(self::$cache_key);
-        if ($index === false) {
-            $index = self::build_index();
-            set_transient(self::$cache_key, $index, self::$cache_duration);
+        // 不正な設定やDB未取得を、意図的に空の保護設定と同視しない。
+        $settings = get_option(ESP_Config::OPTION_KEY, null);
+        if (!is_array($settings) || !isset($settings['path']) || !is_array($settings['path'])) {
+            throw new \UnexpectedValueException('ESP protection path settings unavailable');
         }
+        $raw = $settings['path'];
+        $signature = hash('sha256', serialize($raw));
+        $cached = get_transient(self::$cache_key);
+        if (is_array($cached) && isset($cached['signature'], $cached['paths']) &&
+            is_string($cached['signature']) && is_array($cached['paths']) &&
+            hash_equals($signature, $cached['signature'])) {
+            return $cached['paths'];
+        }
+        $index = self::build_index($raw);
+        set_transient(self::$cache_key, ['signature' => $signature, 'paths' => $index], self::$cache_duration);
         return $index;
     }
 
@@ -49,6 +59,7 @@ class ESP_Path_Matcher {
      */
     public static function invalidate() {
         delete_transient(self::$cache_key);
+        delete_transient('esp_path_index'); // 旧形式キャッシュも無効化
     }
 
     /**
@@ -56,11 +67,13 @@ class ESP_Path_Matcher {
      * 
      * @return array パスインデックス
      */
-    private static function build_index() {
-        $raw = ESP_Option::get_current_setting('path');
+    private static function build_index($raw) {
         $index = [];
         
         foreach ($raw as $row) {
+            if (!is_array($row) || empty($row['path']) || !is_string($row['path'])) {
+                throw new \UnexpectedValueException('Invalid ESP protected path entry');
+            }
             // キーの正規化
             $key = trim(strtolower($row['path']), '/');
             
