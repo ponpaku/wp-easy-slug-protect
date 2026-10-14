@@ -116,6 +116,32 @@ check(get_option('esp_rewrite_policy_version') === 'always-route-v2:off',
 check(!file_exists($file . '.esp.lock'), 'no lock file is opened for a no-op policy');
 chmod($GLOBALS['test_dir'], 0700);
 
+// uploadsのルートがシンボリックリンクでも、実体ディレクトリ内の一時ファイルを
+// 安全に置換できることを検証する（PHPのtempnam()はリンク先を返す場合がある）。
+$original_dir = $GLOBALS['test_dir'];
+$actual_dir = $original_dir . '/uploads-real';
+$link_dir = $original_dir . '/uploads-link';
+mkdir($actual_dir, 0700);
+check(symlink($actual_dir, $link_dir), 'uploadsルートのシンボリックリンクを作成できる');
+$GLOBALS['test_dir'] = $link_dir;
+$GLOBALS['enabled'] = true;
+$wpdb->count = 1;
+$symlink_htaccess = $link_dir . '/.htaccess';
+file_put_contents($symlink_htaccess, $foreign);
+chmod($symlink_htaccess, 0640);
+check($media->update_htaccess() === true, 'uploadsルートがシンボリックリンクでもRewriteを更新できる');
+$updated = file_get_contents($symlink_htaccess);
+check(strpos($updated, 'esp-media') !== false &&
+    strpos($updated, $foreign) !== false, '実体ディレクトリのルール更新で他プラグインの設定を維持する');
+check((fileperms($symlink_htaccess) & 0777) === 0640, 'シンボリックリンク環境でも権限を保持する');
+check($matchesPolicy->invoke(null, true) === true, 'シンボリックリンク経由でもRewrite更新後の内容を検証できる');
+check(glob($actual_dir . '/.esp-*') === [], '一時ファイルを残さない');
+@unlink($symlink_htaccess);
+@unlink($symlink_htaccess . '.esp.lock');
+@unlink($link_dir);
+@rmdir($actual_dir);
+$GLOBALS['test_dir'] = $original_dir;
+
 @unlink($file);
 @unlink($file . '.esp.lock');
 @rmdir($GLOBALS['test_dir']);
