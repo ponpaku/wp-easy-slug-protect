@@ -1,6 +1,7 @@
 <?php
 /** 起動時の保護状態が不明な場合に、安全側で拒否する単体テスト。 */
 define('ABSPATH', __DIR__ . '/');
+define('ARRAY_A', 'ARRAY_A');
 require __DIR__ . '/../includes/class-esp-config.php';
 class TestSetup {
     public $ok = true;
@@ -9,12 +10,33 @@ class TestSetup {
 class BootTestDB {
     public $last_error = '';
     public $online = true;
+    public $legacy_schema_valid = true;
+    public $prefix = 'wp_';
+    public function prepare($query, ...$args) { return str_replace('%s', "'" . ($args[0] ?? '') . "'", $query); }
+    public function get_col($query) {
+        $this->last_error = $this->online ? '' : 'Disconnected';
+        if (!$this->online || !$this->legacy_schema_valid) { return []; }
+        return ['ip_address', 'path', 'path_id', 'time', 'password_version', 'user_id',
+            'token', 'expires', 'window_started', 'attempts', 'blocked_until',
+            'updated_at', 'attempt_times', 'last_attempt_token'];
+    }
+    public function get_results($query, $output = null) {
+        $this->last_error = $this->online ? '' : 'Disconnected';
+        if (!$this->online || !$this->legacy_schema_valid) { return []; }
+        return [
+            ['Seq_in_index' => 1, 'Column_name' => 'ip_address'],
+            ['Seq_in_index' => 2, 'Column_name' => 'path_id'],
+        ];
+    }
     public function get_var($query) {
         if (!$this->online) {
             $this->last_error = 'Disconnected';
             return null;
         }
         $this->last_error = '';
+        if (strpos($query, 'information_schema.TABLES') !== false) {
+            return $this->legacy_schema_valid ? 'InnoDB' : 'MyISAM';
+        }
         return 1;
     }
 }
@@ -48,11 +70,15 @@ check(ESP_Protection_State::boot($setup) === true, 'valid configuration is ready
 check(!isset($GLOBALS['actions']['template_redirect']), 'ready state does not intercept frontend');
 $required_db = ESP_Config::OPTION_DEFAULTS['db_version'];
 $GLOBALS['options']['esp_db_version'] = $required_db - 1;
-check(ESP_Protection_State::boot($setup) === false,
-    'stored plugin version cannot make an outdated DB schema READY');
+check(ESP_Protection_State::boot($setup) === true,
+    'outdated marker with verified current schema does not stop existing site');
 unset($GLOBALS['options']['esp_db_version']);
+check(ESP_Protection_State::boot($setup) === true,
+    'missing DB marker with valid actual legacy schema stays READY');
+$wpdb->legacy_schema_valid = false;
 check(ESP_Protection_State::boot($setup) === false,
-    'missing DB migration version is unknown, not READY');
+    'missing marker with inconsistent actual schema is not READY');
+$wpdb->legacy_schema_valid = true;
 $GLOBALS['options']['esp_db_version'] = $required_db + 1;
 check(ESP_Protection_State::boot($setup) === false,
     'unexpected future DB migration version is not READY');
