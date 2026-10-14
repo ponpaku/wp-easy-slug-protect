@@ -78,6 +78,14 @@ file_put_contents($file, $partial);
 check($media->update_htaccess() instanceof WP_Error, 'unfinished ESP marker rejected');
 check(file_get_contents($file) === $partial, 'incomplete existing rewrite remains untouched');
 file_put_contents($file, $new);
+// BEGIN/ENDが1回ずつ存在しても順序が逆なら拒否する。
+$reversed = "# END ESP Media Protection\n# BEGIN ESP Media Protection\n" . $foreign;
+file_put_contents($file, $reversed);
+check($matchesPolicy->invoke(null, true) === false, 'reversed markers fail readiness');
+$error = $media->update_htaccess();
+check($error instanceof WP_Error && $error->get_error_code() === 'esp_htaccess_ambiguous', 'reversed markers rejected before writing');
+check(file_get_contents($file) === $reversed, 'reversed marker file remains intact');
+file_put_contents($file, $new);
 
 $wpdb->count = 0;
 check($media->update_htaccess() === true, 'zero protected records still install rewrite');
