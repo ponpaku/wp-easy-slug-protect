@@ -51,6 +51,37 @@ final class ESP_Protection_State {
         return false;
     }
 
+    /**
+     * 通常の設定フォームを読み込めない場合の診断用ページ。
+     * 設定を上書きする操作は提供しない。
+     */
+    public static function register_recovery_admin() {
+        add_action('admin_menu', static function () {
+            add_menu_page(
+                __('Easy Slug Protect 復旧', ESP_Config::TEXT_DOMAIN),
+                'Easy Slug Protect',
+                'manage_options',
+                'esp-settings',
+                [self::class, 'render_recovery_admin'],
+                'dashicons-warning',
+                80
+            );
+        });
+    }
+
+    public static function render_recovery_admin() {
+        if (!current_user_can('manage_options')) {
+            wp_die(__('操作権限がありません。', ESP_Config::TEXT_DOMAIN), '', ['response' => 403]);
+        }
+        echo '<div class="wrap"><h1>' .
+            esc_html__('Easy Slug Protect — 保護状態を確認できません', ESP_Config::TEXT_DOMAIN) .
+            '</h1><p>' .
+            esc_html__('保護設定、DB移行状態、またはサーバーのRewriteを検証できません。保護情報を推測して上書きする操作は停止しています。', ESP_Config::TEXT_DOMAIN) .
+            '</p><p>' .
+            esc_html__('設定・データベースのバックアップを確認し、DB接続・設定値・uploads/.htaccessとサーバー設定を修復してください。PHPの拒否は静的ファイルの直接公開を防げません。', ESP_Config::TEXT_DOMAIN) .
+            '</p></div>';
+    }
+
     private static function register_failure_hooks() {
         $message = __('Easy Slug Protectの保護設定または更新状態を検証できません。管理者による復旧が必要です。', ESP_Config::TEXT_DOMAIN);
 
