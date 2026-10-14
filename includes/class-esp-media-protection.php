@@ -1029,7 +1029,13 @@ class ESP_Media_Protection {
             // 実運用中の.htaccessへ直接書き込むと途中で破損するおそれがある。
             // 同じディレクトリに一時ファイルを作成・検証してから置換する。
             $temp = @tempnam($upload_dir['basedir'], '.esp-');
-            if (!$temp || dirname($temp) !== rtrim($upload_dir['basedir'], '/\\')) {
+            // uploadsがシンボリックリンクの場合、tempnam()は実体側のパスを返し得る。
+            // 文字列のパスではなく実体ディレクトリを比較し、別ディレクトリへの
+            // フォールバック（権限不足など）だけを拒否する。
+            $expected_dir = @realpath($upload_dir['basedir']);
+            $temp_dir = $temp ? @realpath(dirname($temp)) : false;
+            if (!$temp || $expected_dir === false || $temp_dir === false ||
+                $temp_dir !== $expected_dir) {
                 return new WP_Error('esp_htaccess_temp_failed', __('保護ルールの一時ファイルを作成できません。', ESP_Config::TEXT_DOMAIN));
             }
             if ($exists) {
