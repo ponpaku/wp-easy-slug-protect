@@ -54,6 +54,17 @@ $wpdb->count = '';
 $wpdb->last_error = '';
 check($media->update_htaccess() === true, 'Rewrite policy also ignores invalid COUNT results');
 $wpdb->count = 1;
+check(ESP_Media_Protection::can_disable_media_protection() === false,
+    'pre-save guard refuses OFF when protected media exists');
+$wpdb->count = null;
+$wpdb->last_error = 'DB unavailable';
+check(ESP_Media_Protection::can_disable_media_protection() === false,
+    'pre-save guard refuses OFF when protected media query fails');
+$wpdb->count = 0;
+$wpdb->last_error = '';
+check(ESP_Media_Protection::can_disable_media_protection() === true,
+    'pre-save guard allows OFF only after verified zero records');
+$wpdb->count = 1;
 $lockHandle = fopen($file . '.esp.lock', 'c');
 flock($lockHandle, LOCK_EX);
 $error = $media->update_htaccess();
