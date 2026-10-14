@@ -71,7 +71,8 @@ class ESP_Path_Matcher {
         $index = [];
         
         foreach ($raw as $row) {
-            if (!is_array($row) || empty($row['path']) || !is_string($row['path'])) {
+            if (!is_array($row) || empty($row['path']) || !is_string($row['path']) ||
+                trim($row['path'], " /\t\n\r\0\x0B") === '') {
                 throw new \UnexpectedValueException('Invalid ESP protected path entry');
             }
             // キーの正規化
