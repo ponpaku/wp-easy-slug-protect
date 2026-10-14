@@ -101,6 +101,8 @@ check($error instanceof WP_Error && $error->get_error_code() === 'esp_htaccess_r
     'failed post-write verification triggers rollback');
 check(file_get_contents($file) === $old, 'rollback restores existing file verbatim');
 check((fileperms($file) & 0777) === 0640, 'rollback restores old permissions');
+check(glob($GLOBALS['test_dir'] . '/.htaccess.esp-restore-*') === [],
+    'rolled-back update cleans its restore staging files');
 file_put_contents($file, $new);
 chmod($file, 0644);
 
@@ -190,7 +192,8 @@ check(strpos($updated, 'esp-media') !== false &&
     strpos($updated, $foreign) !== false, '実体ディレクトリのルール更新で他プラグインの設定を維持する');
 check((fileperms($symlink_htaccess) & 0777) === 0640, 'シンボリックリンク環境でも権限を保持する');
 check($matchesPolicy->invoke(null, true) === true, 'シンボリックリンク経由でもRewrite更新後の内容を検証できる');
-check(glob($actual_dir . '/.esp-*') === [], '一時ファイルを残さない');
+check(glob($actual_dir . '/.esp-*') === [] &&
+    glob($actual_dir . '/.htaccess.esp-*') === [], '一時ファイルと退避ファイルを残さない');
 @unlink($symlink_htaccess);
 @unlink($symlink_htaccess . '.esp.lock');
 @unlink($link_dir);
