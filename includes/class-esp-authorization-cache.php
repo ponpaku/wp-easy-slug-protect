@@ -11,7 +11,31 @@ if (!defined('ABSPATH')) {
  * 現在値に一致しない限り、そのスナップショットは採用しない。
  */
 final class ESP_Authorization_Cache {
+    /** @var array<string,bool> Persistに失敗した認可情報を同リクエスト中に利用しない */
+    private static $unsafe_scopes = [];
+
+    /**
+     * WordPress postmetaの変更前に、対象の認可キャッシュを失効させる。
+     * 永続化できない場合はWPのadd/update/delete_post_metadataをfalseで中止する。
+     * 直接SQLから行う変更は対象外。
+     */
+    public static function guard_postmeta_write($check, $post_id, $meta_key, $meta_value, $extra = null) {
+        if ($check !== null) {
+            return $check;
+        }
+        if ($meta_key === ESP_Config::PERMALINK_PATH_META_KEY) {
+            return self::invalidate('post', ESP_Filter::CACHE_KEY) ? null : false;
+        }
+        if ($meta_key === ESP_Media_Protection::META_KEY_PROTECTED_PATH) {
+            return self::invalidate('media', ESP_Media_Protection::MEDIA_CACHE_KEY) ? null : false;
+        }
+        return null;
+    }
+
     public static function signature($scope) {
+        if (!empty(self::$unsafe_scopes[$scope])) {
+            return null; // 当該リクエスト内の古い認可スナップショットを拒否。
+        }
         $settings = get_option(ESP_Config::OPTION_KEY, null);
         if (!is_array($settings) || !array_key_exists('path', $settings) ||
             !is_array($settings['path'])) {
@@ -56,15 +80,23 @@ final class ESP_Authorization_Cache {
     }
 
     public static function invalidate($scope, $key) {
-        // 再構築を始める前に更新世代を進め、旧キャッシュを先に無効化する。
-        // 旧世代の再構築が最後に完了しても、読み取り側で破棄する。
-        $epoch = bin2hex(random_bytes(16));
-        if (!update_option('esp_' . $scope . '_auth_epoch', $epoch, false) &&
-            get_option('esp_' . $scope . '_auth_epoch', null) !== $epoch) {
+        // メタデータ変更前に世代を進める。既存キャッシュの削除が失敗しても
+        // 世代が確実に更新されれば旧スナップショットは採用できない。
+        try {
+            $epoch = bin2hex(random_bytes(16));
+            if (!update_option('esp_' . $scope . '_auth_epoch', $epoch, false) &&
+                get_option('esp_' . $scope . '_auth_epoch', null) !== $epoch) {
+                delete_transient($key);
+                self::$unsafe_scopes[$scope] = true;
+                error_log('ESP: authorization cache invalidation failed for ' . $scope);
+                return false;
+            }
             delete_transient($key);
+            return true;
+        } catch (\Throwable $error) {
+            self::$unsafe_scopes[$scope] = true;
+            error_log('ESP: authorization cache invalidation raised an error for ' . $scope);
             return false;
         }
-        delete_transient($key);
-        return true;
     }
 }
