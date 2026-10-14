@@ -110,7 +110,7 @@ final class ESP_Protection_State {
             if ($ready && class_exists('ESP_Media_Protection')) {
                 $ready = ESP_Media_Protection::ensure_rewrite_policy() === true;
             }
-        } catch (\\Throwable $error) {
+        } catch (\Throwable $error) {
             error_log('ESP: explicit runtime verification failed');
             $ready = false;
         }
@@ -152,7 +152,7 @@ final class ESP_Protection_State {
             if (get_option(self::RUNTIME_STATE_OPTION, null) !== 'READY') {
                 $errors[] = 'runtime_not_ready';
             }
-        } catch (\\Throwable $error) {
+        } catch (\Throwable $error) {
             $errors[] = 'audit_exception';
         }
         update_option(self::AUDIT_OPTION, [
@@ -171,7 +171,7 @@ final class ESP_Protection_State {
         foreach ($settings['path'] as $path) {
             if (!is_array($path) || !isset($path['path']) ||
                 !is_string($path['path']) || !$path['path'] ||
-                trim($path['path'], " /\\t\\n\\r\\0\\x0B") === '') {
+                trim($path['path'], " /\t\n\r\0\x0B") === '') {
                 return false;
             }
         }
