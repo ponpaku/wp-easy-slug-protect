@@ -106,6 +106,15 @@ check(glob($GLOBALS['test_dir'] . '/.htaccess.esp-restore-*') === [],
 file_put_contents($file, $new);
 chmod($file, 0644);
 
+// もともとファイルが無いサイトでは、検証失敗を理由に新規ルールを削除しない。
+unlink($file);
+$error = $failing->update_htaccess();
+check($error instanceof WP_Error && $error->get_error_code() === 'esp_htaccess_verify_failed',
+    'new Rewrite file verification failure is not success');
+check(file_exists($file) && strpos(file_get_contents($file), 'esp-media') !== false,
+    'new protective file is not deleted by failed verification');
+file_put_contents($file, $new);
+
 // 既存の保護メディアがある場合、設定OFFでもルールを取り外さない。
 $GLOBALS['enabled'] = false;
 $wpdb->count = 1;
