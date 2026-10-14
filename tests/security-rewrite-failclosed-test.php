@@ -66,6 +66,19 @@ $new = file_get_contents($file);
 check(strpos($new, 'esp-media') !== false && strpos($new, '# Other plugin rule') !== false, 'generated rewrite keeps unrelated rules');
 check(strpos($new, 'avif') !== false, 'AVIF is covered in replacement');
 
+// 不完全・重複した保護ブロックを暗黙修復して安全と判定しない。
+$duplicate = $new . "# BEGIN ESP Media Protection\n# END ESP Media Protection\n";
+file_put_contents($file, $duplicate);
+check($matchesPolicy->invoke(null, true) === false, 'duplicated rule markers cannot pass readiness');
+$error = $media->update_htaccess();
+check($error instanceof WP_Error && $error->get_error_code() === 'esp_htaccess_ambiguous', 'duplicate marker update rejected');
+check(file_get_contents($file) === $duplicate, 'malformed rewrite contents not overwritten');
+$partial = $new . "# BEGIN ESP Media Protection\n";
+file_put_contents($file, $partial);
+check($media->update_htaccess() instanceof WP_Error, 'unfinished ESP marker rejected');
+check(file_get_contents($file) === $partial, 'incomplete existing rewrite remains untouched');
+file_put_contents($file, $new);
+
 $wpdb->count = 0;
 check($media->update_htaccess() === true, 'zero protected records still install rewrite');
 check(strpos(file_get_contents($file), 'esp-media') !== false, 'zero-to-one transition already covered by rewrite');
