@@ -1531,6 +1531,14 @@ class ESP_Media_Protection {
     }
 
     /**
+     * メディア保護OFFへの遷移を保存してよいか、DBの実データで判定する。
+     * false（0件確認済み）だけを許可し、true/NULL（保護あり・DB障害）は拒否。
+     */
+    public static function can_disable_media_protection() {
+        return self::has_any_protected_media_records() === false;
+    }
+
+    /**
      * 保護されたメディアが存在するかどうか
      */
     private static function has_any_protected_media_records() {
