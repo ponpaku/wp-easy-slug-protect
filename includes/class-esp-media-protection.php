@@ -1127,6 +1127,8 @@ class ESP_Media_Protection {
         }
 
         $temp = null;
+        $backup = null;
+        $keep_backup = false;
         try {
             if (!@flock($lock, LOCK_EX | LOCK_NB)) {
                 return new WP_Error('esp_htaccess_locked', __('別の保護ルール更新が進行中です。', ESP_Config::TEXT_DOMAIN));
@@ -1154,18 +1156,34 @@ class ESP_Media_Protection {
                     $end_at <= $begin_at))) {
                 return new WP_Error('esp_htaccess_ambiguous', __('ESP保護ルールの境界が不正なため自動更新しません。', ESP_Config::TEXT_DOMAIN));
             }
-            // ESP以外のルールはバイト単位で維持し、置換内容が確定しないまま
-            // 既存のESPブロックを削除しない。
-            $without_esp = preg_replace('/# BEGIN ESP Media Protection.*?# END ESP Media Protection[^\r\n]*(?:\r?\n)?/s', '', $old);
-            if ($without_esp === null || ($begin_count === 1 &&
-                $without_esp === $old)) {
-                return new WP_Error('esp_htaccess_parse_failed', __('保護ルールを解析できません。', ESP_Config::TEXT_DOMAIN));
+            // 保護済み添付が残る場合、設定OFFだけで静的アクセス用の
+            // サーバー保護ルールを取り除かない。無効化操作も同じ条件を守る。
+            if (!$route_media && $begin_count === 1 &&
+                self::has_any_protected_media_records() !== false) {
+                return new WP_Error('esp_htaccess_protected_media_remain',
+                    __('保護済みメディアが存在するか不明なため、既存のRewrite保護を維持します。', ESP_Config::TEXT_DOMAIN));
+            }
+
+            // マーカーを独立した行として厳密に認識し、ESP以外の全バイトを保持。
+            // コメント中の同名文字列や不正な境界にマッチさせない。
+            $pattern = '/^# BEGIN ESP Media Protection[ \\t]*\\r?\\n.*?^# END ESP Media Protection[ \\t]*(?:\\r?\\n|\\z)/ms';
+            $replacements = 0;
+            $without_esp = preg_replace($pattern, '', $old, 1, $replacements);
+            if ($without_esp === null || ($begin_count === 1 && $replacements !== 1)) {
+                return new WP_Error('esp_htaccess_parse_failed', __('保護ルールの境界を厳密に解析できません。', ESP_Config::TEXT_DOMAIN));
             }
             $esp_rules = $this->get_htaccess_rules($force_litespeed_key_regeneration, $route_media);
             if (is_wp_error($esp_rules)) {
                 return $esp_rules;
             }
             $new_rules = $route_media ? $esp_rules . $without_esp : $without_esp;
+            // 書込み前に、新しいESPブロックが一組だけ存在することを確認する。
+            if ($route_media && (substr_count($new_rules, '# BEGIN ESP Media Protection') !== 1 ||
+                substr_count($new_rules, '# END ESP Media Protection') !== 1 ||
+                strpos($new_rules, $esp_rules) !== 0)) {
+                return new WP_Error('esp_htaccess_invalid_result',
+                    __('生成したRewrite保護ルールの構造が不正です。', ESP_Config::TEXT_DOMAIN));
+            }
             if ($new_rules === $old) {
                 return true;
             }
@@ -1199,6 +1217,22 @@ class ESP_Media_Protection {
                 return new WP_Error('esp_htaccess_write_failed', __('保護ルールの一時ファイル書込・検証に失敗しました。', ESP_Config::TEXT_DOMAIN));
             }
 
+            // 置換後の読戻し・保護ルール検証が失敗しても元のファイルを
+            // 復元できるよう、既存の内容を同じFS上に事前退避する。
+            // 退避中は0600を保持し、Web公開領域からの直接取得を防ぐ。
+            if ($exists) {
+                $backup = @tempnam($upload_dir['basedir'], '.esp-restore-');
+                $backup_dir = $backup ? @realpath(dirname($backup)) : false;
+                if (!$backup || $backup_dir !== $expected_dir ||
+                    !@chmod($backup, 0600) ||
+                    (@fileperms($backup) & 0777) !== 0600 ||
+                    @file_put_contents($backup, $old) !== strlen($old) ||
+                    @file_get_contents($backup) !== $old) {
+                    return new WP_Error('esp_htaccess_backup_failed',
+                        __('旧Rewrite設定の安全な退避に失敗したため、置換しませんでした。', ESP_Config::TEXT_DOMAIN));
+                }
+            }
+
             // ESPのロックを使わない外部変更との競合も検出する。
             if ($exists !== file_exists($htaccess_file) ||
                 ($exists && @file_get_contents($htaccess_file) !== $old)) {
@@ -1208,18 +1242,53 @@ class ESP_Media_Protection {
                 return new WP_Error('esp_htaccess_rename_failed', __('保護ルールを安全に置換できません。', ESP_Config::TEXT_DOMAIN));
             }
             $temp = null;
-            if (@file_get_contents($htaccess_file) !== $new_rules ||
-                !self::rewrite_file_matches_policy($route_media)) {
-                return new WP_Error('esp_htaccess_verify_failed', __('保護ルール置換後の検証に失敗しました。復旧が必要です。', ESP_Config::TEXT_DOMAIN));
+
+            if (!$this->verify_rewrite_installation($htaccess_file, $new_rules, $route_media)) {
+                // 他のプロセスによる変更を旧データで上書きしない。
+                if (!$exists || @file_get_contents($htaccess_file) !== $new_rules) {
+                    $keep_backup = $exists;
+                    return new WP_Error('esp_htaccess_verify_failed',
+                        __('書込み後の検証が失敗しました。外部変更の可能性があるため自動復元を中止しました。', ESP_Config::TEXT_DOMAIN));
+                }
+                if (!@chmod($backup, $mode) || (@fileperms($backup) & 0777) !== $mode ||
+                    @file_get_contents($backup) !== $old) {
+                    $keep_backup = true;
+                    return new WP_Error('esp_htaccess_restore_prepare_failed',
+                        __('旧Rewrite設定を復元する準備に失敗しました。退避ファイルを保持します。', ESP_Config::TEXT_DOMAIN));
+                }
+                if (@file_get_contents($htaccess_file) !== $new_rules || !@rename($backup, $htaccess_file)) {
+                    $keep_backup = true;
+                    return new WP_Error('esp_htaccess_restore_failed',
+                        __('旧Rewrite設定を復元できませんでした。退避ファイルを保持します。', ESP_Config::TEXT_DOMAIN));
+                }
+                $backup = null;
+                if (@file_get_contents($htaccess_file) !== $old) {
+                    return new WP_Error('esp_htaccess_restore_verify_failed',
+                        __('旧Rewrite設定を復元しましたが照合に失敗しました。', ESP_Config::TEXT_DOMAIN));
+                }
+                return new WP_Error('esp_htaccess_rolled_back',
+                    __('Rewrite検証に失敗したため、以前の設定に復元しました。', ESP_Config::TEXT_DOMAIN));
             }
             return true;
         } finally {
             if ($temp && is_file($temp)) {
                 @unlink($temp);
             }
+            if ($backup && !$keep_backup && is_file($backup)) {
+                @unlink($backup);
+            }
             @flock($lock, LOCK_UN);
             @fclose($lock);
         }
+    }
+
+    /**
+     * 配置後の確認。副作用のない検査として切り出し、
+     * テスト時は置換直後の故障を再現できるようにする。
+     */
+    protected function verify_rewrite_installation($file, $expected, $enabled) {
+        return @file_get_contents($file) === $expected &&
+            self::rewrite_file_matches_policy($enabled);
     }
 
     /**
