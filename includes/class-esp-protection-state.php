@@ -35,9 +35,17 @@ final class ESP_Protection_State {
                 // ここで旧migration(v1等)を実行しない。詳細検証と安全な修復は#44へ。
                 $stored_db_version = get_option('esp_db_version', null);
                 $required_db_version = (int) ESP_Config::OPTION_DEFAULTS['db_version'];
-                $ready = (is_int($stored_db_version) ||
-                    (is_string($stored_db_version) && ctype_digit($stored_db_version))) &&
-                    (int) $stored_db_version === $required_db_version;
+                $known_db_version = (is_int($stored_db_version) ||
+                    (is_string($stored_db_version) && ctype_digit($stored_db_version)));
+                if ($known_db_version && (int) $stored_db_version > $required_db_version) {
+                    // 将来版を旧PHPが勝手に正常扱いするダウングレードを禁止。
+                    $ready = false;
+                } elseif (!$known_db_version || (int) $stored_db_version !== $required_db_version) {
+                    // 旧activate()は最新版の実テーブルを作ってもDB版を記録しない。
+                    // 認可に必要なスキーマが実在すれば、欠損した版印だけで
+                    // 全公開ページを503にしない（版印の勝手な書換えはしない）。
+                    $ready = self::verify_legacy_security_schema();
+                }
             }
             if ($ready) {
                 // DB障害中でもWordPressのオプションキャッシュは値を返し得る。
@@ -59,6 +67,59 @@ final class ESP_Protection_State {
 
         self::register_failure_hooks();
         return false;
+    }
+
+    /**
+     * 旧版でDB版印だけが無い／古いサイトのread-only互換検証。
+     * 一度もDDLを実行せず、必要テーブルの列と原子的な試行制限索引を確認する。
+     * #44のMigratorが版印と全テーブルの検証を正式管理するまでの橋渡し。
+     */
+    private static function verify_legacy_security_schema() {
+        global $wpdb;
+        if (!is_object($wpdb) || !isset($wpdb->prefix)) {
+            return false;
+        }
+        $required = [
+            'brute' => ['ip_address', 'path', 'path_id', 'time'],
+            'remember' => ['path', 'path_id', 'password_version', 'user_id', 'token', 'expires'],
+            'session' => ['path_id', 'password_version', 'token', 'expires'],
+            'limit' => ['ip_address', 'path_id', 'window_started', 'attempts',
+                'blocked_until', 'updated_at', 'attempt_times', 'last_attempt_token'],
+        ];
+        try {
+            foreach ($required as $kind => $columns) {
+                $table = str_replace('`', '``', $wpdb->prefix . ESP_Config::DB_TABLES[$kind]);
+                $available = $wpdb->get_col("SHOW COLUMNS FROM `{$table}`");
+                if (!is_array($available) || array_diff($columns, $available) ||
+                    $wpdb->last_error !== '') {
+                    return false;
+                }
+            }
+            $limit_table = $wpdb->prefix . ESP_Config::DB_TABLES['limit'];
+            $engine = $wpdb->get_var($wpdb->prepare(
+                'SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s',
+                $limit_table
+            ));
+            if (strcasecmp((string) $engine, 'InnoDB') !== 0 || $wpdb->last_error !== '') {
+                return false;
+            }
+            $quoted = str_replace('`', '``', $limit_table);
+            $rows = $wpdb->get_results("SHOW INDEX FROM `{$quoted}` WHERE Key_name = 'PRIMARY'", ARRAY_A);
+            if (!is_array($rows) || $wpdb->last_error !== '') {
+                return false;
+            }
+            $primary = [];
+            foreach ($rows as $row) {
+                if (!isset($row['Seq_in_index'], $row['Column_name'])) {
+                    return false;
+                }
+                $primary[(int) $row['Seq_in_index']] = $row['Column_name'];
+            }
+            ksort($primary);
+            return array_values($primary) === ['ip_address', 'path_id'];
+        } catch (\Throwable $error) {
+            return false;
+        }
     }
 
     /**
