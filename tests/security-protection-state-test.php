@@ -62,4 +62,24 @@ check(ESP_Protection_State::boot($setup) === false, 'slash-only path detected be
 $GLOBALS['options']['esp_settings'] = ['path' => [['path' => '/private']]];
 $wpdb->online = false;
 check(ESP_Protection_State::boot($setup) === false, 'stale cached settings with DB outage fail closed');
+// 起動不能でも管理者用の読み取り専用ページを登録し、復旧方法を確認できる。
+function add_menu_page($page_title, $menu_title, $capability, $menu_slug, $callback, $icon = '', $position = null) {
+    $GLOBALS['admin_menu'] = compact('page_title', 'menu_title', 'capability', 'menu_slug', 'callback');
+}
+function current_user_can($capability) { return $capability === 'manage_options'; }
+function esc_html__($message, $domain = null) { return $message; }
+ESP_Protection_State::register_recovery_admin();
+$adminRegistration = $GLOBALS['actions']['admin_menu'][0][0] ?? null;
+check(is_callable($adminRegistration), 'administration recovery menu hook registered');
+$adminRegistration();
+check(($GLOBALS['admin_menu']['capability'] ?? null) === 'manage_options',
+    'recovery UI requires administrator privileges');
+check(($GLOBALS['admin_menu']['menu_slug'] ?? null) === 'esp-settings',
+    'recovery page retains ESP menu path');
+ob_start();
+call_user_func($GLOBALS['admin_menu']['callback']);
+$recoveryHtml = ob_get_clean();
+check(strpos($recoveryHtml, 'uploads/.htaccess') !== false &&
+    strpos($recoveryHtml, '<form') === false,
+    'read-only recovery panel describes server-side repair without editable configuration');
 echo "All protection boot tests passed.\n";
