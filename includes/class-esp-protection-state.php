@@ -30,6 +30,16 @@ final class ESP_Protection_State {
                 }
             }
             if ($ready) {
+                // プラグインの保存バージョンが一致していてもDB移行済みとは限らない。
+                // 未設定・旧値・将来値は不明状態として拒否する。
+                // ここで旧migration(v1等)を実行しない。詳細検証と安全な修復は#44へ。
+                $stored_db_version = get_option('esp_db_version', null);
+                $required_db_version = (int) ESP_Config::OPTION_DEFAULTS['db_version'];
+                $ready = (is_int($stored_db_version) ||
+                    (is_string($stored_db_version) && ctype_digit($stored_db_version))) &&
+                    (int) $stored_db_version === $required_db_version;
+            }
+            if ($ready) {
                 // DB障害中でもWordPressのオプションキャッシュは値を返し得る。
                 // DBの実読み取りで、正常な設定と接続障害を区別する。
                 global $wpdb;
