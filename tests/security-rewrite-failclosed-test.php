@@ -193,6 +193,33 @@ check(get_option('esp_rewrite_policy_version') === 'always-route-v2:off',
 check(!file_exists($file . '.esp.lock'), 'no lock file is opened for a no-op policy');
 chmod($GLOBALS['test_dir'], 0700);
 
+// 保護対象0件ならRewrite修復不能でも通常のサイト全体を503にしない。
+// ただしルールを設置できるまでは保護メタの追加を許可しない。
+$wpdb->count = 0;
+$wpdb->last_error = '';
+$GLOBALS['enabled'] = true;
+file_put_contents($file, $foreign);
+$writeLock = fopen($file . '.esp.lock', 'c');
+flock($writeLock, LOCK_EX);
+check(ESP_Media_Protection::ensure_rewrite_policy() === true,
+    'zero protected media keeps public site ready when rewrite repair is locked');
+check(ESP_Media_Protection::can_assign_protected_media() === false,
+    'unknown Rewrite policy prevents assigning first protected image');
+$GLOBALS['enabled'] = false;
+check(ESP_Media_Protection::can_enable_media_protection() === false,
+    'OFF to ON rewrite preflight rejects a locked file');
+flock($writeLock, LOCK_UN);
+fclose($writeLock);
+check(ESP_Media_Protection::can_enable_media_protection() === true,
+    'OFF to ON preflight installs the required Rewrite before saving settings');
+check($matchesPolicy->invoke(null, true) === true,
+    'pre-installed enabled Rewrite is complete even while settings are still OFF');
+$GLOBALS['enabled'] = true;
+check(ESP_Media_Protection::can_assign_protected_media() === true,
+    'protected metadata becomes assignable only with active Rewrite');
+check(file_get_contents($file) !== $foreign,
+    'preflight retains foreign rules while adding ESP rules');
+
 // uploadsのルートがシンボリックリンクでも、実体ディレクトリ内の一時ファイルを
 // 安全に置換できることを検証する（PHPのtempnam()はリンク先を返す場合がある）。
 $original_dir = $GLOBALS['test_dir'];
