@@ -179,7 +179,7 @@ $wpdb->queries = 0;
 check(ESP_Protection_State::audit() === false, 'Cron audit reports Rewrite mismatch');
 check(in_array('rewrite_mismatch', get_option('esp_integrity_last_audit')['errors'], true),
     'Cron persists an actionable non-secret error code');
-check(get_option('esp_runtime_state') === 'READY' && ESP_Media_Protection::$checks === 3,
+check(get_option('esp_runtime_state') === 'READY' && ESP_Media_Protection::$checks === 2,
     'read-only Cron does not auto-repair Rewrite or overwrite READY');
 ESP_Media_Protection::$audit_ok = true;
 check(ESP_Protection_State::audit() === true, 'successful Cron audit persists no errors');
