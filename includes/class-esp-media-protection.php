@@ -1590,7 +1590,9 @@ class ESP_Media_Protection {
         if (self::rewrite_file_matches_policy(true)) {
             return true;
         }
-        $media = new self();
+        // 設定サニタイズ中に通常コンストラクタを実行すると、管理フックや
+        // キャッシュ再生成を追加登録するため、安全なRewrite処理だけを呼ぶ。
+        $media = (new \ReflectionClass(self::class))->newInstanceWithoutConstructor();
         return $media->update_htaccess(false, false, true) === true &&
             self::rewrite_file_matches_policy(true);
     }
