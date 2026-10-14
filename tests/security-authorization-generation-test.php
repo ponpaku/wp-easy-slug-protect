@@ -7,6 +7,12 @@ define('WEEK_IN_SECONDS', 604800);
 require __DIR__ . '/../includes/class-esp-authorization-cache.php';
 require __DIR__ . '/../includes/class-esp-media-protection.php';
 require __DIR__ . '/../includes/class-esp-filter.php';
+class ESP_Option {
+    public static function get_current_setting($key) {
+        return $GLOBALS['options'][ESP_Config::OPTION_KEY][$key] ?? [];
+    }
+}
+
 $GLOBALS['options'] = [
     ESP_Config::OPTION_KEY => ['path' => [], 'media' => ['enabled' => true]],
 ];
@@ -83,6 +89,16 @@ check_auth(ESP_Authorization_Cache::guard_postmeta_write(null, 42, '_unrelated',
     'unrelated metadata does not require authorization invalidation');
 check_auth(ESP_Authorization_Cache::guard_postmeta_write(null, 42, ESP_Config::PERMALINK_PATH_META_KEY, '/new') === null,
     'protected postmeta write accepted when invalidation succeeds');
+
+// 保護OFF中に外部プラグインがpostmetaだけ保存する経路を先に止める。
+$GLOBALS['options'][ESP_Config::OPTION_KEY]['media']['enabled'] = false;
+check_auth(ESP_Authorization_Cache::guard_postmeta_write(null, 42,
+    ESP_Media_Protection::META_KEY_PROTECTED_PATH, 'one') === false,
+    'media OFF rejects direct update_post_meta/add_post_meta protected assignment');
+check_auth(ESP_Authorization_Cache::guard_postmeta_delete(null, 42,
+    ESP_Media_Protection::META_KEY_PROTECTED_PATH, '') === null,
+    'media OFF permits clearing stale protected metadata');
+$GLOBALS['options'][ESP_Config::OPTION_KEY]['media']['enabled'] = true;
 
 // 同時にepochの保存とtransient削除が失敗するケースは、現在のリクエストで
 // 保護メタデータの更新をブロックし、読み取り・公開も拒否する。
