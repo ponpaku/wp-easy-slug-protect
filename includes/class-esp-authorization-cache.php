@@ -27,6 +27,25 @@ final class ESP_Authorization_Cache {
             return self::invalidate('post', ESP_Filter::CACHE_KEY) ? null : false;
         }
         if ($meta_key === ESP_Media_Protection::META_KEY_PROTECTED_PATH) {
+            // OFF中に保護メタを保存すると、静的ファイルがESPを迂回して公開される。
+            // WordPress標準のadd/updateは安全確認まで拒否する（deleteは別フック）。
+            if (!ESP_Media_Protection::can_assign_protected_media()) {
+                return false;
+            }
+            return self::invalidate('media', ESP_Media_Protection::MEDIA_CACHE_KEY) ? null : false;
+        }
+        return null;
+    }
+
+    /** メタ削除は保護を解除する操作なのでOFF中でも妨げない。 */
+    public static function guard_postmeta_delete($check, $post_id, $meta_key, $meta_value, $delete_all = false) {
+        if ($check !== null) {
+            return $check;
+        }
+        if ($meta_key === ESP_Config::PERMALINK_PATH_META_KEY) {
+            return self::invalidate('post', ESP_Filter::CACHE_KEY) ? null : false;
+        }
+        if ($meta_key === ESP_Media_Protection::META_KEY_PROTECTED_PATH) {
             return self::invalidate('media', ESP_Media_Protection::MEDIA_CACHE_KEY) ? null : false;
         }
         return null;
