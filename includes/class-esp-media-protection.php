@@ -1190,7 +1190,7 @@ class ESP_Media_Protection {
 
             // 実運用中の.htaccessへ直接書き込むと途中で破損するおそれがある。
             // 同じディレクトリに一時ファイルを作成・検証してから置換する。
-            $temp = @tempnam($upload_dir['basedir'], '.esp-');
+            $temp = @tempnam($upload_dir['basedir'], '.htaccess.esp-');
             // uploadsがシンボリックリンクの場合、tempnam()は実体側のパスを返し得る。
             // 文字列のパスではなく実体ディレクトリを比較し、別ディレクトリへの
             // フォールバック（権限不足など）だけを拒否する。
@@ -1219,9 +1219,10 @@ class ESP_Media_Protection {
 
             // 置換後の読戻し・保護ルール検証が失敗しても元のファイルを
             // 復元できるよう、既存の内容を同じFS上に事前退避する。
-            // 退避中は0600を保持し、Web公開領域からの直接取得を防ぐ。
+            // バックアップは0600、ファイル名もApache標準の .ht* 拒否対象に置く。
+            // これだけで全サーバーのWeb配信拒否を保証するものではない。
             if ($exists) {
-                $backup = @tempnam($upload_dir['basedir'], '.esp-restore-');
+                $backup = @tempnam($upload_dir['basedir'], '.htaccess.esp-restore-');
                 $backup_dir = $backup ? @realpath(dirname($backup)) : false;
                 if (!$backup || $backup_dir !== $expected_dir ||
                     !@chmod($backup, 0600) ||
