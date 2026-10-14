@@ -290,6 +290,16 @@ class ESP_Media_Deriver {
     private function deliver_with_range($file_path, $file_size, $mime_type, $range, $is_protected = true) {
         // 不正なRange指定で416を返す場合も、保護画像のキャッシュを許可しない。
         $this->set_cache_headers($mime_type, $is_protected);
+        // 0バイトや書式不正のRange要求に206を返さない。
+        if ($file_size <= 0 || strpos($range, '=') === false) {
+            header('HTTP/1.1 416 Requested Range Not Satisfiable');
+            if (function_exists('http_response_code')) {
+                http_response_code(416);
+            }
+            header("Content-Range: bytes */$file_size");
+            return false;
+        }
+
         // Rangeヘッダーを単位と値に分割
         list($size_unit, $range_orig) = explode('=', $range, 2);
 
@@ -331,7 +341,7 @@ class ESP_Media_Deriver {
             $end_part = isset($range_parts[1]) ? $range_parts[1] : '';
 
             if ($start_part === '') {
-                if ($end_part === '' || !is_numeric($end_part)) {
+                if ($end_part === '' || !ctype_digit($end_part)) {
                     header('HTTP/1.1 416 Requested Range Not Satisfiable');
                     if (function_exists('http_response_code')) {
                         http_response_code(416);
@@ -364,7 +374,7 @@ class ESP_Media_Deriver {
                 $c_start = $file_size - $suffix_length;
                 $c_end = $file_size - 1;
             } else {
-                if (!is_numeric($start_part)) {
+                if (!ctype_digit($start_part)) {
                     header('HTTP/1.1 416 Requested Range Not Satisfiable');
                     if (function_exists('http_response_code')) {
                         http_response_code(416);
@@ -375,7 +385,7 @@ class ESP_Media_Deriver {
 
                 $c_start = (int) $start_part;
                 if ($end_part !== '') {
-                    if (!is_numeric($end_part)) {
+                    if (!ctype_digit($end_part)) {
                         header('HTTP/1.1 416 Requested Range Not Satisfiable');
                         if (function_exists('http_response_code')) {
                             http_response_code(416);
@@ -390,9 +400,19 @@ class ESP_Media_Deriver {
             }
         }
 
-        // 範囲がファイルサイズの内側に収まるよう補正
-        $c_start = max(0, min($c_start, $file_size - 1));
-        $c_end = max($c_start, min($c_end, $file_size - 1));
+        // 開始位置が末尾以降、または逆順の範囲は416にする。
+        // 開始位置を末尾へ丸めると、存在しない範囲を206で返してしまう。
+        if ($c_start >= $file_size || $c_end < $c_start) {
+            header('HTTP/1.1 416 Requested Range Not Satisfiable');
+            if (function_exists('http_response_code')) {
+                http_response_code(416);
+            }
+            header("Content-Range: bytes */$file_size");
+            return false;
+        }
+
+        // 有効な要求の終了位置だけをファイル末尾までに制限する。
+        $c_end = min($c_end, $file_size - 1);
         $length = $c_end - $c_start + 1;
 
         if ($length < 1) {
