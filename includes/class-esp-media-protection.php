@@ -333,7 +333,11 @@ class ESP_Media_Protection {
             return $args;
         }
         
-        // WordPressのupload_files権限だけではESPの保護パス認証を通過できない。
+        // 既存WordPressのメディア管理者例外を維持する。
+        // 権限ポリシーを全経路で変更する場合は#43に分離する。
+        if (current_user_can('upload_files')) {
+            return args;
+        }
         // 保護されたメディアIDを取得（キャッシュ利用）
         $excluded_media_ids = $this->get_protected_media_ids_for_current_user();
         if ($excluded_media_ids === null) {
@@ -381,7 +385,11 @@ class ESP_Media_Protection {
             return $response;
         }
         
-        // WordPressのupload_files権限だけではESPの保護パス認証を通過できない。
+        // 既存WordPressのメディア管理者例外を維持する。
+        // 権限ポリシーを全経路で変更する場合は#43に分離する。
+        if (current_user_can('upload_files')) {
+            return response;
+        }
         // キャッシュから保護されたメディアIDを取得して確認
         $excluded_media_ids = $this->get_protected_media_ids_for_current_user();
         if ($excluded_media_ids === null) {
@@ -412,6 +420,11 @@ class ESP_Media_Protection {
      * @return array 修正されたフォームフィールド
      */
     public function add_media_protection_field($form_fields, $post) {
+        if (!$this->enabled) {
+            // 保護OFF中は新しい保護対象を登録できない。
+            unset($form_fields['esp_protected_path']);
+            return $form_fields;
+        }
         $protected_paths = ESP_Option::get_current_setting('path');
         $current_path_id = get_post_meta($post->ID, self::META_KEY_PROTECTED_PATH, true);
         
@@ -446,6 +459,10 @@ class ESP_Media_Protection {
      */
     public function save_media_protection_field($post, $attachment) {
         if (isset($attachment['esp_protected_path'])) {
+            if (!$this->enabled && !empty($attachment['esp_protected_path'])) {
+                // 保護OFF中は保護メタの新規追加を拒否。解除は許可する。
+                return $post;
+            }
             if (empty($attachment['esp_protected_path'])) {
                 delete_post_meta($post['ID'], self::META_KEY_PROTECTED_PATH);
             } else {
@@ -865,6 +882,9 @@ class ESP_Media_Protection {
      * @param int $attachment_id 添付ファイルID
      */
     public function auto_protect_on_upload($attachment_id) {
+        if (!$this->enabled) {
+            return;
+        }
         // 現在のユーザーがアップロードしているコンテキストから保護パスを推定
         // 例：特定のページや投稿からアップロードされた場合など
         // この実装は要件に応じてカスタマイズが必要
@@ -1536,6 +1556,17 @@ class ESP_Media_Protection {
      */
     public static function can_disable_media_protection() {
         return self::has_any_protected_media_records() === false;
+    }
+
+    /**
+     * Rewriteが実際に配置済みのときだけ新しい保護メタを受け入れる。
+     * 失敗時は保護メタの書込みより先に中止する。
+     */
+    public static function can_assign_protected_media() {
+        if (!self::is_media_protection_enabled()) {
+            return false;
+        }
+        return self::ensure_rewrite_policy() === true;
     }
 
     /**
