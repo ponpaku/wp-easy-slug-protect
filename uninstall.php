@@ -129,7 +129,9 @@ function esp_uninstall_remove_rewrite_safely() {
 // 設定・テーブルを削除した後では復元不能になるため、最初に保全処理を行う。
 if (!esp_uninstall_remove_rewrite_safely()) {
     error_log('ESP Uninstall: .htaccess preservation failed; refusing to remove stored settings and tables');
-    return;
+    // 単にreturnすると、WordPress側が続けてプラグインファイルを削除して
+    // 保護Rewriteだけが残る可能性がある。削除処理自体を停止する。
+    wp_die(__('Easy Slug Protect: .htaccess の安全な更新を確認できませんでした。プラグインの削除を中止してください。', ESP_Config::TEXT_DOMAIN));
 }
 
 // データベースの削除処理
