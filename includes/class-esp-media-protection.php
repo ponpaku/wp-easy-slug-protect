@@ -336,7 +336,7 @@ class ESP_Media_Protection {
         // 既存WordPressのメディア管理者例外を維持する。
         // 権限ポリシーを全経路で変更する場合は#43に分離する。
         if (current_user_can('upload_files')) {
-            return args;
+            return $args;
         }
         // 保護されたメディアIDを取得（キャッシュ利用）
         $excluded_media_ids = $this->get_protected_media_ids_for_current_user();
@@ -388,7 +388,7 @@ class ESP_Media_Protection {
         // 既存WordPressのメディア管理者例外を維持する。
         // 権限ポリシーを全経路で変更する場合は#43に分離する。
         if (current_user_can('upload_files')) {
-            return response;
+            return $response;
         }
         // キャッシュから保護されたメディアIDを取得して確認
         $excluded_media_ids = $this->get_protected_media_ids_for_current_user();
