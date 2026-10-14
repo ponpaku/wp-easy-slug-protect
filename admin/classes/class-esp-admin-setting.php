@@ -131,7 +131,7 @@ class ESP_Settings {
         // 保護対象が残る状態や件数不明の状態でmedia.enabled=falseを保存すると、
         // PHPの配信認可をOFFにする一方、Rewriteを外せず起動ゲートが503になる。
         // WordPressのsanitize_callbackはDB書込より前なので、ここで遷移を拒否する。
-        if (empty($sanitized['media']['enabled']) &&
+        if ($old_enabled && empty($sanitized['media']['enabled']) &&
             !ESP_Media_Protection::can_disable_media_protection()) {
             $sanitized['media']['enabled'] = true;
             add_settings_error(
