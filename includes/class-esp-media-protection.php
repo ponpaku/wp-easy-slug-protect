@@ -1146,13 +1146,19 @@ class ESP_Media_Protection {
             // マーカーの欠損や重複時は既存のESPブロックの範囲を推測しない。
             $begin_count = substr_count($old, '# BEGIN ESP Media Protection');
             $end_count = substr_count($old, '# END ESP Media Protection');
-            if ($begin_count !== $end_count || $begin_count > 1) {
+            $begin_at = strpos($old, '# BEGIN ESP Media Protection');
+            $end_at = strpos($old, '# END ESP Media Protection');
+            // 各1個あってもEND→BEGINの逆順は正しいブロックではない。
+            if ($begin_count !== $end_count || $begin_count > 1 ||
+                ($begin_count === 1 && ($begin_at === false || $end_at === false ||
+                    $end_at <= $begin_at))) {
                 return new WP_Error('esp_htaccess_ambiguous', __('ESP保護ルールの境界が不正なため自動更新しません。', ESP_Config::TEXT_DOMAIN));
             }
             // ESP以外のルールはバイト単位で維持し、置換内容が確定しないまま
             // 既存のESPブロックを削除しない。
             $without_esp = preg_replace('/# BEGIN ESP Media Protection.*?# END ESP Media Protection[^\r\n]*(?:\r?\n)?/s', '', $old);
-            if ($without_esp === null) {
+            if ($without_esp === null || ($begin_count === 1 &&
+                $without_esp === $old)) {
                 return new WP_Error('esp_htaccess_parse_failed', __('保護ルールを解析できません。', ESP_Config::TEXT_DOMAIN));
             }
             $esp_rules = $this->get_htaccess_rules($force_litespeed_key_regeneration, $route_media);
@@ -1202,7 +1208,8 @@ class ESP_Media_Protection {
                 return new WP_Error('esp_htaccess_rename_failed', __('保護ルールを安全に置換できません。', ESP_Config::TEXT_DOMAIN));
             }
             $temp = null;
-            if (@file_get_contents($htaccess_file) !== $new_rules) {
+            if (@file_get_contents($htaccess_file) !== $new_rules ||
+                !self::rewrite_file_matches_policy($route_media)) {
                 return new WP_Error('esp_htaccess_verify_failed', __('保護ルール置換後の検証に失敗しました。復旧が必要です。', ESP_Config::TEXT_DOMAIN));
             }
             return true;
