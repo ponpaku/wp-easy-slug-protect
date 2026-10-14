@@ -87,6 +87,23 @@ check($error instanceof WP_Error && $error->get_error_code() === 'esp_htaccess_a
 check(file_get_contents($file) === $reversed, 'reversed marker file remains intact');
 file_put_contents($file, $new);
 
+// 置換後の検証失敗を明示的に注入し、以前のファイルが維持されることを確認する。
+class ESP_Failing_Rewrite_Verifier extends ESP_Media_Protection {
+    protected function verify_rewrite_installation($file, $expected, $enabled) {
+        return false;
+    }
+}
+$failing = (new ReflectionClass('ESP_Failing_Rewrite_Verifier'))->newInstanceWithoutConstructor();
+file_put_contents($file, $old);
+chmod($file, 0640);
+$error = $failing->update_htaccess();
+check($error instanceof WP_Error && $error->get_error_code() === 'esp_htaccess_rolled_back',
+    'failed post-write verification triggers rollback');
+check(file_get_contents($file) === $old, 'rollback restores existing file verbatim');
+check((fileperms($file) & 0777) === 0640, 'rollback restores old permissions');
+file_put_contents($file, $new);
+chmod($file, 0644);
+
 $wpdb->count = 0;
 check($media->update_htaccess() === true, 'zero protected records still install rewrite');
 check(strpos(file_get_contents($file), 'esp-media') !== false, 'zero-to-one transition already covered by rewrite');
