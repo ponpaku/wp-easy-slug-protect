@@ -112,6 +112,20 @@ class ESP_Settings {
             isset($input['media']) ? $input['media'] : ESP_Option::get_current_setting('media')
         );
 
+        // 保護対象が残る状態や件数不明の状態でmedia.enabled=falseを保存すると、
+        // PHPの配信認可をOFFにする一方、Rewriteを外せず起動ゲートが503になる。
+        // WordPressのsanitize_callbackはDB書込より前なので、ここで遷移を拒否する。
+        if (empty($sanitized['media']['enabled']) &&
+            !ESP_Media_Protection::can_disable_media_protection()) {
+            $sanitized['media']['enabled'] = true;
+            add_settings_error(
+                ESP_Config::OPTION_KEY,
+                'esp_media_disable_rejected',
+                __('保護メディアが残っているかDBで件数を確認できないため、メディア保護OFFへの変更を保存しませんでした。保護対象を解除してから再試行してください。', ESP_Config::TEXT_DOMAIN),
+                'error'
+            );
+        }
+
         return $sanitized;
     }
 
