@@ -91,7 +91,9 @@ class Easy_Slug_Protect {
         if (is_admin()) {
             add_action('admin_notices', ['ESP_Media_Protection', 'render_rewrite_admin_notice']);
         }
-        // 公開ルートやコンテンツキャッシュの初期化前に、保護状態不明なら拒否する。
+        // 更新イベントと明示的な復旧経路は、PENDING状態でも登録する。
+        // 通常のページ表示では、バージョン／DB／Rewriteの厳密検査をしない。
+        ESP_Protection_State::register_runtime_hooks($this->setup);
         $ready = ESP_Protection_State::boot($this->setup);
 
         // 保守フックの登録は保護ゲートとは独立に行う。失敗時でも
