@@ -1067,10 +1067,13 @@ class ESP_Media_Protection {
             return false;
         }
         $start = strpos($contents, '# BEGIN ESP Media Protection');
+        $begin_count = substr_count($contents, '# BEGIN ESP Media Protection');
+        $end_count = substr_count($contents, '# END ESP Media Protection');
         if (!$enabled) {
-            return $start === false;
+            // 片側だけ残った壊れたESPブロックも「設定OFFの正常状態」ではない。
+            return $begin_count === 0 && $end_count === 0;
         }
-        if ($start === false) {
+        if ($start === false || $begin_count !== 1 || $end_count !== 1) {
             return false;
         }
         $end = strpos($contents, '# END ESP Media Protection', $start);
@@ -1140,6 +1143,12 @@ class ESP_Media_Protection {
                 return new WP_Error('esp_htaccess_read_failed', __('既存の.htaccessを読み取れません。', ESP_Config::TEXT_DOMAIN));
             }
 
+            // マーカーの欠損や重複時は既存のESPブロックの範囲を推測しない。
+            $begin_count = substr_count($old, '# BEGIN ESP Media Protection');
+            $end_count = substr_count($old, '# END ESP Media Protection');
+            if ($begin_count !== $end_count || $begin_count > 1) {
+                return new WP_Error('esp_htaccess_ambiguous', __('ESP保護ルールの境界が不正なため自動更新しません。', ESP_Config::TEXT_DOMAIN));
+            }
             // ESP以外のルールはバイト単位で維持し、置換内容が確定しないまま
             // 既存のESPブロックを削除しない。
             $without_esp = preg_replace('/# BEGIN ESP Media Protection.*?# END ESP Media Protection[^\r\n]*(?:\r?\n)?/s', '', $old);
