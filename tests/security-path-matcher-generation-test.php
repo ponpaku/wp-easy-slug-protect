@@ -1,5 +1,6 @@
 <?php
 define('ABSPATH', __DIR__ . '/../');
+define('DAY_IN_SECONDS', 86400);
 require __DIR__ . '/../includes/class-esp-config.php';
 
 $GLOBALS['settings'] = ['path' => ['p1' => ['id' => 'p1', 'path' => '/private/']]];
