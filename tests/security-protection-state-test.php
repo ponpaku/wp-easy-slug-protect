@@ -155,7 +155,11 @@ check($pre(true, ['action'=>'update', 'type'=>'plugin',
 $setup->checks = 0;
 check(ESP_Protection_State::boot($setup) === false && $setup->checks === 0,
     'pending state cannot serve content before strict completion');
-$admin = $GLOBALS['actions']['admin_init'][0][0];
+$admin = null;
+foreach ($GLOBALS['actions']['admin_init'] as $entry) {
+    if ($entry[1] === 1) { $admin = $entry[0]; }
+}
+check(is_callable($admin), 'privileged admin verification hook is present');
 $admin();
 check(get_option('esp_runtime_state') === 'READY' && $setup->checks === 1,
     'first administrator visit validates pending standard update');
