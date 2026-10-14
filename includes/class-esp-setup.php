@@ -34,6 +34,11 @@ class ESP_Setup {
         }
 
         flush_rewrite_rules();
+
+        // 初回有効化は変更イベント。通常アクセスに初期化を先送りしない。
+        if (class_exists('ESP_Protection_State')) {
+            ESP_Protection_State::verify_and_commit($this);
+        }
     }
 
     /**
@@ -68,6 +73,11 @@ class ESP_Setup {
      * クリーンアップタスクの実行 (既存のメソッド)
      */
     public static function run_cleanup_tasks() {
+        // 既存の日次ジョブを利用し、重複するCron予約を増やさない。
+        // 点検は読取専用。検知したRewrite不整合を自動上書きしない。
+        if (class_exists('ESP_Protection_State')) {
+            ESP_Protection_State::audit();
+        }
         if (class_exists('ESP_Security')) {
             ESP_Security::cron_cleanup_brute();
             ESP_Security::cron_cleanup_remember();
