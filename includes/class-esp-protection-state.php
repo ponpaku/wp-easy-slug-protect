@@ -11,62 +11,171 @@ if (!defined('ABSPATH')) {
  * #44の後続実装（ESP_Migrator）で扱う。
  */
 final class ESP_Protection_State {
-    public static function boot($setup) {
-        try {
-            $migration_ok = $setup->check_plugin_version();
+    /**
+     * 通常リクエストの軽量ゲート。更新・DB版・Rewriteの検査は行わない。
+     * READYはあくまで既知のセットアップ状態であり、個々の認可を代替しない。
+     */
+    const RUNTIME_STATE_OPTION = 'esp_runtime_state';
+    const AUDIT_OPTION = 'esp_integrity_last_audit';
 
-            // ESP_Optionの既定値を使わず、設定欠損・破損と意図的な保護無効を区別する。
+    public static function boot($setup) {
+        $state = get_option(self::RUNTIME_STATE_OPTION, null);
+        $settings = get_option(ESP_Config::OPTION_KEY, null);
+        if ($state === 'READY' && self::valid_settings($settings)) {
+            return true;
+        }
+        self::register_failure_hooks();
+        return false;
+    }
+
+    /** WordPress更新と復旧のフックはREADYでない場合も登録する。 */
+    public static function register_runtime_hooks($setup) {
+        add_filter('upgrader_pre_install', [self::class, 'before_plugin_upgrade'], 10, 2);
+        // 未導入の状態印や標準更新によるPENDINGを、最初の管理者アクセスで検証する。
+        // FAILEDは毎回再試行せず、明示的な復旧操作を要求する。
+        add_action('admin_init', static function () use ($setup) {
+            if (!current_user_can('manage_options')) {
+                return;
+            }
+            $state = get_option(self::RUNTIME_STATE_OPTION, null);
+            if ($state === null || $state === 'PENDING' || $state === 'UNKNOWN') {
+                self::verify_and_commit($setup);
+            }
+        }, 1);
+        add_action('admin_post_esp_verify_runtime', static function () use ($setup) {
+            if (!current_user_can('manage_options')) {
+                wp_die(__('操作権限がありません。', ESP_Config::TEXT_DOMAIN), '', ['response' => 403]);
+            }
+            check_admin_referer('esp_verify_runtime');
+            self::verify_and_commit($setup);
+            wp_safe_redirect(admin_url('admin.php?page=esp-settings'));
+            exit;
+        });
+    }
+
+    /** 記録した状態だけを参照し、コード/DB版の検査は行わない。 */
+    private static function set_runtime_state($state) {
+        if (!in_array($state, ['READY', 'PENDING', 'FAILED', 'UNKNOWN'], true)) {
+            return false;
+        }
+        update_option(self::RUNTIME_STATE_OPTION, $state, true);
+        return get_option(self::RUNTIME_STATE_OPTION, null) === $state;
+    }
+
+    /**
+     * 対応するWordPress標準プラグイン更新の直前だけPENDINGを確定する。
+     * updater_post_installは古いコードで動作し得るためREADYにしない。
+     */
+    public static function before_plugin_upgrade($response, $hook_extra) {
+        if (is_wp_error($response) || !is_array($hook_extra) ||
+            ($hook_extra['type'] ?? '') !== 'plugin' ||
+            ($hook_extra['action'] ?? '') !== 'update') {
+            return $response;
+        }
+        $self = plugin_basename(ESP_PATH . 'easy-slug-protect.php');
+        $targets = [];
+        if (isset($hook_extra['plugin'])) {
+            $targets[] = $hook_extra['plugin'];
+        }
+        if (isset($hook_extra['plugins']) && is_array($hook_extra['plugins'])) {
+            $targets = array_merge($targets, $hook_extra['plugins']);
+        }
+        if (!in_array($self, $targets, true)) {
+            return $response;
+        }
+        if (!self::set_runtime_state('PENDING')) {
+            return new WP_Error('esp_upgrade_pending_unavailable',
+                __('保護状態を更新中として記録できないため、ESPの更新を中止しました。', ESP_Config::TEXT_DOMAIN));
+        }
+        return $response;
+    }
+
+    /** 管理者による検証、プラグイン有効化、更新後の復旧でのみ実行する。 */
+    public static function verify_and_commit($setup) {
+        if (!self::set_runtime_state('PENDING')) {
+            return false;
+        }
+        $ready = false;
+        try {
+            $ready = $setup->check_plugin_version() === true;
             $settings = get_option(ESP_Config::OPTION_KEY, null);
-            $ready = $migration_ok === true &&
-                is_array($settings) &&
-                isset($settings['path']) && is_array($settings['path']);
+            $ready = $ready && self::valid_settings($settings);
             if ($ready) {
-                foreach ($settings['path'] as $path) {
-                    if (!is_array($path) || !isset($path['path']) || !is_string($path['path']) ||
-                        empty($path['path']) || trim($path['path'], " /\t\n\r\0\x0B") === '') {
-                        $ready = false;
-                        break;
-                    }
-                }
-            }
-            if ($ready) {
-                // プラグインの保存バージョンが一致していてもDB移行済みとは限らない。
-                // 未設定・旧値・将来値は不明状態として拒否する。
-                // ここで旧migration(v1等)を実行しない。詳細検証と安全な修復は#44へ。
-                $stored_db_version = get_option('esp_db_version', null);
-                $required_db_version = (int) ESP_Config::OPTION_DEFAULTS['db_version'];
-                $known_db_version = (is_int($stored_db_version) ||
-                    (is_string($stored_db_version) && ctype_digit($stored_db_version)));
-                if ($known_db_version && (int) $stored_db_version > $required_db_version) {
-                    // 将来版を旧PHPが勝手に正常扱いするダウングレードを禁止。
-                    $ready = false;
-                } elseif (!$known_db_version || (int) $stored_db_version !== $required_db_version) {
-                    // 旧activate()は最新版の実テーブルを作ってもDB版を記録しない。
-                    // 認可に必要なスキーマが実在すれば、欠損した版印だけで
-                    // 全公開ページを503にしない（版印の勝手な書換えはしない）。
-                    $ready = self::verify_legacy_security_schema();
-                }
-            }
-            if ($ready) {
-                // DB障害中でもWordPressのオプションキャッシュは値を返し得る。
-                // DBの実読み取りで、正常な設定と接続障害を区別する。
-                global $wpdb;
-                $ready = is_object($wpdb) &&
-                    (string) $wpdb->get_var('SELECT 1') === '1' &&
-                    $wpdb->last_error === '';
+                $stored = get_option('esp_db_version', null);
+                $required = (int) ESP_Config::OPTION_DEFAULTS['db_version'];
+                $known = is_int($stored) || (is_string($stored) && ctype_digit($stored));
+                $ready = (!$known || (int) $stored <= $required) &&
+                    self::verify_legacy_security_schema();
             }
             if ($ready && class_exists('ESP_Media_Protection')) {
                 $ready = ESP_Media_Protection::ensure_rewrite_policy() === true;
             }
-            if ($ready) {
-                return true;
-            }
-        } catch (\Throwable $error) {
-            error_log('ESP: protection boot readiness check failed');
+        } catch (\\Throwable $error) {
+            error_log('ESP: explicit runtime verification failed');
+            $ready = false;
         }
+        if (!$ready) {
+            self::set_runtime_state('FAILED');
+            return false;
+        }
+        return self::set_runtime_state('READY');
+    }
 
-        self::register_failure_hooks();
-        return false;
+    /**
+     * 日次WP-Cronからの読取専用監査。Rewriteは修復せず、異常コードだけ保存。
+     * 新規保護の直前検査は別途必須とし、Cron遅延へ安全性を依存させない。
+     */
+    public static function audit() {
+        $errors = [];
+        try {
+            $settings = get_option(ESP_Config::OPTION_KEY, null);
+            if (!self::valid_settings($settings)) {
+                $errors[] = 'settings_invalid';
+            }
+            $stored = get_option('esp_db_version', null);
+            $required = (int) ESP_Config::OPTION_DEFAULTS['db_version'];
+            if ((is_int($stored) || (is_string($stored) && ctype_digit($stored))) &&
+                (int) $stored > $required) {
+                $errors[] = 'future_schema';
+            }
+            if (!self::verify_legacy_security_schema()) {
+                $errors[] = 'schema_invalid';
+            }
+            if (class_exists('ESP_Media_Protection') &&
+                !ESP_Media_Protection::audit_rewrite_policy()) {
+                $errors[] = 'rewrite_mismatch';
+            }
+            $installed_version = get_option(ESP_Config::VERSION_OPTION_KEY, null);
+            if ($installed_version !== ESP_VERSION) {
+                $errors[] = 'version_unverified';
+            }
+            if (get_option(self::RUNTIME_STATE_OPTION, null) !== 'READY') {
+                $errors[] = 'runtime_not_ready';
+            }
+        } catch (\\Throwable $error) {
+            $errors[] = 'audit_exception';
+        }
+        update_option(self::AUDIT_OPTION, [
+            'checked_at' => time(), 'errors' => array_values(array_unique($errors)),
+        ], false);
+        // 管理者による明示的な復旧まで、外部ファイルを勝手に変更しない。
+        return $errors === [];
+    }
+
+    /** 設定欠損・形状異常だけは軽い認可前チェックで拒否する。 */
+    private static function valid_settings($settings) {
+        if (!is_array($settings) || !isset($settings['path']) ||
+            !is_array($settings['path'])) {
+            return false;
+        }
+        foreach ($settings['path'] as $path) {
+            if (!is_array($path) || !isset($path['path']) ||
+                !is_string($path['path']) || !$path['path'] ||
+                trim($path['path'], " /\\t\\n\\r\\0\\x0B") === '') {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
@@ -147,10 +256,15 @@ final class ESP_Protection_State {
         echo '<div class="wrap"><h1>' .
             esc_html__('Easy Slug Protect — 保護状態を確認できません', ESP_Config::TEXT_DOMAIN) .
             '</h1><p>' .
-            esc_html__('保護設定、DB移行状態、またはサーバーのRewriteを検証できません。保護情報を推測して上書きする操作は停止しています。', ESP_Config::TEXT_DOMAIN) .
+            esc_html__('保護設定または更新状態が未確認です。通常アクセス時には詳細検証や自動修復を実行しません。', ESP_Config::TEXT_DOMAIN) .
             '</p><p>' .
-            esc_html__('設定・データベースのバックアップを確認し、DB接続・設定値・uploads/.htaccessとサーバー設定を修復してください。PHPの拒否は静的ファイルの直接公開を防げません。', ESP_Config::TEXT_DOMAIN) .
-            '</p></div>';
+            esc_html__('DBとuploads/.htaccessを確認してから、必要なら管理者として再検証してください。静的ファイルの直接公開はPHP側では停止できません。', ESP_Config::TEXT_DOMAIN) .
+            '</p><form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
+        wp_nonce_field('esp_verify_runtime');
+        echo '<input type="hidden" name="action" value="esp_verify_runtime" />'
+            . '<p><button type="submit" class="button button-primary">'
+            . esc_html__('保護状態を再検証する', ESP_Config::TEXT_DOMAIN)
+            . '</button></p></form></div>';
     }
 
     private static function register_failure_hooks() {
