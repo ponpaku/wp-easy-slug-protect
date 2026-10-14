@@ -31,6 +31,7 @@ final class ESP_Protection_State {
     /** WordPress更新と復旧のフックはREADYでない場合も登録する。 */
     public static function register_runtime_hooks($setup) {
         add_filter('upgrader_pre_install', [self::class, 'before_plugin_upgrade'], 10, 2);
+        add_action('admin_notices', [self::class, 'render_audit_notice']);
         // 未導入の状態印や標準更新によるPENDINGを、最初の管理者アクセスで検証する。
         // FAILEDは毎回再試行せず、明示的な復旧操作を要求する。
         add_action('admin_init', static function () use ($setup) {
@@ -160,6 +161,20 @@ final class ESP_Protection_State {
         ], false);
         // 管理者による明示的な復旧まで、外部ファイルを勝手に変更しない。
         return $errors === [];
+    }
+
+    /** WP-Cronの点検異常は管理者へ表示し、毎アクセスで再検査しない。 */
+    public static function render_audit_notice() {
+        if (!current_user_can('manage_options')) {
+            return;
+        }
+        $audit = get_option(self::AUDIT_OPTION, null);
+        if (!is_array($audit) || empty($audit['errors'])) {
+            return;
+        }
+        echo '<div class="notice notice-warning"><p>'
+            . esc_html__('Easy Slug Protect: 定期点検で不整合を検出しました。保護設定とRewriteを確認し、必要ならESPの復旧画面から再検証してください。', ESP_Config::TEXT_DOMAIN)
+            . '</p></div>';
     }
 
     /** 設定欠損・形状異常だけは軽い認可前チェックで拒否する。 */
