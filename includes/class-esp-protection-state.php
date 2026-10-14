@@ -23,7 +23,7 @@ final class ESP_Protection_State {
             if ($ready) {
                 foreach ($settings['path'] as $path) {
                     if (!is_array($path) || !isset($path['path']) || !is_string($path['path']) ||
-                        trim($path['path'], '/') === '') {
+                        empty($path['path']) || trim($path['path'], " /\t\n\r\0\x0B") === '') {
                         $ready = false;
                         break;
                     }
