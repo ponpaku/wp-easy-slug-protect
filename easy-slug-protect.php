@@ -87,9 +87,27 @@ class Easy_Slug_Protect {
         }
         // 公開ルートやコンテンツキャッシュの初期化前に、保護状態不明なら拒否する。
         $ready = ESP_Protection_State::boot($this->setup);
+
+        // 保守フックの登録は保護ゲートとは独立に行う。失敗時でも
+        // セッション期限切れの削除等、公開権限を拡げないクリーンアップは継続する。
+        add_action(ESP_Config::DAILY_CLEANUP_HOOK, ['ESP_Setup', 'run_cleanup_tasks']);
+        // 保護情報の再生成・整合性修復はREADY時だけ実行する。
+        add_action('esp_media_cache_refresh', static function () use ($ready) {
+            if ($ready) { ESP_Setup::run_media_cache_refresh(); }
+        });
+        add_action('esp_all_cache_refresh', static function () use ($ready) {
+            if ($ready) { ESP_Setup::run_all_cache_refresh(); }
+        });
+        add_action(ESP_Config::INTEGRITY_CHECK_HOOK, static function () use ($ready) {
+            if ($ready) { ESP_Filter::cron_check_and_fix_permalink_paths(); }
+        });
+
         if (!$ready) {
-            // 調査のためWordPress管理画面は維持するが、読み取れない設定を
-            // 上書きしかねないESP設定フォームは読み込まない。
+            // 壊れた設定を上書きしかねない通常フォームは表示しない。
+            // 管理者の診断ページは登録して復旧経路を維持する。
+            if (is_admin()) {
+                ESP_Protection_State::register_recovery_admin();
+            }
             return;
         }
 
@@ -113,13 +131,6 @@ class Easy_Slug_Protect {
             }
         }, 5); // 優先度を高めに設定
         
-        // クリーンアップタスクの実行（Setupで登録したcronから呼び出される）
-        add_action(ESP_Config::DAILY_CLEANUP_HOOK, ['ESP_Setup', 'run_cleanup_tasks']);
-        // メディアキャッシュ更新
-        add_action('esp_media_cache_refresh', ['ESP_Setup', 'run_media_cache_refresh']);
-        // 全キャッシュ更新
-        add_action('esp_all_cache_refresh', ['ESP_Setup', 'run_all_cache_refresh']);
-
         // AJAXアクションのフック
         add_action('wp_loaded', function() {
             if (is_admin()) { // 管理画面からのリクエストのみ
@@ -128,10 +139,6 @@ class Easy_Slug_Protect {
                 add_action('wp_ajax_esp_clear_protection_cache', [$esp_filter, 'ajax_clear_protection_cache']);
             }
         });
-
-        if (class_exists('ESP_Filter')) { // ESP_Filter がロードされていることを確認
-            add_action(ESP_Config::INTEGRITY_CHECK_HOOK, ['ESP_Filter', 'cron_check_and_fix_permalink_paths']);
-        }
 
     }
 
