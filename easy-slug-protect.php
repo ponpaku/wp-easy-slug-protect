@@ -77,9 +77,10 @@ class Easy_Slug_Protect {
     private function init() {
         // WordPressの通常のメタデータ更新は、まず失効できるか確認する。
         // 失効できないときに更新してしまうと次リクエストに旧認可が残り得る。
-        foreach (['add_post_metadata', 'update_post_metadata', 'delete_post_metadata'] as $hook) {
+        foreach (['add_post_metadata', 'update_post_metadata'] as $hook) {
             add_filter($hook, ['ESP_Authorization_Cache', 'guard_postmeta_write'], 1, 5);
         }
+        add_filter('delete_post_metadata', ['ESP_Authorization_Cache', 'guard_postmeta_delete'], 1, 5);
         // 管理画面・公開側の両方で、投稿メタ更新時の認可キャッシュ無効化を登録する。
         // ESP_Filter::init()は公開側のみで、一部の更新処理には間に合わない。
         foreach (['added_post_meta', 'updated_post_meta', 'deleted_post_meta'] as $hook) {
