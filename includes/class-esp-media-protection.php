@@ -130,9 +130,8 @@ class ESP_Media_Protection {
         add_action('add_attachment', [$this, 'auto_protect_on_upload']);
         // 他プラグインによるupdate_post_meta()を含め、保護情報の更新時には
         // 認可キャッシュを必ず無効化する。
-        add_action('added_post_meta', [$this, 'on_protection_meta_mutation'], 10, 4);
-        add_action('updated_post_meta', [$this, 'on_protection_meta_mutation'], 10, 4);
-        add_action('deleted_post_meta', [$this, 'on_protection_meta_mutation'], 10, 4);
+        // 保護メタ更新の監視フックはプラグイン起動時に一度だけ登録する。
+        // 管理画面からの更新を取りこぼさず、複数インスタンスの重複登録も防止。
         
         // メディアの削除時にキャッシュを更新
         add_action('delete_attachment', [$this, 'regenerate_media_cache']);
@@ -885,7 +884,7 @@ class ESP_Media_Protection {
      * ESP自身の保存処理を経由しないpostmeta更新でも、
      * 古いメディア認可キャッシュを無効化する。
      */
-    public function on_protection_meta_mutation($meta_id, $post_id, $meta_key, $meta_value) {
+    public static function on_protection_meta_mutation($meta_id, $post_id, $meta_key, $meta_value) {
         if ($meta_key === self::META_KEY_PROTECTED_PATH) {
             ESP_Authorization_Cache::invalidate('media', self::MEDIA_CACHE_KEY);
         }
