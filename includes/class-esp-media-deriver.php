@@ -12,9 +12,10 @@ class ESP_Media_Deriver {
      * メディアファイルを配信
      *
      * @param string $file_path ファイルパス
+     * @param bool $is_protected ESP認証が必要な保護ファイルかどうか（省略時は安全側）
      * @return bool 成功時true、失敗時false
      */
-    public function deliver($file_path) {
+    public function deliver($file_path, $is_protected = true) {
         try {
             if (!is_string($file_path) || $file_path === '') {
                 // 無効なパスは処理しない
@@ -47,7 +48,7 @@ class ESP_Media_Deriver {
 
             // Webサーバー配信が可能な場合はヘッダー委譲のみで終了
             if ($delivery_method['type'] !== 'php') {
-                if ($this->attempt_web_server_delivery($delivery_method, $file_path)) {
+                if ($this->attempt_web_server_delivery($delivery_method, $file_path, $is_protected)) {
                     exit;
                 }
             }
@@ -58,7 +59,7 @@ class ESP_Media_Deriver {
             $range = isset($_SERVER['HTTP_RANGE']) ? $_SERVER['HTTP_RANGE'] : '';
             if ($range) {
                 // Rangeヘッダーがある場合は分割配信
-                if (!$this->deliver_with_range($file_path, $file_size, $mime_type, $range)) {
+                if (!$this->deliver_with_range($file_path, $file_size, $mime_type, $range, $is_protected)) {
                     return false;
                 }
                 exit;
@@ -71,7 +72,7 @@ class ESP_Media_Deriver {
             $disposition = $this->should_inline($mime_type) ? 'inline' : 'attachment';
             header('Content-Disposition: ' . $disposition . '; filename="' . basename($file_path) . '"');
 
-            $this->set_cache_headers($mime_type);
+            $this->set_cache_headers($mime_type, $is_protected);
 
             if (!$this->readfile_chunked($file_path)) {
                 return false;
@@ -138,54 +139,43 @@ class ESP_Media_Deriver {
     }
 
     /**
-     * Webサーバーにヘッダーを引き渡して配信させる
-     *
-     * @param array{type:string,path?:string} $delivery_method 判定済みの配信方法
-     * @param string $file_path 実ファイルパス
-     * @return bool ヘッダー送信に成功したらtrue
+     * Webサーバーへの内部配信委譲でも、先に競合ヘッダーを消去し、
+     * 保護対象にはキャッシュ保存禁止のヘッダーを再設定してから引き渡す。
      */
-    private function attempt_web_server_delivery($delivery_method, $file_path) {
+    private function attempt_web_server_delivery($delivery_method, $file_path, $is_protected = true) {
+        $directive = '';
         switch ($delivery_method['type']) {
             case 'apache':
-                // X-Sendfileヘッダーを付与
-                $this->clear_header();
-                header('X-Sendfile: ' . $file_path);
-                return true;
-
+                $directive = 'X-Sendfile: ' . $file_path;
+                break;
             case 'nginx':
-                if (isset($delivery_method['path'])) {
-                    // X-Accel-Redirectで内部リダイレクト
-                    $this->clear_header();
-                    header('X-Accel-Redirect: ' . $delivery_method['path']);
-                    return true;
-                }
-                return false;
-
-            case 'litespeed':
-                // LiteSpeedでは内部リダイレクト先に認証キー付きのパスを指定する
-                $access_key = $this->get_litespeed_access_key();
-                if ($access_key === '') {
-                    error_log('ESP: LiteSpeed access key unavailable. Falling back to PHP delivery.');
-                    return false;
-                }
-
                 if (!isset($delivery_method['path'])) {
-                    error_log('ESP: LiteSpeed redirect path missing. Falling back to PHP delivery.');
                     return false;
                 }
-
+                $directive = 'X-Accel-Redirect: ' . $delivery_method['path'];
+                break;
+            case 'litespeed':
+                $access_key = $this->get_litespeed_access_key();
+                if ($access_key === '' || !isset($delivery_method['path'])) {
+                    error_log('ESP: LiteSpeed delivery unavailable. Falling back to PHP.');
+                    return false;
+                }
                 $redirect_path = $this->build_litespeed_redirect_path($delivery_method['path'], $access_key);
                 if ($redirect_path === '') {
-                    error_log('ESP: LiteSpeed redirect path unavailable. Falling back to PHP delivery.');
                     return false;
                 }
-
-                $this->clear_header();
-                header('X-LiteSpeed-Location: ' . $redirect_path);
-                return true;
+                $directive = 'X-LiteSpeed-Location: ' . $redirect_path;
+                break;
+            default:
+                return false;
         }
 
-        return false;
+        $this->clear_header();
+        if ($is_protected) {
+            $this->set_cache_headers('application/octet-stream', true);
+        }
+        header($directive);
+        return true;
     }
 
     /**
@@ -208,6 +198,9 @@ class ESP_Media_Deriver {
             'Pragma',
             'Last-Modified',
             'ETag',
+            'Surrogate-Control',
+            'CDN-Cache-Control',
+            'X-LiteSpeed-Cache-Control',
         ];
 
         foreach ($headers as $header) {
@@ -294,7 +287,19 @@ class ESP_Media_Deriver {
      * @param string $range     Rangeヘッダー
      * @return bool 成功時true
      */
-    private function deliver_with_range($file_path, $file_size, $mime_type, $range) {
+    private function deliver_with_range($file_path, $file_size, $mime_type, $range, $is_protected = true) {
+        // 不正なRange指定で416を返す場合も、保護画像のキャッシュを許可しない。
+        $this->set_cache_headers($mime_type, $is_protected);
+        // 0バイトや書式不正のRange要求に206を返さない。
+        if ($file_size <= 0 || strpos($range, '=') === false) {
+            header('HTTP/1.1 416 Requested Range Not Satisfiable');
+            if (function_exists('http_response_code')) {
+                http_response_code(416);
+            }
+            header("Content-Range: bytes */$file_size");
+            return false;
+        }
+
         // Rangeヘッダーを単位と値に分割
         list($size_unit, $range_orig) = explode('=', $range, 2);
 
@@ -336,7 +341,7 @@ class ESP_Media_Deriver {
             $end_part = isset($range_parts[1]) ? $range_parts[1] : '';
 
             if ($start_part === '') {
-                if ($end_part === '' || !is_numeric($end_part)) {
+                if ($end_part === '' || !ctype_digit($end_part)) {
                     header('HTTP/1.1 416 Requested Range Not Satisfiable');
                     if (function_exists('http_response_code')) {
                         http_response_code(416);
@@ -369,7 +374,7 @@ class ESP_Media_Deriver {
                 $c_start = $file_size - $suffix_length;
                 $c_end = $file_size - 1;
             } else {
-                if (!is_numeric($start_part)) {
+                if (!ctype_digit($start_part)) {
                     header('HTTP/1.1 416 Requested Range Not Satisfiable');
                     if (function_exists('http_response_code')) {
                         http_response_code(416);
@@ -380,7 +385,7 @@ class ESP_Media_Deriver {
 
                 $c_start = (int) $start_part;
                 if ($end_part !== '') {
-                    if (!is_numeric($end_part)) {
+                    if (!ctype_digit($end_part)) {
                         header('HTTP/1.1 416 Requested Range Not Satisfiable');
                         if (function_exists('http_response_code')) {
                             http_response_code(416);
@@ -395,9 +400,19 @@ class ESP_Media_Deriver {
             }
         }
 
-        // 範囲がファイルサイズの内側に収まるよう補正
-        $c_start = max(0, min($c_start, $file_size - 1));
-        $c_end = max($c_start, min($c_end, $file_size - 1));
+        // 開始位置が末尾以降、または逆順の範囲は416にする。
+        // 開始位置を末尾へ丸めると、存在しない範囲を206で返してしまう。
+        if ($c_start >= $file_size || $c_end < $c_start) {
+            header('HTTP/1.1 416 Requested Range Not Satisfiable');
+            if (function_exists('http_response_code')) {
+                http_response_code(416);
+            }
+            header("Content-Range: bytes */$file_size");
+            return false;
+        }
+
+        // 有効な要求の終了位置だけをファイル末尾までに制限する。
+        $c_end = min($c_end, $file_size - 1);
         $length = $c_end - $c_start + 1;
 
         if ($length < 1) {
@@ -421,7 +436,7 @@ class ESP_Media_Deriver {
         $disposition = $this->should_inline($mime_type) ? 'inline' : 'attachment';
         header('Content-Disposition: ' . $disposition . '; filename="' . basename($file_path) . '"');
 
-        $this->set_cache_headers($mime_type);
+
 
         $fp = @fopen($file_path, 'rb');
         if ($fp === false) {
@@ -502,19 +517,42 @@ class ESP_Media_Deriver {
     }
 
     /**
-     * キャッシュヘッダーを設定
+     * PHP通常配信・Range配信・Webサーバー委譲でキャッシュ方針を統一する。
+     * 公開画像の従来の長期キャッシュは維持し、保護ファイルは保存を禁止する。
      *
-     * @param string $mime_type MIMEタイプ
+     * @return string[] 送信するHTTPレスポンスヘッダー
      */
-    private function set_cache_headers($mime_type) {
+    private function get_cache_header_lines($mime_type, $is_protected) {
+        if ($is_protected) {
+            return [
+                'Cache-Control: private, no-store, max-age=0',
+                'Pragma: no-cache',
+                'Expires: 0',
+                'Surrogate-Control: no-store',
+                'CDN-Cache-Control: no-store',
+                'X-LiteSpeed-Cache-Control: no-cache',
+            ];
+        }
         if (strpos($mime_type, 'image/') === 0 ||
             strpos($mime_type, 'text/css') === 0 ||
             strpos($mime_type, 'application/javascript') === 0) {
-            header('Cache-Control: public, max-age=31536000');
-            header('Expires: ' . gmdate('D, d M Y H:i:s', time() + 31536000) . ' GMT');
-        } else {
-            header('Cache-Control: private, max-age=3600');
-            header('Expires: ' . gmdate('D, d M Y H:i:s', time() + 3600) . ' GMT');
+            return [
+                'Cache-Control: public, max-age=31536000',
+                'Expires: ' . gmdate('D, d M Y H:i:s', time() + 31536000) . ' GMT',
+            ];
+        }
+        return [
+            'Cache-Control: private, max-age=3600',
+            'Expires: ' . gmdate('D, d M Y H:i:s', time() + 3600) . ' GMT',
+        ];
+    }
+
+    /**
+     * サーバー委譲時の既存ヘッダー削除を終えてから設定する。
+     */
+    private function set_cache_headers($mime_type, $is_protected = true) {
+        foreach ($this->get_cache_header_lines($mime_type, $is_protected) as $line) {
+            header($line);
         }
     }
 

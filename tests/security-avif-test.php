@@ -13,17 +13,24 @@ class TestWPDB {
     public $postmeta = 'wp_postmeta';
     public $rows = [];
     public $metadata = [];
+    public $last_error = '';
+    public $fail_primary = false;
+    public $fail_candidates = false;
     public function prepare($sql, ...$args) {
         if (count($args) === 1 && is_array($args[0])) { $args = $args[0]; }
         return ['sql' => $sql, 'args' => $args];
     }
     public function get_var($query) {
+        if ($this->fail_primary) { $this->fail_primary = false; $this->last_error = 'SQL error'; return null; }
+        $this->last_error = '';
         if (strpos($query['sql'], 'COUNT(*)') !== false) { return 1; }
         $target = $query['args'][0] ?? '';
         foreach ($this->rows as $id => $path) { if ($path === $target) { return $id; } }
         return null;
     }
     public function get_col($query) {
+        if ($this->fail_candidates) { $this->fail_candidates = false; $this->last_error = 'SQL error'; return null; }
+        $this->last_error = '';
         $matches = [];
         foreach ($this->rows as $id => $path) {
             if (in_array($path, array_slice($query['args'], 1), true)) { $matches[] = $id; }
@@ -32,6 +39,7 @@ class TestWPDB {
     }
 }
 $wpdb = new TestWPDB();
+class WP_Error { public $code; public function __construct($code, $message) { $this->code = $code; } }
 function is_admin() { return true; }
 function sanitize_text_field($value) { return (string) $value; }
 function get_transient($name) { return []; }
@@ -75,17 +83,6 @@ $inline = $deriver->getMethod('should_inline');
 $inline->setAccessible(true);
 check_avif($inline->invoke($deriver->newInstanceWithoutConstructor(), 'image/avif'), 'PHP media delivery displays AVIF inline');
 
-$lookup = $media_class->getMethod('get_attachment_id_from_path');
-$lookup->setAccessible(true);
-$wpdb->rows = [123 => '2026/10/photo.avif', 456 => '2026/10/other.jpg'];
-$wpdb->metadata = [
-    123 => ['file' => '2026/10/photo.avif', 'sizes' => ['thumbnail' => ['file' => 'photo-150x150.avif']]],
-    456 => ['file' => '2026/10/other.jpg', 'sizes' => ['thumbnail' => ['file' => 'other-150x150.avif']]],
-];
-$base = '/var/www/wp-content/uploads/';
-check_avif($lookup->invoke($media, $base . '2026/10/photo.avif') === 123, 'AVIF original resolves to attachment');
-check_avif($lookup->invoke($media, $base . '2026/10/photo-150x150.avif') === 123, 'AVIF thumbnail resolves to protected parent');
-check_avif($lookup->invoke($media, $base . '2026/10/other-150x150.avif') === 456, 'Converted AVIF thumbnail resolves to original JPEG parent');
-check_avif($lookup->invoke($media, $base . '2026/10/photo-320x240.avif') === false, 'Unregistered AVIF thumbnail is not attributed to unrelated media');
-check_avif($lookup->invoke($media, $base . '2026/11/photo-150x150.avif') === false, 'AVIF thumbnail cannot cross upload directories');
-check_avif($lookup->invoke($media, $base . '2026/10/nonexistent.avif') === false, 'Unregistered AVIF remains unprotected');
+// 変換AVIFサムネイルを含む添付ID判定は、Resolver共通仕様に基づき
+// security-media-resolver-test.phpで検証する。
+echo "All AVIF format/Rewrite checks passed.\n";

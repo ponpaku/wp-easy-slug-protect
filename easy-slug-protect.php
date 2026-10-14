@@ -50,6 +50,8 @@ class Easy_Slug_Protect {
         // コアクラスの読み込み
         require_once ESP_PATH . 'includes/class-esp-core.php';
         require_once ESP_PATH . 'includes/class-esp-setup.php';
+        require_once ESP_PATH . 'includes/class-esp-protection-state.php';
+        require_once ESP_PATH . 'includes/class-esp-authorization-cache.php';
         require_once ESP_PATH . 'includes/class-esp-auth.php';
         require_once ESP_PATH . 'includes/class-esp-cookie.php';
         require_once ESP_PATH . 'includes/class-esp-logout.php';
@@ -61,6 +63,8 @@ class Easy_Slug_Protect {
         require_once ESP_PATH . 'includes/class-esp-filter.php';
         require_once ESP_PATH . 'includes/class-esp-path-matcher.php';
         require_once ESP_PATH . 'includes/class-esp-media-deriver.php';
+        require_once ESP_PATH . 'includes/class-esp-media-file-resolver.php';
+        require_once ESP_PATH . 'includes/class-esp-media-access-policy.php';
         require_once ESP_PATH . 'includes/class-esp-media-protection.php';
 
         // 管理画面クラスの読み込み
@@ -73,8 +77,21 @@ class Easy_Slug_Protect {
      * プラグインの初期化
      */
     private function init() {
-        // バージョンチェックと更新は常に実行
-        $this->setup->check_plugin_version();
+        // 管理画面・公開側の両方で、投稿メタ更新時の認可キャッシュ無効化を登録する。
+        // ESP_Filter::init()は公開側のみで、一部の更新処理には間に合わない。
+        foreach (['added_post_meta', 'updated_post_meta', 'deleted_post_meta'] as $hook) {
+            add_action($hook, ['ESP_Filter', 'on_permalink_meta_mutation'], 10, 4);
+        }
+        if (is_admin()) {
+            add_action('admin_notices', ['ESP_Media_Protection', 'render_rewrite_admin_notice']);
+        }
+        // 公開ルートやコンテンツキャッシュの初期化前に、保護状態不明なら拒否する。
+        $ready = ESP_Protection_State::boot($this->setup);
+        if (!$ready) {
+            // 調査のためWordPress管理画面は維持するが、読み取れない設定を
+            // 上書きしかねないESP設定フォームは読み込まない。
+            return;
+        }
 
         if (is_admin()) {
             // 管理画面の初期化
