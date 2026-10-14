@@ -1062,7 +1062,10 @@ class ESP_Media_Protection {
         if ($result !== true) {
             update_option('esp_rewrite_last_error', $result instanceof WP_Error
                 ? $result->get_error_code() : 'esp_rewrite_unknown', false);
-            return false;
+            // 実DBで保護済みメディアが0件と確定した場合に限り、
+            // Rewriteの修復失敗で通常の公開ページまで503にしない。
+            // 新規保護メタの追加はcan_assign_protected_mediaが別途拒否する。
+            return self::has_any_protected_media_records() === false;
         }
         update_option('esp_rewrite_policy_version', $policy, false);
         delete_option('esp_rewrite_last_error');
@@ -1117,7 +1120,7 @@ class ESP_Media_Protection {
      * @param bool $force_litespeed_key_regeneration LiteSpeedキーを再生成するかどうか
      * @return bool 成功時true
      */
-    public function update_htaccess($force_litespeed_key_regeneration = false, $deactivating = false) {
+    public function update_htaccess($force_litespeed_key_regeneration = false, $deactivating = false, $route_override = null) {
         if ($deactivating) {
             // プラグイン停止後は既存の保護画像を認証できなくなる。
             // DB照会で保護対象0件を確認できない限り、Webサーバー側の
@@ -1155,7 +1158,8 @@ class ESP_Media_Protection {
             }
             // 保護設定が有効なら、対象画像が0件から1件になる場合もRewriteを維持する。
             // DBの件数ではなく、保護の有効設定に従ってルールを決める。
-            $route_media = !$deactivating && self::is_media_protection_enabled();
+            $route_media = !$deactivating &&
+                ($route_override === null ? self::is_media_protection_enabled() : (bool) $route_override);
             if (is_link($htaccess_file)) {
                 return new WP_Error('esp_htaccess_symlink', __('シンボリックリンクの保護ルールは自動置換できません。', ESP_Config::TEXT_DOMAIN));
             }
@@ -1566,7 +1570,29 @@ class ESP_Media_Protection {
         if (!self::is_media_protection_enabled()) {
             return false;
         }
-        return self::ensure_rewrite_policy() === true;
+        if (!preg_match('/apache|litespeed/i', $_SERVER['SERVER_SOFTWARE'] ?? '')) {
+            return true; // Nginxの保護ルールは外部設定の責務。
+        }
+        // ensureは0件時に一般公開ページの503を回避し得るため、
+        // 保護メタを書き込む際は必ず実ファイルの捕捉ルールを検証する。
+        return self::rewrite_file_matches_policy(true) ||
+            (self::ensure_rewrite_policy() && self::rewrite_file_matches_policy(true));
+    }
+
+    /**
+     * OFF→ONの保存前に、保護に必要なRewriteを先行設置する。
+     * 後段で設定の保存に失敗した場合、次の起動ゲートがOFFルールへ復旧する。
+     */
+    public static function can_enable_media_protection() {
+        if (!preg_match('/apache|litespeed/i', $_SERVER['SERVER_SOFTWARE'] ?? '')) {
+            return true; // Nginxは運用者が外部のRewriteを設定する。
+        }
+        if (self::rewrite_file_matches_policy(true)) {
+            return true;
+        }
+        $media = new self();
+        return $media->update_htaccess(false, false, true) === true &&
+            self::rewrite_file_matches_policy(true);
     }
 
     /**
