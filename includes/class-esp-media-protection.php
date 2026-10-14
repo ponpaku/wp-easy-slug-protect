@@ -396,6 +396,18 @@ class ESP_Media_Protection {
             return new WP_REST_Response(['code' => 'esp_media_state_unknown'], 503);
         }
 
+        // メタ更新前epochと更新後epochの間には短い競合窓がある。
+        // 一覧クエリのスナップショットが古くても、RESTの各要素を返す
+        // 直前に当該添付の実メタを再確認して新規保護を見落とさない。
+        $live_path_id = get_post_meta($post->ID, self::META_KEY_PROTECTED_PATH, true);
+        if (!empty($live_path_id)) {
+            $paths = ESP_Option::get_current_setting('path');
+            if (!is_array($paths) || !isset($paths[$live_path_id]) ||
+                !$this->auth->is_logged_in($paths[$live_path_id])) {
+                return new WP_REST_Response(['code' => 'esp_rest_media_forbidden'], 403);
+            }
+        }
+
         if (in_array($post->ID, $excluded_media_ids)) {
             // 未認証の場合はエラーレスポンスを返す
             $error_data = [
