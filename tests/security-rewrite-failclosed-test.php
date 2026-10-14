@@ -104,6 +104,23 @@ check((fileperms($file) & 0777) === 0640, 'rollback restores old permissions');
 file_put_contents($file, $new);
 chmod($file, 0644);
 
+// 既存の保護メディアがある場合、設定OFFでもルールを取り外さない。
+$GLOBALS['enabled'] = false;
+$wpdb->count = 1;
+$wpdb->last_error = '';
+$error = $media->update_htaccess();
+check($error instanceof WP_Error &&
+    $error->get_error_code() === 'esp_htaccess_protected_media_remain',
+    'settings OFF does not remove active protected media rules');
+check(file_get_contents($file) === $new, 'rules unchanged after rejected settings OFF');
+$wpdb->count = null;
+$wpdb->last_error = 'unavailable';
+$error = $media->update_htaccess();
+check($error instanceof WP_Error &&
+    $error->get_error_code() === 'esp_htaccess_protected_media_remain',
+    'unknown DB does not authorize removing the active rules');
+$GLOBALS['enabled'] = true;
+$wpdb->last_error = '';
 $wpdb->count = 0;
 check($media->update_htaccess() === true, 'zero protected records still install rewrite');
 check(strpos(file_get_contents($file), 'esp-media') !== false, 'zero-to-one transition already covered by rewrite');
