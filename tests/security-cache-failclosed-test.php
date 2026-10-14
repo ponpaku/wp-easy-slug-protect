@@ -64,14 +64,15 @@ check(($args['post__in'] ?? null) === [0], 'REST media collection is empty on un
 $response = $media->check_rest_media_access(new WP_REST_Response(), (object) ['ID' => 1], $request);
 check($response->get_status() === 503, 'REST single media returns 503 on unknown cache');
 
-// WordPressのupload_files権限があるユーザーでも、メディア一覧・単体取得で
-// ESP保護パスの認証を迂回できないことを検証する。
+// upload_filesを持つサイト編集者・管理者のREST例外は従来互換とし、
+// 変更しない。新しい一律認可ポリシーは#43に分離する。
 $GLOBALS['can_upload'] = true;
 $args = $media->filter_rest_media_query([], $request);
-check(($args['post__in'] ?? null) === [0], 'uploader cannot bypass an unknown media cache');
+check($args === [], 'existing upload_files capability preserves REST media list');
 $response = $media->check_rest_media_access(new WP_REST_Response(), (object) ['ID' => 11], $request);
-check($response->get_status() === 503, 'uploader still receives 503 on unknown authorization state');
+check($response->get_status() === 200, 'existing upload_files capability preserves REST media single item');
 
+$GLOBALS['can_upload'] = false;
 $authProperty = (new ReflectionClass('ESP_Media_Protection'))->getProperty('auth');
 $authProperty->setValue($media, new class {
     public function is_logged_in($path) { return false; }
@@ -81,8 +82,7 @@ $GLOBALS['transients'][ESP_Media_Protection::MEDIA_CACHE_KEY] = [
     'value' => ['path_test' => [11]],
 ];
 $args = $media->filter_rest_media_query([], $request);
-check(($args['post__not_in'] ?? null) === [11], 'uploader collection excludes media protected by ESP');
+check(($args['post__not_in'] ?? null) === [11], 'unprivileged media list excludes protected media');
 $response = $media->check_rest_media_access(new WP_REST_Response(), (object) ['ID' => 11], $request);
-check($response->get_status() === 403, 'uploader single media requires ESP path authorization');
-
+check($response->get_status() === 403, 'unprivileged media single item requires ESP authorization');
 echo "All cache fail-closed tests passed.\n";
