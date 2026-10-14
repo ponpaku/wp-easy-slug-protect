@@ -79,6 +79,8 @@ class Easy_Slug_Protect {
         // ESP_Filter::init()は公開側のみで、一部の更新処理には間に合わない。
         foreach (['added_post_meta', 'updated_post_meta', 'deleted_post_meta'] as $hook) {
             add_action($hook, ['ESP_Filter', 'on_permalink_meta_mutation'], 10, 4);
+            // 管理画面や他プラグインによる保護メタ変更も必ず失効させる。
+            add_action($hook, ['ESP_Media_Protection', 'on_protection_meta_mutation'], 10, 4);
         }
         if (is_admin()) {
             add_action('admin_notices', ['ESP_Media_Protection', 'render_rewrite_admin_notice']);
