@@ -1057,7 +1057,9 @@ class ESP_Media_Protection {
             delete_option('esp_rewrite_last_error');
             return true;
         }
-        $media = new self();
+        // 保護ゲート中の修復で通常コンストラクタを起動しない。
+        // 管理フックやDBキャッシュ構築よりRewriteだけを修復する。
+        $media = (new \ReflectionClass(self::class))->newInstanceWithoutConstructor();
         $result = $media->update_htaccess();
         if ($result !== true) {
             update_option('esp_rewrite_last_error', $result instanceof WP_Error
