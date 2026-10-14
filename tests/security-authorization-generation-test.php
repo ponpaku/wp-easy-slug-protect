@@ -13,12 +13,21 @@ $GLOBALS['options'] = [
 $GLOBALS['transients'] = [];
 function get_option($key, $default = null) { return $GLOBALS['options'][$key] ?? $default; }
 function update_option($key, $value, $autoload = null) {
+    if (!empty($GLOBALS['simulate_epoch_write_failure']) &&
+        strpos($key, '_auth_epoch') !== false) {
+        return false;
+    }
     $GLOBALS['options'][$key] = $value;
     return true;
 }
 function get_transient($key) { return $GLOBALS['transients'][$key] ?? false; }
 function set_transient($key, $value, $ttl) { $GLOBALS['transients'][$key] = $value; return true; }
-function delete_transient($key) { unset($GLOBALS['transients'][$key]); return true; }
+function delete_transient($key) {
+    if (!empty($GLOBALS['simulate_transient_delete_failure'])) {
+        return false;
+    }
+    unset($GLOBALS['transients'][$key]); return true;
+}
 function check_auth($ok, $message) {
     if (!$ok) { fwrite(STDERR, "FAIL: $message\n"); exit(1); }
     echo "PASS: $message\n";
@@ -67,4 +76,32 @@ check_auth(ESP_Authorization_Cache::read('post', 'post-cache') === null,
 unset($GLOBALS['options'][ESP_Config::OPTION_KEY]['path']);
 check_auth(ESP_Authorization_Cache::signature('post') === null, 'missing path settings remain an error');
 check_auth(ESP_Authorization_Cache::read('post', 'post-cache') === null, 'malformed settings are never accepted as public');
+// メタデータ更新前ガード: 失効できる変更だけ通す。
+check_auth(ESP_Authorization_Cache::guard_postmeta_write(null, 42, '_unrelated', 'x') === null,
+    'unrelated metadata does not require authorization invalidation');
+check_auth(ESP_Authorization_Cache::guard_postmeta_write(null, 42, ESP_Config::PERMALINK_PATH_META_KEY, '/new') === null,
+    'protected postmeta write accepted when invalidation succeeds');
+
+// 同時にepochの保存とtransient削除が失敗するケースは、現在のリクエストで
+// 保護メタデータの更新をブロックし、読み取り・公開も拒否する。
+$oldGeneration = ESP_Authorization_Cache::signature('media');
+check_auth(ESP_Authorization_Cache::publish('media', 'media-cache', $oldGeneration,
+    ['one' => [42]], 60), 'current media map available before simulated storage failure');
+$GLOBALS['simulate_epoch_write_failure'] = true;
+$GLOBALS['simulate_transient_delete_failure'] = true;
+check_auth(ESP_Authorization_Cache::guard_postmeta_write(null, 42,
+    ESP_Media_Protection::META_KEY_PROTECTED_PATH, 'one') === false,
+    'metadata write denied if epoch and transient invalidation both fail');
+check_auth(ESP_Authorization_Cache::read('media', 'media-cache') === null,
+    'failed invalidation taints and rejects authorization in current request');
+check_auth(ESP_Authorization_Cache::signature('media') === null,
+    'failed invalidation cannot publish another authorization snapshot');
+check_auth(isset($GLOBALS['transients']['media-cache']),
+    'test fixture confirms old transient persists across simulated failure');
+$GLOBALS['simulate_epoch_write_failure'] = false;
+$GLOBALS['simulate_transient_delete_failure'] = false;
+
+// ストレージ異常を検知済みの同一リクエストは復旧後も拒否し続ける。
+check_auth(ESP_Authorization_Cache::read('media', 'media-cache') === null,
+    'tainted request remains fail-closed after persistence recovers');
 echo "All authorization generation tests passed.\n";
