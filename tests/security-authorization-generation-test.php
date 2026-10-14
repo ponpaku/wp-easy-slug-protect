@@ -76,6 +76,8 @@ check_auth(ESP_Authorization_Cache::read('post', 'post-cache') === null,
 unset($GLOBALS['options'][ESP_Config::OPTION_KEY]['path']);
 check_auth(ESP_Authorization_Cache::signature('post') === null, 'missing path settings remain an error');
 check_auth(ESP_Authorization_Cache::read('post', 'post-cache') === null, 'malformed settings are never accepted as public');
+// 直前の設定欠損テストの変更を戻し、ここからは正常設定の障害注入とする。
+$GLOBALS['options'][ESP_Config::OPTION_KEY]['path'] = ['one' => ['path' => '/private']];
 // メタデータ更新前ガード: 失効できる変更だけ通す。
 check_auth(ESP_Authorization_Cache::guard_postmeta_write(null, 42, '_unrelated', 'x') === null,
     'unrelated metadata does not require authorization invalidation');
