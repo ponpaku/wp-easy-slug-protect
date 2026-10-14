@@ -1087,6 +1087,16 @@ class ESP_Media_Protection {
     }
 
     /**
+     * WP-Cronによる読取専用点検。修復やロック取得は行わない。
+     */
+    public static function audit_rewrite_policy() {
+        if (!preg_match('/apache|litespeed/i', $_SERVER['SERVER_SOFTWARE'] ?? '')) {
+            return true; // Nginxの外部ルールは別途運用確認が必要。
+        }
+        return self::rewrite_file_matches_policy(self::is_media_protection_enabled());
+    }
+
+    /**
      * キャッシュ上のバージョン印だけでなく、配置済みルールの内容を検証する。
      * 実際のWebサーバーでのRewrite動作検証に代わるものではない。
      */
