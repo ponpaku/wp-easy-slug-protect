@@ -26,6 +26,112 @@ if (file_exists(ESP_PATH . 'includes/class-esp-config.php')) {
     return;
 }
 
+/**
+ * アンインストール時も既存.htaccessを直接上書きしない。
+ * 保護マーカーが不正なら推測で削除せず、DB削除も中止する。
+ */
+function esp_uninstall_remove_rewrite_safely() {
+    $dir = wp_upload_dir();
+    if (!empty($dir['error']) || empty($dir['basedir']) || !is_dir($dir['basedir'])) {
+        return false;
+    }
+    $file = rtrim($dir['basedir'], '/\\') . '/.htaccess';
+    if (is_link($file)) {
+        return false;
+    }
+    if (!file_exists($file)) {
+        return true;
+    }
+    $lock = @fopen($file . '.esp.lock', 'c');
+    if (!$lock) {
+        return false;
+    }
+    $temp = null;
+    $backup = null;
+    $keep_backup = false;
+    try {
+        if (!@flock($lock, LOCK_EX | LOCK_NB)) {
+            return false;
+        }
+        $old = @file_get_contents($file);
+        if ($old === false) {
+            return false;
+        }
+        $begin = substr_count($old, '# BEGIN ESP Media Protection');
+        $end = substr_count($old, '# END ESP Media Protection');
+        if ($begin === 0 && $end === 0) {
+            return true; // 他者のルールだけなら触らない。
+        }
+        if ($begin !== 1 || $end !== 1 ||
+            strpos($old, '# BEGIN ESP Media Protection') >=
+            strpos($old, '# END ESP Media Protection')) {
+            return false;
+        }
+        $pattern = '/^# BEGIN ESP Media Protection[ \\t]*\\r?\\n.*?^# END ESP Media Protection[ \\t]*(?:\\r?\\n|\\z)/ms';
+        $removed = 0;
+        $new = preg_replace($pattern, '', $old, 1, $removed);
+        if ($new === null || $removed !== 1 ||
+            strpos($new, '# BEGIN ESP Media Protection') !== false ||
+            strpos($new, '# END ESP Media Protection') !== false) {
+            return false;
+        }
+        $real_dir = @realpath($dir['basedir']);
+        $mode = @fileperms($file);
+        if ($real_dir === false || $mode === false) {
+            return false;
+        }
+        $mode &= 0777;
+        $temp = @tempnam($dir['basedir'], '.htaccess.esp-');
+        if (!$temp || @realpath(dirname($temp)) !== $real_dir ||
+            !@chmod($temp, $mode) ||
+            (@fileperms($temp) & 0777) !== $mode ||
+            @file_put_contents($temp, $new) !== strlen($new) ||
+            @file_get_contents($temp) !== $new) {
+            return false;
+        }
+        $backup = @tempnam($dir['basedir'], '.htaccess.esp-restore-');
+        if (!$backup || @realpath(dirname($backup)) !== $real_dir ||
+            !@chmod($backup, 0600) ||
+            (@fileperms($backup) & 0777) !== 0600 ||
+            @file_put_contents($backup, $old) !== strlen($old) ||
+            @file_get_contents($backup) !== $old) {
+            return false;
+        }
+        if (!file_exists($file) || is_link($file) ||
+            @file_get_contents($file) !== $old || !@rename($temp, $file)) {
+            return false;
+        }
+        $temp = null;
+        if (@file_get_contents($file) !== $new) {
+            // 旧ファイルを復元できない場合は退避ファイルを維持する。
+            if (@file_get_contents($file) === $new &&
+                @chmod($backup, $mode) && @rename($backup, $file)) {
+                $backup = null;
+            } else {
+                @chmod($backup, 0600);
+                $keep_backup = true;
+            }
+            return false;
+        }
+        return true;
+    } finally {
+        if ($temp && is_file($temp)) {
+            @unlink($temp);
+        }
+        if ($backup && !$keep_backup && is_file($backup)) {
+            @unlink($backup);
+        }
+        @flock($lock, LOCK_UN);
+        @fclose($lock);
+    }
+}
+
+// 設定・テーブルを削除した後では復元不能になるため、最初に保全処理を行う。
+if (!esp_uninstall_remove_rewrite_safely()) {
+    error_log('ESP Uninstall: .htaccess preservation failed; refusing to remove stored settings and tables');
+    return;
+}
+
 // データベースの削除処理
 global $wpdb;
 
@@ -73,13 +179,4 @@ foreach ($cron_hooks as $hook) {
     wp_clear_scheduled_hook($hook);
 }
 
-// .htaccessからESPルールを削除（Apache環境の場合）
-$upload_dir = wp_upload_dir();
-$htaccess_file = $upload_dir['basedir'] . '/.htaccess';
-
-if (file_exists($htaccess_file)) {
-    $content = file_get_contents($htaccess_file);
-    $pattern = '/# BEGIN ESP Media Protection.*?# END ESP Media Protection\s*/s';
-    $content = preg_replace($pattern, '', $content);
-    file_put_contents($htaccess_file, $content);
-}
+// Rewriteブロックは上部の安全な原子的更新処理で削除済み。
