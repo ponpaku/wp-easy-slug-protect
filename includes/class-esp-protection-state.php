@@ -362,9 +362,12 @@ final class ESP_Protection_State {
             return false;
         }
         $required = [
-            'brute' => ['ip_address', 'path', 'path_id', 'time'],
-            'remember' => ['path', 'path_id', 'password_version', 'user_id', 'token', 'expires'],
-            'session' => ['path_id', 'password_version', 'token', 'expires'],
+            // 既存認証処理が実際に読む・書く列だけを最低限確認する。
+            // 完全なスキーマ履歴・移行ステップ管理は#44のMigratorで扱う。
+            'brute' => ['id', 'ip_address', 'path', 'path_id', 'time'],
+            'remember' => ['id', 'path', 'path_id', 'password_version', 'user_id',
+                'token', 'created', 'expires'],
+            'session' => ['id', 'path_id', 'password_version', 'token', 'created', 'expires'],
             'limit' => ['ip_address', 'path_id', 'window_started', 'attempts',
                 'blocked_until', 'updated_at', 'attempt_times', 'last_attempt_token'],
         ];
