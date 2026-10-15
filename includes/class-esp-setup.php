@@ -320,11 +320,13 @@ class ESP_Setup {
             return (int) get_option('esp_db_version', 0) === (int) $required_db_version;
         }
 
-        // 版印が0でも既存の保護パスがID付与済みならV1変換を再実行しない。
-        // 部分移行の解消は#44へ委ね、既存のIDを壊す推測はしない。
+        // V1が部分実行されたサイトでは一部のパスにだけIDが付いている。
+        // 全件が安定しているかではなく、ID付与済みのパスが一つでもあれば
+        // uniqid()による再発行を拒否する。部分移行の復旧は#44に委ねる。
         $existing_settings = ESP_Option::get_all_settings();
         if ($current_db_version < 1 && is_array($existing_settings) &&
-            !empty($existing_settings['path']) && self::has_stable_path_ids()) {
+            !empty($existing_settings['path']) &&
+            self::has_any_assigned_path_id($existing_settings['path'])) {
             return false;
         }
 
@@ -359,6 +361,23 @@ class ESP_Setup {
             }
         }
         return true;
+    }
+
+    /**
+     * V1の部分移行検出専用。古い数値添字の配列と混在する場合も
+     * ID付きエントリを見落とさず、破壊的な再移行を避ける。
+     */
+    private static function has_any_assigned_path_id($paths) {
+        if (!is_array($paths)) {
+            return false;
+        }
+        foreach ($paths as $id => $path) {
+            if ((is_array($path) && array_key_exists('id', $path)) ||
+                (is_string($id) && strncmp($id, 'path_', 5) === 0)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
