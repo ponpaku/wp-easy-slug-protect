@@ -706,17 +706,27 @@ class ESP_Media_Protection {
             return;
         }
         
-        // メディアIDを取得
+        // 添付IDの照会失敗と正常な未登録を区別する。未知なら配信しない。
         $attachment_id = $this->get_attachment_id_from_path($file_path);
-        if (!$attachment_id) {
-            // メディアライブラリに登録されていないファイルは通常配信
+        if ($attachment_id === null) {
+            $this->send_503();
+            return;
+        }
+        if ($attachment_id === false) {
+            // 正常なDB照会で未登録と確定した場合だけ、従来の配信を維持。
             $this->deliver_media($file_path);
             return;
         }
-        
-        // 保護設定を確認
-        $protected_path_id = get_post_meta($attachment_id, self::META_KEY_PROTECTED_PATH, true);
-        if (empty($protected_path_id)) {
+
+        // 認可に必要な保護メタも、キャッシュの空値やDB失敗を公開と誤認しない。
+        // 既存のREST用の直接DB照会を再利用する。
+        $live_path = self::read_live_protected_media_path($attachment_id);
+        if ($live_path === null) {
+            $this->send_503();
+            return;
+        }
+        $protected_path_id = $live_path['path_id'];
+        if ($protected_path_id === '') {
             $this->deliver_media($file_path);
             return;
         }
@@ -906,26 +916,35 @@ class ESP_Media_Protection {
      * ファイルパスから添付ファイルIDを取得
      *
      * @param string $file_path ファイルパス
-     * @return int|false 添付ファイルID、見つからない場合はfalse
+     * @return int|false|null ID=登録済み、false=正常な未登録、null=DB状態不明
      */
     private function get_attachment_id_from_path($file_path) {
         global $wpdb;
-        
-        $upload_dir = wp_upload_dir();
-        $relative_path = str_replace($upload_dir['basedir'] . '/', '', $file_path);
-        
-        // メタデータから検索
-        $attachment_id = $wpdb->get_var($wpdb->prepare(
-            "SELECT post_id FROM {$wpdb->postmeta} 
-            WHERE meta_key = '_wp_attached_file' 
-            AND meta_value = %s 
-            LIMIT 1",
-            $relative_path
-        ));
-        
-        if ($attachment_id) {
-            return (int) $attachment_id;
+        if (!is_object($wpdb) || !isset($wpdb->postmeta)) {
+            return null;
         }
+        try {
+            $upload_dir = wp_upload_dir();
+            if (!is_array($upload_dir) || empty($upload_dir['basedir'])) {
+                return null;
+            }
+            $relative_path = str_replace(rtrim($upload_dir['basedir'], '/') . '/', '', $file_path);
+
+            // SQL失敗を「IDなし」と混同しない。単に見つからなかった場合のみfalse。
+            $attachment_id = $wpdb->get_var($wpdb->prepare(
+                "SELECT post_id FROM {$wpdb->postmeta}
+                WHERE meta_key = '_wp_attached_file'
+                AND meta_value = %s
+                LIMIT 1",
+                $relative_path
+            ));
+            if ($wpdb->last_error !== '' ||
+                ($attachment_id !== null && (!is_numeric($attachment_id) || (int) $attachment_id <= 0))) {
+                return null;
+            }
+            if ($attachment_id !== null) {
+                return (int) $attachment_id;
+            }
 
         // AVIFサムネイルは _wp_attached_file に登録されない場合がある。
         // 親画像の候補を同じディレクトリから探し、メタデータに記録された
@@ -952,8 +971,11 @@ class ESP_Media_Protection {
             "SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = %s AND meta_value IN ({$placeholders})",
             array_merge(['_wp_attached_file'], $candidates)
         ));
+        if ($wpdb->last_error !== '' || !is_array($candidate_ids)) {
+            return null;
+        }
 
-        foreach ((array) $candidate_ids as $candidate_id) {
+        foreach ($candidate_ids as $candidate_id) {
             $metadata = wp_get_attachment_metadata((int) $candidate_id);
             if (!is_array($metadata) || !isset($metadata['file'], $metadata['sizes']) ||
                 !is_array($metadata['sizes']) || dirname($metadata['file']) !== $directory) {
@@ -967,7 +989,10 @@ class ESP_Media_Protection {
             }
         }
 
-        return false;
+            return false;
+        } catch (\Throwable $error) {
+            return null;
+        }
     }
 
     /**
@@ -1015,6 +1040,15 @@ class ESP_Media_Protection {
         status_header(403);
         nocache_headers();
         wp_die(__('このコンテンツへのアクセスは禁止されています。', ESP_Config::TEXT_DOMAIN), 403);
+        exit;
+    }
+
+    /** 認可用のDB照会失敗は本文を返さず、一時的な配信不能として扱う。 */
+    private function send_503() {
+        nocache_headers();
+        status_header(503);
+        wp_die(__('メディアの保護状態を確認できません。', ESP_Config::TEXT_DOMAIN),
+            '', ['response' => 503]);
         exit;
     }
 
