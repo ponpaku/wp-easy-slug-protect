@@ -14,6 +14,10 @@ class ESP_Option {
     public static function update_settings($settings) {
         $GLOBALS['litespeed_key_writes'] = ($GLOBALS['litespeed_key_writes'] ?? 0) + 1;
         if (!empty($GLOBALS['litespeed_key_write_failure'])) { return false; }
+        if (!empty($GLOBALS['simulate_litespeed_option_hook'])) {
+            $nested = (new ReflectionClass('ESP_Media_Protection'))->newInstanceWithoutConstructor();
+            $GLOBALS['nested_key_update_safe'] = $nested->on_settings_save() === true;
+        }
         $GLOBALS['litespeed_key'] = $settings['media']['litespeed_key'];
         return true;
     }
@@ -178,11 +182,15 @@ check($write_error instanceof WP_Error &&
     $GLOBALS['litespeed_key'] === $previous_litespeed_key &&
     file_get_contents($file) === $previous_litespeed_rules,
     'LiteSpeed database key commit failure rolls back to the old Rewrite and key');
+$GLOBALS['simulate_litespeed_option_hook'] = true;
 check($media->update_htaccess(true) === true &&
     $GLOBALS['litespeed_key'] !== $previous_litespeed_key &&
     strpos(file_get_contents($file), $GLOBALS['litespeed_key']) !== false &&
     ESP_Media_Protection::audit_rewrite_policy() === true,
     'successful LiteSpeed forced key rotation commits the new key only after rules pass verification');
+check(!empty($GLOBALS['nested_key_update_safe']),
+    'WordPress update_option hook does not recurse into another Rewrite write while the lock is held');
+unset($GLOBALS['simulate_litespeed_option_hook']);
 
 // 既存のApache分岐テストへ戻す。
 $_SERVER['SERVER_SOFTWARE'] = 'Apache/2.4';
