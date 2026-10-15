@@ -33,7 +33,7 @@ final class ESP_Protection_State {
         if ($state === 'READY' && self::valid_settings($settings)) {
             return true;
         }
-        self::register_failure_hooks();
+        self::register_failure_hooks($settings);
         return false;
     }
 
@@ -281,6 +281,7 @@ final class ESP_Protection_State {
             return false;
         }
         if (!$ready) {
+            error_log('ESP: runtime verification failed; ESP protection requires administrator review');
             self::set_runtime_state('FAILED');
             return false;
         }
@@ -450,37 +451,193 @@ final class ESP_Protection_State {
             . '</button></p></form></div>';
     }
 
-    private static function register_failure_hooks() {
+    /** 起動失敗中は通常の認可フックを登録しないため、公開経路を限定して守る。 */
+    private static function register_failure_hooks($settings) {
         $message = __('Easy Slug Protectの保護設定または更新状態を検証できません。管理者による復旧が必要です。', ESP_Config::TEXT_DOMAIN);
 
-        // RESTはtemplate_redirectより先に処理されるため、
-        // 未認証の一覧・単体・メディアAPIもここで制御する。
-        add_filter('rest_pre_dispatch', static function ($result) use ($message) {
-            return new WP_Error('esp_protection_unavailable', $message, ['status' => 503]);
-        }, -1000, 1);
+        // 設定そのものを信頼できない場合に限り、保護範囲を推測せず広く拒否。
+        if (!self::valid_settings($settings)) {
+            self::log_configuration_failure();
+            add_filter('rest_pre_dispatch', static function ($result) use ($message) {
+                return new WP_Error('esp_protection_unavailable', $message, ['status' => 503]);
+            }, -1000, 1);
+            add_action('template_redirect', static function () use ($message) {
+                self::deny_public_content($message);
+            }, -1000);
+            add_action('admin_init', static function () use ($message) {
+                if (function_exists('wp_doing_ajax') && wp_doing_ajax() &&
+                    !current_user_can('manage_options')) {
+                    self::deny_public_content($message);
+                }
+            }, -1000);
+        } else {
+            $paths = $settings['path'];
+            // enabled が確実にOFFである場合以外はメディア配信を保護対象とする。
+            $media_enabled = !isset($settings['media']) ||
+                !is_array($settings['media']) ||
+                !array_key_exists('enabled', $settings['media']) ||
+                (bool) $settings['media']['enabled'];
 
-        // 保護対象の帰属が未確定なら、フィード・サイトマップ・PHP直接配信を止める。
-        add_action('template_redirect', static function () use ($message) {
-            nocache_headers();
-            status_header(503);
-            wp_die($message, '', ['response' => 503]);
-            exit;
-        }, -1000);
+            if ($paths || $media_enabled) {
+                // ESP_Coreを初期化しない場合にも、既存Rewriteが送るquery varを認識する。
+                add_filter('query_vars', static function ($vars) {
+                    if (!in_array(ESP_Media_Protection::REWRITE_ENDPOINT, $vars, true)) {
+                        $vars[] = ESP_Media_Protection::REWRITE_ENDPOINT;
+                    }
+                    return $vars;
+                });
 
-        // 公開admin-ajaxは遮断するが、権限のある管理者の修復操作は残す。
-        add_action('admin_init', static function () use ($message) {
-            if (function_exists('wp_doing_ajax') && wp_doing_ajax() &&
-                !current_user_can('manage_options')) {
-                nocache_headers();
-                wp_die($message, '', ['response' => 503]);
-                exit;
+                add_action('template_redirect', static function () use ($paths, $media_enabled, $message) {
+                    if (($media_enabled && self::is_media_php_request()) ||
+                        ($paths && self::must_block_unverified_page($paths))) {
+                        self::deny_public_content($message);
+                    }
+                }, -1000);
+
+                // RESTの投稿一覧等はテンプレートフックを通らず保護情報を含み得る。
+                add_filter('rest_pre_dispatch', static function ($result, $server = null, $request = null) use ($paths, $media_enabled, $message) {
+                    if ($result !== null || current_user_can('manage_options')) {
+                        return $result;
+                    }
+                    // 保護パスあり・認可フック未登録中は匿名RESTで内容を公開しない。
+                    if ($paths) {
+                        return new WP_Error('esp_protection_unavailable', $message, ['status' => 503]);
+                    }
+                    // パス保護なしならメディアAPIだけ限定拒否。無関係なRESTは維持。
+                    if ($media_enabled && is_object($request) && method_exists($request, 'get_route') &&
+                        preg_match('#^/wp/v2/media(?:/|$)#', (string) $request->get_route())) {
+                        return new WP_Error('esp_media_unavailable', $message, ['status' => 503]);
+                    }
+                    return $result;
+                }, -1000, 3);
+
+                // 保護パスがあるときだけ、不明な公開AJAX応答の安全性を推測しない。
+                if ($paths) {
+                    add_action('admin_init', static function () use ($message) {
+                        if (function_exists('wp_doing_ajax') && wp_doing_ajax() &&
+                            !current_user_can('manage_options')) {
+                            self::deny_public_content($message);
+                        }
+                    }, -1000);
+                }
             }
-        }, -1000);
+        }
 
         add_action('admin_notices', static function () use ($message) {
             if (current_user_can('manage_options')) {
                 echo '<div class="notice notice-error"><p>' . esc_html($message) . '</p></div>';
             }
         });
+    }
+
+    /** 同じ設定破損で毎アクセス大量ログを吐くことを避ける（記録が不能なら通知優先）。 */
+    private static function log_configuration_failure() {
+        $key = 'esp_protection_settings_failure_logged';
+        if (function_exists('get_transient') && get_transient($key)) {
+            return;
+        }
+        error_log('ESP: protection settings unavailable or invalid; protected content cannot be classified');
+        if (function_exists('set_transient')) {
+            set_transient($key, 1, 300);
+        }
+    }
+
+    private static function deny_public_content($message) {
+        nocache_headers();
+        status_header(503);
+        wp_die($message, '', ['response' => 503]);
+        exit;
+    }
+
+    /** 現存RewriteのPHP入口・直接クエリ入口を、非READY中に配信させない。 */
+    private static function is_media_php_request() {
+        if (array_key_exists(ESP_Media_Protection::REWRITE_ENDPOINT, $_GET)) {
+            return true;
+        }
+        if (function_exists('get_query_var') &&
+            get_query_var(ESP_Media_Protection::REWRITE_ENDPOINT, null) !== null) {
+            return true;
+        }
+        global $wp;
+        if (is_object($wp) && isset($wp->query_vars) && is_array($wp->query_vars) &&
+            array_key_exists(ESP_Media_Protection::REWRITE_ENDPOINT, $wp->query_vars)) {
+            return true;
+        }
+        $uri = parse_url((string) ($_SERVER['REQUEST_URI'] ?? ''), PHP_URL_PATH);
+        return is_string($uri) && strpos($uri, '/wp-content/uploads/') !== false;
+    }
+
+    /**
+     * 保護ページの通常フックがない時は、既知の保護URLと集約表示を拒否。
+     * 集約表示（トップの投稿一覧、検索、フィード、404等）は保護情報を含み得る。
+     * 単体の公開投稿もリクエストパスと正規パーマリンクの両方を確認する。
+     */
+    private static function must_block_unverified_page($paths) {
+        global $wp;
+        if (!is_object($wp) || !isset($wp->request) ||
+            self::matches_unverified_path($paths, $wp->request)) {
+            return true;
+        }
+        if (!function_exists('is_singular') || !is_singular() ||
+            (function_exists('is_attachment') && is_attachment())) {
+            return true;
+        }
+        if (!function_exists('get_queried_object_id') || !function_exists('get_permalink') ||
+            !function_exists('home_url')) {
+            return true;
+        }
+        $id = (int) get_queried_object_id();
+        if ($id <= 0) {
+            return true;
+        }
+        $url = get_permalink($id);
+        $home = parse_url(home_url('/'), PHP_URL_PATH);
+        $url_path = is_string($url) ? parse_url($url, PHP_URL_PATH) : false;
+        if (!is_string($home) || !is_string($url_path)) {
+            return true;
+        }
+        $base = trim($home, '/');
+        $relative = trim($url_path, '/');
+        if ($base !== '') {
+            if ($relative === $base) {
+                $relative = '';
+            } elseif (strpos($relative, $base . '/') === 0) {
+                $relative = substr($relative, strlen($base) + 1);
+            } else {
+                return true;
+            }
+        }
+        return self::matches_unverified_path($paths, $relative);
+    }
+
+    private static function matches_unverified_path($paths, $path) {
+        if (!is_string($path)) {
+            return true;
+        }
+        for ($i = 0; $i < 3; $i++) {
+            $decoded = rawurldecode($path);
+            if ($decoded === $path) {
+                break;
+            }
+            $path = $decoded;
+        }
+        // 正規化不能・不審なパスは非保護と断定しない。
+        if (strpos($path, '%') !== false || strpos($path, '\\') !== false ||
+            preg_match('/[\x00-\x1F\x7F]/', $path)) {
+            return true;
+        }
+        foreach (explode('/', trim($path, '/')) as $part) {
+            if ($part === '.' || $part === '..') {
+                return true;
+            }
+        }
+        $path = strtolower(trim($path, '/'));
+        foreach ($paths as $item) {
+            $protected = strtolower(trim($item['path'], '/'));
+            if ($path === $protected || strpos($path, $protected . '/') === 0) {
+                return true;
+            }
+        }
+        return false;
     }
 }
