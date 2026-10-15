@@ -9,7 +9,15 @@ require __DIR__ . '/../includes/class-esp-config.php';
 class TestSetup {
     public $ok = true;
     public $checks = 0;
-    public function check_plugin_version() { $this->checks++; return $this->ok; }
+    public function check_plugin_version() {
+        $this->checks++;
+        if (!empty($GLOBALS['simulate_db_reconnect'])) {
+            global $wpdb;
+            $wpdb->lock_owner = null;
+            $wpdb->lock_connection = 18;
+        }
+        return $this->ok;
+    }
 }
 class BootTestDB {
     public $last_error = '';
@@ -20,6 +28,7 @@ class BootTestDB {
     public $lock_busy = false;
     public $lock_connection = 17;
     public $lock_owner = null;
+    public $complete_on_acquire = false;
     public function prepare($query, ...$args) {
         return str_replace('%s', "'" . ($args[0] ?? '') . "'", $query);
     }
@@ -47,6 +56,10 @@ class BootTestDB {
         if (strpos($query, 'SELECT GET_LOCK(') !== false) {
             if ($this->lock_busy || $this->lock_owner !== null) { return 0; }
             $this->lock_owner = $this->lock_connection;
+            if ($this->complete_on_acquire) {
+                $GLOBALS['options']['esp_runtime_state'] = 'READY';
+                $this->complete_on_acquire = false;
+            }
             return 1;
         }
         if (strpos($query, 'SELECT IS_USED_LOCK(') !== false) {
@@ -178,7 +191,21 @@ $GLOBALS['options'][ESP_Config::OPTION_KEY] = ['path' => [['path' => '/protected
 check(ESP_Protection_State::boot($setup) === true, 'valid protection paths remain accepted');
 
 $GLOBALS['options']['esp_runtime_state'] = 'PENDING';
+$setup->checks = 0;
+$wpdb->complete_on_acquire = true;
+check(ESP_Protection_State::boot($setup) === true && $setup->checks === 0,
+    'auto verification skips migration when another process completed before lock acquisition');
+$GLOBALS['options']['esp_runtime_state'] = 'PENDING';
 check(ESP_Protection_State::boot($setup) === true, 'legacy PENDING is verified once by the first request');
+$GLOBALS['options']['esp_runtime_state'] = 'VERIFY_REQUIRED';
+$GLOBALS['simulate_db_reconnect'] = true;
+check(ESP_Protection_State::boot($setup) === false &&
+    get_option('esp_runtime_state') === 'PENDING',
+    'loss of MySQL lock during version check cannot publish READY or FAILED');
+unset($GLOBALS['simulate_db_reconnect']);
+$wpdb->lock_connection = 17;
+check(ESP_Protection_State::boot($setup) === true,
+    'next request recovers after transient DB reconnection');
 $GLOBALS['options']['esp_runtime_state'] = 'FAILED';
 check(ESP_Protection_State::boot($setup) === false, 'failed validation refuses frontend');
 $GLOBALS['options']['esp_runtime_state'] = 'UNKNOWN';
