@@ -15,8 +15,16 @@ class RewriteTestDB {
     public $postmeta = 'wp_postmeta';
     public $last_error = '';
     public $count = 1;
+    public $live_path = null;
+    public $live_error = false;
     public function prepare($sql, ...$args) { return $sql; }
-    public function get_var($query) { return $this->count; }
+    public function get_var($query) {
+        if (strpos($query, 'SELECT meta_value FROM') !== false) {
+            $this->last_error = $this->live_error ? 'DB unavailable' : '';
+            return $this->live_error ? null : $this->live_path;
+        }
+        return $this->count;
+    }
 }
 function __($value, $domain = null) { return $value; }
 function is_wp_error($value) { return $value instanceof WP_Error; }
@@ -41,6 +49,19 @@ $old = "# BEGIN ESP Media Protection\nRewriteRule ^secret private\n# END ESP Med
 file_put_contents($file, $old);
 $reflection = new ReflectionClass('ESP_Media_Protection');
 $media = $reflection->newInstanceWithoutConstructor();
+$restLive = $reflection->getMethod('read_live_protected_media_path');
+check($restLive->invoke(null, 42) === ['path_id' => ''],
+    'uncached REST boundary reads empty protection metadata from DB');
+$wpdb->live_path = 'recently_protected';
+check($restLive->invoke(null, 42) === ['path_id' => 'recently_protected'],
+    'REST boundary detects a newly protected attachment without consulting postmeta cache');
+$wpdb->live_error = true;
+check($restLive->invoke(null, 42) === null,
+    'REST boundary refuses to classify a DB failure as public metadata');
+$wpdb->live_error = false;
+$wpdb->live_path = null;
+$wpdb->last_error = '';
+
 $matchesPolicy = $reflection->getMethod('rewrite_file_matches_policy');
 check($matchesPolicy->invoke(null, true) === false, 'incomplete legacy rewrite cannot satisfy policy marker');
 
