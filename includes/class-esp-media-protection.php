@@ -396,10 +396,15 @@ class ESP_Media_Protection {
             return new WP_REST_Response(['code' => 'esp_media_state_unknown'], 503);
         }
 
-        // メタ更新前epochと更新後epochの間には短い競合窓がある。
-        // 一覧クエリのスナップショットが古くても、RESTの各要素を返す
-        // 直前に当該添付の実メタを再確認して新規保護を見落とさない。
-        $live_path_id = get_post_meta($post->ID, self::META_KEY_PROTECTED_PATH, true);
+        // WP_Queryが事前ロードしたpostmetaのキャッシュを「最新DB値」と扱わない。
+        // 非管理者のメディアREST要素だけ、応答直前に直接DBから確認する。
+        // これは最終チェック地点の鮮度を上げる限定策で、他リクエストとの
+        // 完全な原子性（チェック後の競合までの防止）は保証しない。
+        $live_path = self::read_live_protected_media_path($post->ID);
+        if ($live_path === null) {
+            return new WP_REST_Response(['code' => 'esp_media_state_unknown'], 503);
+        }
+        $live_path_id = $live_path['path_id'];
         if (!empty($live_path_id)) {
             $paths = ESP_Option::get_current_setting('path');
             if (!is_array($paths) || !isset($paths[$live_path_id]) ||
@@ -420,6 +425,33 @@ class ESP_Media_Protection {
         }
         
         return $response;
+    }
+
+    /**
+     * REST応答直前の保護メタをWPオブジェクトキャッシュ抜きで取得する。
+     * DBエラーと保護なしを混同しない。通常の画像URL配信には追加SQLしない。
+     *
+     * @return array{path_id:string}|null null=DB状態不明
+     */
+    private static function read_live_protected_media_path($post_id) {
+        global $wpdb;
+        if (!is_object($wpdb) || !isset($wpdb->postmeta)) {
+            return null;
+        }
+        try {
+            $path_id = $wpdb->get_var($wpdb->prepare(
+                "SELECT meta_value FROM {$wpdb->postmeta} WHERE post_id = %d AND meta_key = %s ORDER BY meta_id ASC LIMIT 1",
+                (int) $post_id,
+                self::META_KEY_PROTECTED_PATH
+            ));
+            if ($wpdb->last_error !== '' ||
+                ($path_id !== null && !is_scalar($path_id))) {
+                return null;
+            }
+            return ['path_id' => $path_id === null ? '' : (string)$path_id];
+        } catch (\Throwable $error) {
+            return null;
+        }
     }
 
     /*----- メディア編集画面の機能 -----*/
