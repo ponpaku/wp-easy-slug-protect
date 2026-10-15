@@ -112,34 +112,40 @@ class ESP_Settings {
             isset($input['media']) ? $input['media'] : ESP_Option::get_current_setting('media')
         );
 
-        // OFF→ONのサニタイズ段階ではRewriteに触れない。
-        // まず保護対象0件を検証し、DB保存が成功した後のフックでRewriteを更新する。
         $old_media = ESP_Option::get_current_setting('media');
         $old_enabled = !is_array($old_media) ||
             !array_key_exists('enabled', $old_media) || (bool) $old_media['enabled'];
-        if (!$old_enabled && !empty($sanitized['media']['enabled']) &&
+        $new_enabled = !empty($sanitized['media']['enabled']);
+
+        if (!$old_enabled && $new_enabled &&
             !ESP_Media_Protection::can_enable_media_protection()) {
+            // 既存の保護メタがあれば、設定をONにする前にRewriteの設置を必須とする。
+            // DB件数が不明、またはRewrite設置に失敗したときは旧OFF設定を維持。
             $sanitized['media']['enabled'] = false;
             add_settings_error(
                 ESP_Config::OPTION_KEY,
                 'esp_media_enable_rejected',
-                __('既存の保護メディアが0件と確認できないため、メディア保護ONへの変更を保存しませんでした。', ESP_Config::TEXT_DOMAIN),
+                __('保護メディアの状態を確認できないか、配信保護ルールを安全に設置できませんでした。ONへの変更は保存されていません。', ESP_Config::TEXT_DOMAIN),
                 'error'
             );
         }
 
-        // 保護対象が残る状態や件数不明の状態でmedia.enabled=falseを保存すると、
-        // PHPの配信認可をOFFにする一方、Rewriteを外せず起動ゲートが503になる。
-        // WordPressのsanitize_callbackはDB書込より前なので、ここで遷移を拒否する。
-        if ($old_enabled && empty($sanitized['media']['enabled']) &&
-            !ESP_Media_Protection::can_disable_media_protection()) {
-            $sanitized['media']['enabled'] = true;
-            add_settings_error(
-                ESP_Config::OPTION_KEY,
-                'esp_media_disable_rejected',
-                __('保護メディアが残っているかDBで件数を確認できないため、メディア保護OFFへの変更を保存しませんでした。保護対象を解除してから再試行してください。', ESP_Config::TEXT_DOMAIN),
-                'error'
-            );
+        if ($old_enabled && !$new_enabled) {
+            $records = ESP_Media_Protection::protected_media_records_exist();
+            $confirmed = isset($input['media']['confirm_disable']) &&
+                $input['media']['confirm_disable'] === '1';
+            if ($records === null || ($records === true && !$confirmed)) {
+                // DBが読めない場合は拒否。保護メタありの場合は確認付きでOFFを許可。
+                $sanitized['media']['enabled'] = true;
+                add_settings_error(
+                    ESP_Config::OPTION_KEY,
+                    'esp_media_disable_rejected',
+                    $records === null
+                        ? __('保護メディアの状態を確認できないためOFFへの変更を中止しました。', ESP_Config::TEXT_DOMAIN)
+                        : __('保護指定済みメディアが公開されることを確認し、確認チェックを入れてから保存してください。', ESP_Config::TEXT_DOMAIN),
+                    'error'
+                );
+            }
         }
 
         return $sanitized;
