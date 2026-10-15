@@ -126,6 +126,15 @@ check(get_option('esp_runtime_state') === 'READY', 'valid state is saved');
 check($wpdb->queries > 0 && $setup->checks === 2 && ESP_Media_Protection::$checks === 2,
     'explicit verification performs migration, schema and Rewrite checks');
 
+// 自動・手動の両検証は同じ排他を使い、同時移行を開始しない。
+$GLOBALS['options']['esp_runtime_verify_lock'] = time();
+$before_checks = $setup->checks;
+check(ESP_Protection_State::verify_and_commit($setup) === false &&
+    $setup->checks === $before_checks &&
+    get_option('esp_runtime_state') === 'READY',
+    'concurrent explicit verification cannot race with another migration');
+unset($GLOBALS['options']['esp_runtime_verify_lock']);
+
 $wpdb->queries = 0;
 $setup->checks = 0;
 ESP_Media_Protection::$checks = 0;
