@@ -27,6 +27,23 @@ if (file_exists(ESP_PATH . 'includes/class-esp-config.php')) {
 }
 
 /**
+ * 置換後検証が失敗したときの条件付き復元。
+ * 自分が設置したバイト列がなお残っている場合だけ置き戻す。
+ * 他者の同時変更・読取不能・symlinkは上書きしない。
+ */
+function esp_uninstall_restore_if_unchanged($file, $backup, $installed, $mode) {
+    if (is_link($file) || !is_file($backup) ||
+        @file_get_contents($file) !== $installed) {
+        return false;
+    }
+    if (!@chmod($backup, $mode) || !@rename($backup, $file)) {
+        return false;
+    }
+    return @fileperms($file) !== false &&
+        (@fileperms($file) & 0777) === $mode;
+}
+
+/**
  * アンインストール時も既存.htaccessを直接上書きしない。
  * 保護マーカーが不正なら推測で削除せず、DB削除も中止する。
  */
@@ -102,13 +119,17 @@ function esp_uninstall_remove_rewrite_safely() {
             return false;
         }
         $temp = null;
-        if (@file_get_contents($file) !== $new) {
-            // 旧ファイルを復元できない場合は退避ファイルを維持する。
-            if (@file_get_contents($file) === $new &&
-                @chmod($backup, $mode) && @rename($backup, $file)) {
+        $readback = @file_get_contents($file);
+        $perms = @fileperms($file);
+        if ($readback !== $new || $perms === false || ($perms & 0777) !== $mode) {
+            // 検証異常時は、再取得した実ファイルが自分の書いた内容と
+            // 一致するときに限り旧バイト列を復元。他者の変更は上書きしない。
+            if (esp_uninstall_restore_if_unchanged($file, $backup, $new, $mode)) {
                 $backup = null;
             } else {
-                @chmod($backup, 0600);
+                if (is_file($backup)) {
+                    @chmod($backup, 0600);
+                }
                 $keep_backup = true;
             }
             return false;
