@@ -25,6 +25,7 @@ class MigrationMarkerDB {
     public $prefix = 'wp_';
     public $last_error = '';
     public $schema_complete = true;
+    public $missing_session_created = false;
     public $writes = 0;
     public function prepare($sql, ...$args) {
         foreach ($args as $arg) {
@@ -34,9 +35,13 @@ class MigrationMarkerDB {
     }
     public function get_col($sql) {
         if (!$this->schema_complete) { return []; }
-        return ['ip_address', 'path', 'path_id', 'time', 'password_version',
-            'user_id', 'token', 'expires', 'window_started', 'attempts',
+        $columns = ['id', 'ip_address', 'path', 'path_id', 'time', 'password_version',
+            'user_id', 'token', 'created', 'expires', 'window_started', 'attempts',
             'blocked_until', 'updated_at', 'attempt_times', 'last_attempt_token'];
+        if ($this->missing_session_created && strpos($sql, 'esp_login_session') !== false) {
+            return array_values(array_diff($columns, ['created']));
+        }
+        return $columns;
     }
     public function get_var($sql) {
         return $this->schema_complete ? 'InnoDB' : null;
@@ -76,6 +81,25 @@ check_marker($setup->update_check() === true &&
     serialize($GLOBALS['options'][ESP_Config::OPTION_KEY]) === $original &&
     $wpdb->writes === 0,
     'stale version-zero marker on completed schema preserves existing path IDs');
+
+// V1の途中でID付き・旧形式のパスが混在しても、IDを再発行しない。
+$GLOBALS['options']['esp_db_version'] = 0;
+$GLOBALS['options'][ESP_Config::OPTION_KEY]['path'][0] = ['path' => '/legacy/'];
+$mixed_paths = serialize($GLOBALS['options'][ESP_Config::OPTION_KEY]['path']);
+check_marker($setup->update_check() === false &&
+    $GLOBALS['options']['esp_db_version'] === 0 &&
+    serialize($GLOBALS['options'][ESP_Config::OPTION_KEY]['path']) === $mixed_paths &&
+    $wpdb->writes === 0,
+    'mixed V1 and legacy paths refuse destructive ID reassignment');
+unset($GLOBALS['options'][ESP_Config::OPTION_KEY]['path'][0]);
+
+// 重要な認証列を欠いたスキーマは、版印を復元する根拠にできない。
+unset($GLOBALS['options']['esp_db_version']);
+$wpdb->missing_session_created = true;
+check_marker($setup->update_check() === false &&
+    get_option('esp_db_version', null) === null && $wpdb->writes === 0,
+    'missing session created column rejects completed-schema classification');
+$wpdb->missing_session_created = false;
 
 unset($GLOBALS['options']['esp_db_version']);
 $wpdb->schema_complete = false;
