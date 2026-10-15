@@ -55,6 +55,9 @@ function home_url($path = '') { return 'https://example.test' . $path; }
 function wp_upload_dir() { return ['basedir' => $GLOBALS['test_dir'], 'error' => '']; }
 function get_query_var($key) { return $GLOBALS['test_media_query'] ?? ''; }
 function is_404() { return false; }
+function status_header($code) { $GLOBALS['test_http_status'] = $code; }
+function nocache_headers() {}
+function get_404_template() { return $GLOBALS['test_dir'] . '/esp-test-404.php'; }
 function trailingslashit($path) { return rtrim($path, '/') . '/'; }
 function get_option($key, $default = null) { return $GLOBALS['options'][$key] ?? $default; }
 function update_option($key, $value, $autoload = null) { $GLOBALS['options'][$key] = $value; return true; }
@@ -74,6 +77,41 @@ $old = "# BEGIN ESP Media Protection\nRewriteRule ^secret private\n# END ESP Med
 file_put_contents($file, $old);
 $reflection = new ReflectionClass('ESP_Media_Protection');
 $media = $reflection->newInstanceWithoutConstructor();
+
+// esp-mediaは公開クエリ変数であり、.htaccessの拡張子Rewriteを経ずに到達できる。
+// ON/OFFや管理者の早期配信分岐よりも先に、配信対象を必ず制限する。
+$allowedRequest = $reflection->getMethod('is_allowed_media_request');
+foreach (['.htaccess', '.htpasswd', '.user.ini', '.env.jpg',
+    'private/.hidden/image.jpg', 'private/%2Ehtpasswd',
+    '%252ehtaccess', '../secret.jpg', 'private/../secret.jpg',
+    'image.php', 'wp-config.php', 'private\\image.jpg', ['image.jpg']] as $bad) {
+    check($allowedRequest->invoke(null, $bad) === false,
+        'public media query rejects configuration/hidden/invalid paths');
+}
+foreach (['public.jpg', 'nested/image.JPG', 'public.avif', 'notes.txt'] as $good) {
+    check($allowedRequest->invoke(null, $good) === true,
+        'public media query keeps allowed media formats available');
+}
+file_put_contents($GLOBALS['test_dir'] . '/esp-test-404.php',
+    '<?php throw new RuntimeException("intercepted media 404");');
+$GLOBALS['test_media_query'] = '.htaccess';
+$_SERVER['REQUEST_URI'] = '/?esp-media=.htaccess';
+$enabledProp = $reflection->getProperty('enabled');
+foreach ([false, true] as $media_enabled) {
+    $enabledProp->setValue($media, $media_enabled);
+    unset($GLOBALS['test_http_status']);
+    $denied = false;
+    try {
+        $media->handle_media_access();
+    } catch (RuntimeException $error) {
+        $denied = $error->getMessage() === 'intercepted media 404';
+    }
+    check($denied && $GLOBALS['test_http_status'] === 404,
+        'public query for .htaccess is rejected before OFF/ON delivery');
+}
+unset($GLOBALS['test_media_query']);
+$enabledProp->setValue($media, true);
+
 $restLive = $reflection->getMethod('read_live_protected_media_path');
 check($restLive->invoke(null, 42) === ['path_id' => ''],
     'uncached REST boundary reads empty protection metadata from DB');
@@ -137,9 +175,9 @@ check(ESP_Media_Protection::can_disable_media_protection() === true &&
     'intentional OFF permits protected records while surfacing warning state');
 $wpdb->count = null;
 $wpdb->last_error = 'DB unavailable';
-check(ESP_Media_Protection::can_disable_media_protection() === false &&
+check(ESP_Media_Protection::can_disable_media_protection() === true &&
     ESP_Media_Protection::protected_media_records_exist() === null,
-    'unknown DB state rejects OFF even with administrator confirmation');
+    'DB failure does not veto an explicit administrator OFF');
 $wpdb->count = 0;
 $wpdb->last_error = '';
 check(ESP_Media_Protection::can_disable_media_protection() === true,
@@ -333,20 +371,22 @@ check(!file_exists($file . '.esp.lock'), 'enabled no-op policy never opens a wri
 chmod($GLOBALS['test_dir'], 0700);
 
 $wpdb->count = 1;
-$error = $media->update_htaccess(false, true);
-check($error instanceof WP_Error && $error->get_error_code() === 'esp_deactivate_protected_media',
-    'Deactivation refuses to expose existing protected media');
-check(strpos(file_get_contents($file), 'esp-media') !== false,
-    'Deactivation leaves protection in place when protected files exist');
+check($media->update_htaccess(false, true) === true,
+    'explicit plugin deactivation removes ESP Rewrite with protected media');
+check(file_get_contents($file) === $foreign,
+    'deactivation preserves unrelated Rewrite rules');
+check($media->update_htaccess() === true, 'enabled media can install Rewrite again');
 $wpdb->count = null;
 $wpdb->last_error = 'DB unavailable';
-$error = $media->update_htaccess(false, true);
-check($error instanceof WP_Error, 'Deactivation fails closed when media count is unknown');
-check(strpos(file_get_contents($file), 'esp-media') !== false, 'Unknown DB state never removes routing');
+check($media->update_htaccess(false, true) === true,
+    'explicit deactivation does not depend on protected-media DB COUNT');
+check(file_get_contents($file) === $foreign,
+    'deactivation removes only ESP Rewrite when DB state is unknown');
 $wpdb->last_error = '';
 $wpdb->count = 0;
-check($media->update_htaccess(false, true) === true, 'Deactivation can remove Rewrite after verified zero media');
-check(file_get_contents($file) === $foreign, 'No protected media leaves other rules intact on deactivation');
+check($media->update_htaccess(false, true) === true,
+    'deactivation is idempotent after ESP rules are removed');
+check(file_get_contents($file) === $foreign, 'repeated deactivation preserves other rules');
 $GLOBALS['enabled'] = false;
 check($media->update_htaccess() === true, 'explicitly disabled media protection removes rewrite');
 check(file_get_contents($file) === $foreign, 'only explicit disable removes ESP block');
@@ -481,5 +521,6 @@ $GLOBALS['test_dir'] = $original_dir;
 
 @unlink($file);
 @unlink($file . '.esp.lock');
+@unlink($GLOBALS['test_dir'] . '/esp-test-404.php');
 @rmdir($GLOBALS['test_dir']);
 echo "All rewrite fail-closed tests passed.\n";
