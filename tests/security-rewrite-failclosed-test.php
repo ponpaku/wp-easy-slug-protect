@@ -188,21 +188,21 @@ check(file_exists($file) && strpos(file_get_contents($file), 'esp-media') !== fa
     'new protective file is not deleted by failed verification');
 file_put_contents($file, $new);
 
-// 既存の保護メディアがある場合、設定OFFでもルールを取り外さない。
+// 管理者が明示的に設定OFFを選んだ場合は、保護メタが残っていても
+// ONルールを除去可能（保護メタの値そのものは維持する）。
 $GLOBALS['enabled'] = false;
 $wpdb->count = 1;
 $wpdb->last_error = '';
-$error = $media->update_htaccess();
-check($error instanceof WP_Error &&
-    $error->get_error_code() === 'esp_htaccess_protected_media_remain',
-    'settings OFF does not remove active protected media rules');
-check(file_get_contents($file) === $new, 'rules unchanged after rejected settings OFF');
+check($media->update_htaccess() === true,
+    'intentional OFF permits rewrite removal even with protected metadata');
+check(file_get_contents($file) === $foreign,
+    'intentional OFF removes ESP rules without touching third-party rules');
 $wpdb->count = null;
 $wpdb->last_error = 'unavailable';
-$error = $media->update_htaccess();
-check($error instanceof WP_Error &&
-    $error->get_error_code() === 'esp_htaccess_protected_media_remain',
-    'unknown DB does not authorize removing the active rules');
+check($media->update_htaccess() === true,
+    'repeated OFF update does not depend on protected media COUNT');
+check(file_get_contents($file) === $foreign,
+    'repeated OFF update preserves unrelated rules');
 $GLOBALS['enabled'] = true;
 $wpdb->last_error = '';
 $wpdb->count = 0;
@@ -291,6 +291,32 @@ check(ESP_Media_Protection::can_assign_protected_media() === true,
     'protected metadata becomes assignable only with active Rewrite');
 check(strpos(file_get_contents($file), $foreign) !== false,
     'post-save Rewrite preserves foreign rules');
+
+// 旧版のOFF + 保護メタありから、ON保存前にRewriteを検証付きで再設置。
+$GLOBALS['enabled'] = false;
+$wpdb->count = 1;
+$wpdb->last_error = '';
+file_put_contents($file, $foreign);
+check(ESP_Media_Protection::can_enable_media_protection() === true,
+    'legacy OFF with protected metadata can preinstall Rewrite for safe recovery');
+check($matchesPolicy->invoke(null, true) === true,
+    'recovery preflight confirms enabled Rewrite before saving ON');
+check($GLOBALS['enabled'] === false,
+    'preflight does not switch DB setting to ON before WordPress option save');
+file_put_contents($file, $foreign);
+$blocked = fopen($file . '.esp.lock', 'c');
+flock($blocked, LOCK_EX);
+check(ESP_Media_Protection::can_enable_media_protection() === false &&
+    file_get_contents($file) === $foreign,
+    'failed rewrite preflight rejects recovery without losing foreign rules');
+flock($blocked, LOCK_UN);
+fclose($blocked);
+$wpdb->count = null;
+$wpdb->last_error = 'DB down';
+check(ESP_Media_Protection::can_enable_media_protection() === false,
+    'unknown legacy metadata blocks unsafe ON restoration');
+$wpdb->count = 0;
+$wpdb->last_error = '';
 
 // OFFへの保存後に旧Rewriteが残ったとしても、既知の公開画像は200相当で配信する。
 $public_image = $GLOBALS['test_dir'] . '/public.jpg';
