@@ -104,6 +104,7 @@ check_auth(ESP_Authorization_Cache::guard_postmeta_delete(null, 42,
 $GLOBALS['options'][ESP_Config::OPTION_KEY]['media']['enabled'] = true;
 
 // by-mid APIは通常の更新前フィルターを迂回するため独立して守る。
+$GLOBALS['options'][ESP_Config::OPTION_KEY]['media']['enabled'] = false;
 $GLOBALS['by_mid_meta'] = [
     9 => (object) ['post_id' => 42,
         'meta_key' => ESP_Media_Protection::META_KEY_PROTECTED_PATH, 'meta_value' => 'one'],
