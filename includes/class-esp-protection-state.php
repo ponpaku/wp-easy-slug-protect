@@ -37,6 +37,35 @@ final class ESP_Protection_State {
         return false;
     }
 
+    /**
+     * WP-CLI有効化ではSERVER_SOFTWAREが無い場合、WebのRewriteを実証できない。
+     * 保護済みメディアが無いと確認できる時だけ検証を次のHTTPへ延期する。
+     * 保護メディアあり／件数不明を延期してしまうと、PHP起動前の静的直URLが
+     * 再有効化直後から公開され得るため、CLIの有効化失敗として明示する。
+     */
+    public static function defer_cli_activation_verification() {
+        if (!(defined('WP_CLI') && WP_CLI) ||
+            trim((string) ($_SERVER['SERVER_SOFTWARE'] ?? '')) !== '') {
+            return false;
+        }
+        $settings = get_option(ESP_Config::OPTION_KEY, null);
+        if (!self::valid_settings($settings)) {
+            error_log('ESP: CLI activation cannot verify protection settings');
+            return false;
+        }
+        $media_on = !isset($settings['media']) || !is_array($settings['media']) ||
+            !array_key_exists('enabled', $settings['media']) ||
+            (bool) $settings['media']['enabled'];
+        if ($media_on && (!class_exists('ESP_Media_Protection') ||
+            ESP_Media_Protection::protected_media_records_exist() !== false)) {
+            // 失敗後もFAILEDに固定せず、明示的Webサーバー指定で再有効化可能。
+            self::set_runtime_state('VERIFY_REQUIRED');
+            error_log('ESP: CLI activation requires verified web-server context when protected media exist');
+            return false;
+        }
+        return self::set_runtime_state('VERIFY_REQUIRED');
+    }
+
     /** WordPress更新開始・完了、単発Cron、管理者復旧を登録する。 */
     public static function register_runtime_hooks($setup) {
         add_filter('upgrader_pre_install', [self::class, 'before_plugin_upgrade'], 10, 2);
