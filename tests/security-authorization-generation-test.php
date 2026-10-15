@@ -18,6 +18,9 @@ $GLOBALS['options'] = [
 ];
 $GLOBALS['transients'] = [];
 function get_option($key, $default = null) { return $GLOBALS['options'][$key] ?? $default; }
+function get_metadata_by_mid($type, $id) {
+    return $type === 'post' ? ($GLOBALS['by_mid_meta'][$id] ?? false) : false;
+}
 function update_option($key, $value, $autoload = null) {
     if (!empty($GLOBALS['simulate_epoch_write_failure']) &&
         strpos($key, '_auth_epoch') !== false) {
@@ -99,6 +102,42 @@ check_auth(ESP_Authorization_Cache::guard_postmeta_delete(null, 42,
     ESP_Media_Protection::META_KEY_PROTECTED_PATH, '') === null,
     'media OFF permits clearing stale protected metadata');
 $GLOBALS['options'][ESP_Config::OPTION_KEY]['media']['enabled'] = true;
+
+// by-mid APIは通常の更新前フィルターを迂回するため独立して守る。
+$GLOBALS['by_mid_meta'] = [
+    9 => (object) ['post_id' => 42,
+        'meta_key' => ESP_Media_Protection::META_KEY_PROTECTED_PATH, 'meta_value' => 'one'],
+    10 => (object) ['post_id' => 42, 'meta_key' => '_unrelated', 'meta_value' => 'plain'],
+    11 => (object) ['post_id' => 42,
+        'meta_key' => ESP_Config::PERMALINK_PATH_META_KEY, 'meta_value' => '/members/'],
+];
+check_auth(ESP_Authorization_Cache::guard_postmeta_update_by_mid(null, 9, 'one') === false,
+    'media OFF also rejects update_post_metadata_by_mid to a protected key');
+check_auth(ESP_Authorization_Cache::guard_postmeta_update_by_mid(null, 10, 'one',
+    ESP_Media_Protection::META_KEY_PROTECTED_PATH) === false,
+    'media OFF rejects rekeying unrelated meta to protected media');
+check_auth(ESP_Authorization_Cache::guard_postmeta_delete_by_mid(null, 9) === null,
+    'media OFF permits deleting protected media by meta ID');
+check_auth(ESP_Authorization_Cache::guard_postmeta_update_by_mid(null, 11, 'new',
+    '_unrelated') === null,
+    'rekeying protected permalink metadata invalidates the old scope');
+check_auth(ESP_Authorization_Cache::guard_postmeta_update_by_mid(null, 999, 'x') === null,
+    'missing metadata IDs are left to WordPress validation');
+
+$GLOBALS['options'][ESP_Config::OPTION_KEY]['media']['enabled'] = true;
+unset($_SERVER['SERVER_SOFTWARE']);
+check_auth(ESP_Authorization_Cache::guard_postmeta_update_by_mid(null, 9, 'one') === false,
+    'by-mid protected media update cannot bypass unknown-server rejection');
+$_SERVER['SERVER_SOFTWARE'] = 'nginx/1.26';
+check_auth(ESP_Authorization_Cache::guard_postmeta_update_by_mid(null, 10, 'one',
+    ESP_Media_Protection::META_KEY_PROTECTED_PATH) === null,
+    'explicit Nginx permits protected by-mid rekey after cache invalidation');
+$by_mid_signature = ESP_Authorization_Cache::signature('media');
+ESP_Authorization_Cache::publish('media', 'media-cache', $by_mid_signature, ['one' => [42]], 60);
+check_auth(ESP_Authorization_Cache::guard_postmeta_update_by_mid(null, 9, 'plain',
+    '_unrelated') === null &&
+    ESP_Authorization_Cache::read('media', 'media-cache') === null,
+    'removing the protected key by meta ID invalidates stale media authorization');
 
 // WP-CLIはSERVER_SOFTWAREがないので、Nginxと誤認して書込みを通してはならない。
 unset($_SERVER['SERVER_SOFTWARE']);
