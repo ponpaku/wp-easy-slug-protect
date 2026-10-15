@@ -17,6 +17,9 @@ class BootTestDB {
     public $legacy_schema_valid = true;
     public $queries = 0;
     public $prefix = 'wp_';
+    public $lock_busy = false;
+    public $lock_connection = 17;
+    public $lock_owner = null;
     public function prepare($query, ...$args) {
         return str_replace('%s', "'" . ($args[0] ?? '') . "'", $query);
     }
@@ -41,6 +44,22 @@ class BootTestDB {
         $this->queries++;
         if (!$this->online) { $this->last_error = 'Disconnected'; return null; }
         $this->last_error = '';
+        if (strpos($query, 'SELECT GET_LOCK(') !== false) {
+            if ($this->lock_busy || $this->lock_owner !== null) { return 0; }
+            $this->lock_owner = $this->lock_connection;
+            return 1;
+        }
+        if (strpos($query, 'SELECT IS_USED_LOCK(') !== false) {
+            return $this->lock_owner;
+        }
+        if (strpos($query, 'SELECT RELEASE_LOCK(') !== false) {
+            if ($this->lock_owner !== $this->lock_connection) { return 0; }
+            $this->lock_owner = null;
+            return 1;
+        }
+        if (strpos($query, 'SELECT CONNECTION_ID()') !== false) {
+            return $this->lock_connection;
+        }
         return strpos($query, 'information_schema.TABLES') !== false
             ? ($this->legacy_schema_valid ? 'InnoDB' : 'MyISAM') : 1;
     }
@@ -127,13 +146,17 @@ check($wpdb->queries > 0 && $setup->checks === 2 && ESP_Media_Protection::$check
     'explicit verification performs migration, schema and Rewrite checks');
 
 // 自動・手動の両検証は同じ排他を使い、同時移行を開始しない。
-$GLOBALS['options']['esp_runtime_verify_lock'] = time();
+$wpdb->lock_busy = true;
 $before_checks = $setup->checks;
 check(ESP_Protection_State::verify_and_commit($setup) === false &&
     $setup->checks === $before_checks &&
     get_option('esp_runtime_state') === 'READY',
-    'concurrent explicit verification cannot race with another migration');
-unset($GLOBALS['options']['esp_runtime_verify_lock']);
+    'busy advisory lock refuses competing migration without changing state');
+$wpdb->lock_busy = false;
+$wpdb->lock_owner = 99;
+check(ESP_Protection_State::verify_and_commit($setup) === false,
+    'other connection owns advisory lock, even if it is long-running');
+$wpdb->lock_owner = null;
 
 $wpdb->queries = 0;
 $setup->checks = 0;
