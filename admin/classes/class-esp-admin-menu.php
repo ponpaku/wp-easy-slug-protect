@@ -471,7 +471,7 @@ class ESP_Admin_Menu {
                                         <input type="checkbox"
                                             name="<?php echo $option_key; ?>[media][confirm_disable]"
                                             value="1">
-                                        <strong><?php _e('保護指定済みメディアが公開されることを理解しました（保護指定が残る状態でOFFにする場合は必須）', $text_domain); ?></strong>
+                                        <strong><?php _e('保護メディアが公開される可能性を理解しました（保護指定あり・件数を確認できない場合は必須）', $text_domain); ?></strong>
                                     </label>
                                 </p>
                             </td>
