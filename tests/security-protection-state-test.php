@@ -123,8 +123,8 @@ check($setup->checks === 1 && $wpdb->queries > 0 && ESP_Media_Protection::$check
 check(ESP_Protection_State::verify_and_commit($setup) === true,
     'administrator can also explicitly validate and commit READY');
 check(get_option('esp_runtime_state') === 'READY', 'valid state is saved');
-check($wpdb->queries > 0 && $setup->checks === 1 && ESP_Media_Protection::$checks === 1,
-    'strict verification performs migration, schema and Rewrite checks');
+check($wpdb->queries > 0 && $setup->checks === 2 && ESP_Media_Protection::$checks === 2,
+    'explicit verification performs migration, schema and Rewrite checks');
 
 $wpdb->queries = 0;
 $setup->checks = 0;
