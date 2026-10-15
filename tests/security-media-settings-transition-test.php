@@ -21,6 +21,10 @@ class ESP_Option {
     }
 }
 class ESP_Media_Protection {
+    const OPTION_LITESPEED_KEY = 'litespeed_key';
+    public static function get_litespeed_key_value() {
+        return $GLOBALS['preinstalled_litespeed_key'] ?? '';
+    }
     public static function protected_media_records_exist() {
         $GLOBALS['count_checks']++;
         return $GLOBALS['protected_records'];
@@ -108,9 +112,12 @@ check_transition($sanitized['media']['enabled'] === false &&
     $GLOBALS['settings_errors'][0]['code'] === 'esp_media_enable_rejected',
     'OFF to ON cannot be saved if protective Rewrite installation failed');
 $GLOBALS['known_zero_media_before_enabling'] = true;
+$GLOBALS['preinstalled_litespeed_key'] = 'key_from_verified_rules';
 $GLOBALS['settings_errors'] = [];
 $sanitized = $settings->sanitize_settings($input);
 check_transition($sanitized['media']['enabled'] === true &&
     $GLOBALS['settings_errors'] === [],
     'OFF to ON restores protection with existing metadata when rewrite is verified');
+check_transition($sanitized['media']['litespeed_key'] === 'key_from_verified_rules',
+    'OFF-to-ON save retains the LiteSpeed key preinstalled by Rewrite recovery');
 echo "All media setting transition tests passed.\\n";
