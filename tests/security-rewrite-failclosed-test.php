@@ -4,7 +4,18 @@ define('ABSPATH', __DIR__ . '/');
 define('WEEK_IN_SECONDS', 604800);
 require __DIR__ . '/../includes/class-esp-config.php';
 class ESP_Option {
-    public static function get_current_setting($name) { return ['enabled' => $GLOBALS['enabled'] ?? true, 'litespeed_key' => 'key123']; }
+    public static function get_current_setting($name) {
+        return ['enabled' => $GLOBALS['enabled'] ?? true,
+            'litespeed_key' => $GLOBALS['litespeed_key'] ?? 'key123'];
+    }
+    public static function get_all_settings() {
+        return ['media' => self::get_current_setting('media')];
+    }
+    public static function update_settings($settings) {
+        $GLOBALS['litespeed_key_writes'] = ($GLOBALS['litespeed_key_writes'] ?? 0) + 1;
+        $GLOBALS['litespeed_key'] = $settings['media']['litespeed_key'];
+        return true;
+    }
 }
 class WP_Error {
     private $code;
@@ -27,6 +38,7 @@ class RewriteTestDB {
     }
 }
 function __($value, $domain = null) { return $value; }
+function sanitize_text_field($value) { return trim((string) $value); }
 function is_wp_error($value) { return $value instanceof WP_Error; }
 function home_url($path = '') { return 'https://example.test' . $path; }
 function wp_upload_dir() { return ['basedir' => $GLOBALS['test_dir'], 'error' => '']; }
@@ -99,6 +111,33 @@ check($media->update_htaccess() === true, 'known protected media updates rewrite
 $new = file_get_contents($file);
 check(strpos($new, 'esp-media') !== false && strpos($new, '# Other plugin rule') !== false, 'generated rewrite keeps unrelated rules');
 check(strpos($new, 'avif') !== false, 'AVIF is covered in replacement');
+// LiteSpeedキー未設定の読取専用監査は、設定・Rewriteを一切変更しない。
+$_SERVER['SERVER_SOFTWARE'] = 'LiteSpeed';
+$GLOBALS['litespeed_key'] = '';
+$GLOBALS['litespeed_key_writes'] = 0;
+$unchanged = file_get_contents($file);
+check(ESP_Media_Protection::audit_rewrite_policy() === false,
+    'LiteSpeed audit reports missing key as a mismatch without generating it');
+check($GLOBALS['litespeed_key_writes'] === 0 &&
+    $GLOBALS['litespeed_key'] === '' &&
+    file_get_contents($file) === $unchanged,
+    'read-only LiteSpeed audit does not mutate key or Rewrite contents');
+// 一方、明示的なRewrite書換えはキーを生成し、次回監査が純粋な読取となる。
+check($media->update_htaccess() === true && $GLOBALS['litespeed_key'] !== '',
+    'explicit LiteSpeed Rewrite update may initialize the missing key');
+$writes_after_install = $GLOBALS['litespeed_key_writes'];
+$installed_litespeed_rules = file_get_contents($file);
+check(ESP_Media_Protection::audit_rewrite_policy() === true,
+    'LiteSpeed audit accepts a complete Rewrite with existing key');
+check($GLOBALS['litespeed_key_writes'] === $writes_after_install &&
+    file_get_contents($file) === $installed_litespeed_rules,
+    'LiteSpeed audit stays read-only after successful rule installation');
+// 既存のApache分岐テストへ戻す。
+$_SERVER['SERVER_SOFTWARE'] = 'Apache/2.4';
+check($media->update_htaccess() === true,
+    'Apache rule restoration works after testing LiteSpeed');
+$new = file_get_contents($file);
+
 
 // 不完全・重複した保護ブロックを暗黙修復して安全と判定しない。
 $duplicate = $new . "# BEGIN ESP Media Protection\n# END ESP Media Protection\n";
