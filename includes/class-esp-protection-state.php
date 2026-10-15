@@ -166,35 +166,74 @@ final class ESP_Protection_State {
     }
 
     /** 管理者による検証、プラグイン有効化、更新後の復旧でのみ実行する。 */
-    public static function verify_and_commit($setup) {
-        // 自動検証・管理者の再検証・有効化のすべてを同じ排他で保護する。
-        $lock_key = 'esp_runtime_verify_lock';
-        $now = time();
-        if (!add_option($lock_key, $now, '', false)) {
-            $held_at = get_option($lock_key, 0);
-            if (!is_numeric($held_at) || $now - (int)$held_at < 300) {
-                return false;
-            }
-            // 異常終了した検証の排他を期限切れとして回収。
-            delete_option($lock_key);
-            if (!add_option($lock_key, $now, '', false)) {
-                return false;
-            }
+    /**
+     * MySQL/MariaDB の接続単位ロックを WordPress の $wpdb 経由で取得する。
+     * タイムアウトで「所有中のロックを削除」する実装はしない。
+     * DB接続終了時にはサーバーが自動解放する。
+     */
+    private static function acquire_verification_lock() {
+        global $wpdb;
+        if (!is_object($wpdb) || !isset($wpdb->prefix)) {
+            return null;
         }
-        try {
-            return self::verify_and_commit_unlocked($setup);
-        } finally {
-            delete_option($lock_key);
+        $name = 'esp_verify_' . md5((defined('DB_NAME') ? DB_NAME : '') . ':' . $wpdb->prefix);
+        $result = $wpdb->get_var($wpdb->prepare('SELECT GET_LOCK(%s, 0)', $name));
+        if ((string) $result !== '1') {
+            return null;
+        }
+        $connection = $wpdb->get_var('SELECT CONNECTION_ID()');
+        if (!is_numeric($connection)) {
+            $wpdb->get_var($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $name));
+            return null;
+        }
+        return ['name' => $name, 'connection' => (string) $connection];
+    }
+
+    /**
+     * wpdb が途中で自動再接続した場合はロックを失ったものと扱う。
+     * 他の検証が獲得した新しいロックを解放したりREADY確定したりしない。
+     */
+    private static function owns_verification_lock($lock) {
+        global $wpdb;
+        $owner = $wpdb->get_var($wpdb->prepare('SELECT IS_USED_LOCK(%s)', $lock['name']));
+        $connection = $wpdb->get_var('SELECT CONNECTION_ID()');
+        return is_numeric($owner) && is_numeric($connection) &&
+            (string) $owner === $lock['connection'] &&
+            (string) $connection === $lock['connection'];
+    }
+
+    private static function release_verification_lock($lock) {
+        global $wpdb;
+        if (self::owns_verification_lock($lock)) {
+            $wpdb->get_var($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $lock['name']));
         }
     }
 
-    private static function verify_and_commit_unlocked($setup) {
-        if (!self::set_runtime_state('PENDING')) {
+    /** 管理者による検証、プラグイン有効化、更新後の復旧でのみ実行する。 */
+    public static function verify_and_commit($setup) {
+        $lock = self::acquire_verification_lock();
+        if ($lock === null) {
+            return false; // 他リクエストが検証中 / DBロック利用不可
+        }
+        try {
+            return self::verify_and_commit_unlocked($setup, $lock);
+        } finally {
+            self::release_verification_lock($lock);
+        }
+    }
+
+    private static function verify_and_commit_unlocked($setup, $lock) {
+        if (!self::owns_verification_lock($lock) ||
+            !self::set_runtime_state('PENDING')) {
             return false;
         }
         $ready = false;
         try {
             $ready = $setup->check_plugin_version() === true;
+            // バージョン移行の途中でDBが再接続されていれば以後は触らない。
+            if (!self::owns_verification_lock($lock)) {
+                return false;
+            }
             $settings = get_option(ESP_Config::OPTION_KEY, null);
             $ready = $ready && self::valid_settings($settings);
             if ($ready) {
@@ -204,12 +243,19 @@ final class ESP_Protection_State {
                 $ready = (!$known || (int) $stored <= $required) &&
                     self::verify_legacy_security_schema();
             }
+            if (!self::owns_verification_lock($lock)) {
+                return false;
+            }
             if ($ready && class_exists('ESP_Media_Protection')) {
                 $ready = ESP_Media_Protection::ensure_rewrite_policy() === true;
             }
         } catch (\Throwable $error) {
             error_log('ESP: explicit runtime verification failed');
             $ready = false;
+        }
+        // ロックを失った場合はREADYにもFAILEDにも変更しない。
+        if (!self::owns_verification_lock($lock)) {
+            return false;
         }
         if (!$ready) {
             self::set_runtime_state('FAILED');
