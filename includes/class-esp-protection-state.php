@@ -148,34 +148,6 @@ final class ESP_Protection_State {
         return get_option(self::RUNTIME_STATE_OPTION, null) === $state;
     }
 
-    /**
-     * 対応するWordPress標準プラグイン更新の直前だけPENDINGを確定する。
-     * updater_post_installは古いコードで動作し得るためREADYにしない。
-     */
-    public static function before_plugin_upgrade($response, $hook_extra) {
-        if (is_wp_error($response) || !is_array($hook_extra) ||
-            ($hook_extra['type'] ?? '') !== 'plugin' ||
-            ($hook_extra['action'] ?? '') !== 'update') {
-            return $response;
-        }
-        $self = plugin_basename(ESP_PATH . 'easy-slug-protect.php');
-        $targets = [];
-        if (isset($hook_extra['plugin'])) {
-            $targets[] = $hook_extra['plugin'];
-        }
-        if (isset($hook_extra['plugins']) && is_array($hook_extra['plugins'])) {
-            $targets = array_merge($targets, $hook_extra['plugins']);
-        }
-        if (!in_array($self, $targets, true)) {
-            return $response;
-        }
-        if (!self::set_runtime_state('PENDING')) {
-            return new WP_Error('esp_upgrade_pending_unavailable',
-                __('保護状態を更新中として記録できないため、ESPの更新を中止しました。', ESP_Config::TEXT_DOMAIN));
-        }
-        return $response;
-    }
-
     /** 管理者による検証、プラグイン有効化、更新後の復旧でのみ実行する。 */
     public static function verify_and_commit($setup) {
         if (!self::set_runtime_state('PENDING')) {
