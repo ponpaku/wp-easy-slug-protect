@@ -68,6 +68,13 @@ final class ESP_Protection_State {
         if (!in_array($state, [null, 'PENDING', 'VERIFY_REQUIRED'], true)) {
             return $state === 'READY';
         }
+        // WP-CLIのサーバー種別不明はRewriteの検証失敗を意味しない。
+        // 検証待ちを維持し、Webサーバー情報のある最初のHTTPアクセスへ委ねる。
+        // CLIの一時CronがFAILEDを永続化して自動復帰を妨げないようにする。
+        if (defined('WP_CLI') && WP_CLI &&
+            trim((string) ($_SERVER['SERVER_SOFTWARE'] ?? '')) === '') {
+            return false;
+        }
         return self::verify_and_commit($setup, true);
     }
 
