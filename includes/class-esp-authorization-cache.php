@@ -51,6 +51,53 @@ final class ESP_Authorization_Cache {
         return null;
     }
 
+    /**
+     * update_metadata_by_mid() は update_post_metadata フィルターを通らない。
+     * 変更後のキーだけでなく、キー変更前の保護状態も失効させる。
+     */
+    public static function guard_postmeta_update_by_mid($check, $meta_id, $meta_value, $meta_key = false) {
+        if ($check !== null) {
+            return $check;
+        }
+        $existing = get_metadata_by_mid('post', $meta_id);
+        if (!is_object($existing) || !isset($existing->meta_key)) {
+            return null; // WordPress本体が不存在・不正なmeta IDを拒否する。
+        }
+        $old_key = $existing->meta_key;
+        $new_key = $meta_key === false ? $old_key : $meta_key;
+        if (!is_string($new_key)) {
+            return null; // WordPress本体が不正なmeta_keyを拒否する。
+        }
+        if ($new_key === ESP_Media_Protection::META_KEY_PROTECTED_PATH &&
+            !ESP_Media_Protection::can_assign_protected_media()) {
+            return false;
+        }
+        if (($old_key === ESP_Config::PERMALINK_PATH_META_KEY ||
+            $new_key === ESP_Config::PERMALINK_PATH_META_KEY) &&
+            !self::invalidate('post', ESP_Filter::CACHE_KEY)) {
+            return false;
+        }
+        if (($old_key === ESP_Media_Protection::META_KEY_PROTECTED_PATH ||
+            $new_key === ESP_Media_Protection::META_KEY_PROTECTED_PATH) &&
+            !self::invalidate('media', ESP_Media_Protection::MEDIA_CACHE_KEY)) {
+            return false;
+        }
+        return null;
+    }
+
+    /** delete_metadata_by_mid() も通常の delete_post_metadata を通らない。 */
+    public static function guard_postmeta_delete_by_mid($check, $meta_id) {
+        if ($check !== null) {
+            return $check;
+        }
+        $existing = get_metadata_by_mid('post', $meta_id);
+        if (!is_object($existing) || !isset($existing->meta_key)) {
+            return null;
+        }
+        return self::guard_postmeta_delete(null, $existing->post_id ?? 0,
+            $existing->meta_key, $existing->meta_value ?? null);
+    }
+
     public static function signature($scope) {
         if (!empty(self::$unsafe_scopes[$scope])) {
             return null; // 当該リクエスト内の古い認可スナップショットを拒否。
