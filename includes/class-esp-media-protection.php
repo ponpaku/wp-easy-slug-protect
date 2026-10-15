@@ -1100,7 +1100,11 @@ class ESP_Media_Protection {
      */
     public static function ensure_rewrite_policy() {
         if (!preg_match('/apache|litespeed/i', $_SERVER['SERVER_SOFTWARE'] ?? '')) {
-            return true; // Nginx uses its administrator-installed rule.
+            // 明示されたNginxは外部設定の責務。未知のサーバーで保護メタが
+            // 存在する／DBが不明なら、安全な配信経路を確認できないため拒否。
+            // 保護OFFまたは保護対象0件なら不要なサイト全体503を避ける。
+            return self::is_nginx_server() || !self::is_media_protection_enabled() ||
+                self::has_any_protected_media_records() === false;
         }
         $enabled = self::is_media_protection_enabled();
         $policy = 'always-route-v2:' . ($enabled ? 'on' : 'off');
@@ -1135,7 +1139,10 @@ class ESP_Media_Protection {
      */
     public static function audit_rewrite_policy() {
         if (!preg_match('/apache|litespeed/i', $_SERVER['SERVER_SOFTWARE'] ?? '')) {
-            return true; // Nginxの外部ルールは別途運用確認が必要。
+            // Nginxの外部ルールは別途運用確認が必要。未知のサーバーは
+            // 保護対象がある状態を正常な監査結果として報告しない。
+            return self::is_nginx_server() || !self::is_media_protection_enabled() ||
+                self::has_any_protected_media_records() === false;
         }
         return self::rewrite_file_matches_policy(self::is_media_protection_enabled());
     }
@@ -1345,10 +1352,23 @@ class ESP_Media_Protection {
             $temp = null;
 
             $verified = $this->verify_rewrite_installation($htaccess_file, $new_rules, $route_media);
-            $key_committed = $verified && (
-                $this->rewrite_key_candidate === null ||
-                self::commit_litespeed_key($this->rewrite_key_candidate)
-            );
+            $key_committed = false;
+            if ($verified) {
+                try {
+                    $key_committed = $this->rewrite_key_candidate === null ||
+                        self::commit_litespeed_key($this->rewrite_key_candidate);
+                } catch (\Throwable $error) {
+                    // update_option()のフックが保存後に例外を投げることもある。
+                    // 保存済みなら新Rewriteを維持し、未保存なら既存の復元経路へ。
+                    error_log('ESP: LiteSpeed key commit raised an exception');
+                    try {
+                        $key_committed = $this->rewrite_key_candidate !== null &&
+                            self::get_litespeed_key_value() === $this->rewrite_key_candidate;
+                    } catch (\Throwable $read_error) {
+                        $key_committed = false;
+                    }
+                }
+            }
             if (!$verified || !$key_committed) {
                 // 他のプロセスによる変更を旧データで上書きしない。
                 if (!$exists || @file_get_contents($htaccess_file) !== $new_rules) {
@@ -1687,8 +1707,9 @@ class ESP_Media_Protection {
             return true;
         }
         if (!preg_match('/apache|litespeed/i', $_SERVER['SERVER_SOFTWARE'] ?? '')) {
-            // Nginx保護ルールは管理者による外部設定の責務。
-            return true;
+            // 保護メタありのOFF→ONは、明示されたNginxだけ外部設定に委ねる。
+            // WP-CLI等の未知の実行環境で安全なRewriteがあると推測しない。
+            return self::is_nginx_server();
         }
         if (self::rewrite_file_matches_policy(true)) {
             return true;
