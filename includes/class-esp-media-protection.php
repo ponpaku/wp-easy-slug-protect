@@ -669,14 +669,10 @@ class ESP_Media_Protection {
             return;
         }
 
-        // OFFへの変更直後など、以前のRewriteが残っても公開画像を404にしない。
-        // ただし保護レコード0件をDBで確定できなければ絶対に直接配信しない。
-        // このDBクエリは「OFFかつPHPへ実際に回送された画像」に限る。
+        // 管理者が明示的にOFFにしたときは保護メタの有無を問わず公開。
+        // 古いRewriteが残ってPHPに転送されても、公開画像を404にしない。
+        // OFFは公開の意思表示であり、メタ情報自体は削除しない。
         if (!$this->enabled) {
-            if (self::has_any_protected_media_records() !== false) {
-                $this->send_403();
-                return;
-            }
             $this->deliver_media($file_path);
             return;
         }
@@ -1246,9 +1242,10 @@ class ESP_Media_Protection {
                     $end_at <= $begin_at))) {
                 return new WP_Error('esp_htaccess_ambiguous', __('ESP保護ルールの境界が不正なため自動更新しません。', ESP_Config::TEXT_DOMAIN));
             }
-            // 保護済み添付が残る場合、設定OFFだけで静的アクセス用の
-            // サーバー保護ルールを取り除かない。無効化操作も同じ条件を守る。
-            if (!$route_media && $begin_count === 1 &&
+            // プラグイン無効化時はPHP認可ハンドラーも消えるため、
+            // 保護済み添付が残る限りRewriteを維持する。
+            // 一方、管理者が設定をOFFにした場合は意図的な公開なので除去可。
+            if ($deactivating && !$route_media && $begin_count === 1 &&
                 self::has_any_protected_media_records() !== false) {
                 return new WP_Error('esp_htaccess_protected_media_remain',
                     __('保護済みメディアが存在するか不明なため、既存のRewrite保護を維持します。', ESP_Config::TEXT_DOMAIN));
@@ -1628,11 +1625,16 @@ class ESP_Media_Protection {
     }
 
     /**
-     * メディア保護OFFへの遷移を保存してよいか、DBの実データで判定する。
-     * false（0件確認済み）だけを許可し、true/NULL（保護あり・DB障害）は拒否。
+     * 管理者がOFFにする際の警告判定。true:保護メタあり、
+     * false:0件、null:DB状態不明（切替は拒否）。
      */
+    public static function protected_media_records_exist() {
+        return self::has_any_protected_media_records();
+    }
+
+    /** 明示的な無効化時にメタの有無を問わず設定変更できる。 */
     public static function can_disable_media_protection() {
-        return self::has_any_protected_media_records() === false;
+        return self::has_any_protected_media_records() !== null;
     }
 
     /**
@@ -1653,13 +1655,28 @@ class ESP_Media_Protection {
     }
 
     /**
-     * OFF→ONの保存前に、保護に必要なRewriteを先行設置する。
-     * 後段で設定の保存に失敗した場合、次の起動ゲートがOFFルールへ復旧する。
+     * OFF→ONで既に保護メタがある場合は、設定をONに保存する前に
+     * サーバー側のRewriteを確実に設置・確認する。0件なら副作用は不要。
+     * 保存失敗で設定がOFFのまま残っても、PHP側はOFFとして公開配信可能。
      */
     public static function can_enable_media_protection() {
-        // sanitize_callback内ではDBに保存されていないため、Rewriteを変更しない。
-        // ON→保護登録は、保護メタ書込前のcan_assign_protected_mediaが厳密に検証する。
-        return self::has_any_protected_media_records() === false;
+        $records = self::has_any_protected_media_records();
+        if ($records === null) {
+            return false;
+        }
+        if ($records === false) {
+            return true;
+        }
+        if (!preg_match('/apache|litespeed/i', $_SERVER['SERVER_SOFTWARE'] ?? '')) {
+            // Nginx保護ルールは管理者による外部設定の責務。
+            return true;
+        }
+        if (self::rewrite_file_matches_policy(true)) {
+            return true;
+        }
+        $media = (new \ReflectionClass(self::class))->newInstanceWithoutConstructor();
+        return $media->update_htaccess(false, false, true) === true &&
+            self::rewrite_file_matches_policy(true);
     }
 
     /**
