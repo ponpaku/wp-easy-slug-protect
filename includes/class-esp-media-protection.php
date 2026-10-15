@@ -31,6 +31,9 @@ class ESP_Media_Protection {
     /** Rewrite置換完了までDBに保存しないLiteSpeedキー（更新実行中のみ）。 */
     private $rewrite_key_candidate = null;
 
+    /** 内部キー保存の update_option フックでRewriteを再入更新しない。 */
+    private static $litespeed_key_commit_in_progress = false;
+
     /**
      * @var string メディア保護用メタキー
      */
@@ -1566,8 +1569,13 @@ class ESP_Media_Protection {
             $settings['media'] = [];
         }
         $settings['media'][self::OPTION_LITESPEED_KEY] = $key;
-        ESP_Option::update_settings($settings);
-        return self::get_litespeed_key_value() === $key;
+        self::$litespeed_key_commit_in_progress = true;
+        try {
+            ESP_Option::update_settings($settings);
+            return self::get_litespeed_key_value() === $key;
+        } finally {
+            self::$litespeed_key_commit_in_progress = false;
+        }
     }
 
     /**
@@ -1712,6 +1720,11 @@ class ESP_Media_Protection {
      * 設定保存時に呼び出される処理
      */
     public function on_settings_save() {
+        // Rewrite更新の一部でLiteSpeedキーだけを保存した場合、
+        // 同じフックから再びRewriteを書こうとすると自分自身のflockと競合する。
+        if (self::$litespeed_key_commit_in_progress) {
+            return true;
+        }
         // キャッシュを再生成
         $this->regenerate_media_cache();
         
