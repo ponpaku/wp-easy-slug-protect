@@ -142,14 +142,15 @@ class ESP_Settings {
             $records = ESP_Media_Protection::protected_media_records_exist();
             $confirmed = isset($input['media']['confirm_disable']) &&
                 $input['media']['confirm_disable'] === '1';
-            if ($records === null || ($records === true && !$confirmed)) {
-                // DBが読めない場合は拒否。保護メタありの場合は確認付きでOFFを許可。
+            if (($records === null || $records === true) && !$confirmed) {
+                // 保護メタの存在またはDB状態が不明なら明示確認を求める。
+                // 確認後のOFFは管理者の意思として受理し、DB障害でも妨げない。
                 $sanitized['media']['enabled'] = true;
                 add_settings_error(
                     ESP_Config::OPTION_KEY,
                     'esp_media_disable_rejected',
                     $records === null
-                        ? __('保護メディアの状態を確認できないためOFFへの変更を中止しました。', ESP_Config::TEXT_DOMAIN)
+                        ? __('保護メディアの件数を確認できません。公開される可能性を理解し、確認チェックを入れてから保存してください。', ESP_Config::TEXT_DOMAIN)
                         : __('保護指定済みメディアが公開されることを確認し、確認チェックを入れてから保存してください。', ESP_Config::TEXT_DOMAIN),
                     'error'
                 );
