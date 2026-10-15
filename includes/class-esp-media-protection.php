@@ -946,48 +946,48 @@ class ESP_Media_Protection {
                 return (int) $attachment_id;
             }
 
-        // AVIFサムネイルは _wp_attached_file に登録されない場合がある。
-        // 親画像の候補を同じディレクトリから探し、メタデータに記録された
-        // サムネイル名と一致した場合だけ保護設定を継承する。
-        if (strtolower(pathinfo($relative_path, PATHINFO_EXTENSION)) !== 'avif') {
-            return false;
-        }
-
-        $thumbnail_name = basename($relative_path);
-        if (!preg_match('/^(.+)-[0-9]+x[0-9]+\\.avif$/i', $thumbnail_name, $matches)) {
-            return false;
-        }
-
-        $directory = dirname($relative_path);
-        $parent_prefix = ($directory === '.' ? '' : $directory . '/') . $matches[1];
-        $parent_extensions = ['avif', 'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'heic', 'heif'];
-        $candidates = [];
-        foreach ($parent_extensions as $extension) {
-            $candidates[] = $parent_prefix . '.' . $extension;
-        }
-
-        $placeholders = implode(', ', array_fill(0, count($candidates), '%s'));
-        $candidate_ids = $wpdb->get_col($wpdb->prepare(
-            "SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = %s AND meta_value IN ({$placeholders})",
-            array_merge(['_wp_attached_file'], $candidates)
-        ));
-        if ($wpdb->last_error !== '' || !is_array($candidate_ids)) {
-            return null;
-        }
-
-        foreach ($candidate_ids as $candidate_id) {
-            $metadata = wp_get_attachment_metadata((int) $candidate_id);
-            if (!is_array($metadata) || !isset($metadata['file'], $metadata['sizes']) ||
-                !is_array($metadata['sizes']) || dirname($metadata['file']) !== $directory) {
-                continue;
+            // AVIFサムネイルは _wp_attached_file に登録されない場合がある。
+            // 親画像の候補を同じディレクトリから探し、メタデータに記録された
+            // サムネイル名と一致した場合だけ保護設定を継承する。
+            if (strtolower(pathinfo($relative_path, PATHINFO_EXTENSION)) !== 'avif') {
+                return false;
             }
 
-            foreach ($metadata['sizes'] as $size) {
-                if (is_array($size) && isset($size['file']) && $size['file'] === $thumbnail_name) {
-                    return (int) $candidate_id;
+            $thumbnail_name = basename($relative_path);
+            if (!preg_match('/^(.+)-[0-9]+x[0-9]+\\.avif$/i', $thumbnail_name, $matches)) {
+                return false;
+            }
+
+            $directory = dirname($relative_path);
+            $parent_prefix = ($directory === '.' ? '' : $directory . '/') . $matches[1];
+            $parent_extensions = ['avif', 'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'heic', 'heif'];
+            $candidates = [];
+            foreach ($parent_extensions as $extension) {
+                $candidates[] = $parent_prefix . '.' . $extension;
+            }
+
+            $placeholders = implode(', ', array_fill(0, count($candidates), '%s'));
+            $candidate_ids = $wpdb->get_col($wpdb->prepare(
+                "SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = %s AND meta_value IN ({$placeholders})",
+                array_merge(['_wp_attached_file'], $candidates)
+            ));
+            if ($wpdb->last_error !== '' || !is_array($candidate_ids)) {
+                return null;
+            }
+
+            foreach ($candidate_ids as $candidate_id) {
+                $metadata = wp_get_attachment_metadata((int) $candidate_id);
+                if (!is_array($metadata) || !isset($metadata['file'], $metadata['sizes']) ||
+                    !is_array($metadata['sizes']) || dirname($metadata['file']) !== $directory) {
+                    continue;
+                }
+
+                foreach ($metadata['sizes'] as $size) {
+                    if (is_array($size) && isset($size['file']) && $size['file'] === $thumbnail_name) {
+                        return (int) $candidate_id;
+                    }
                 }
             }
-        }
 
             return false;
         } catch (\Throwable $error) {
