@@ -120,7 +120,7 @@ class ESP_Admin_Menu {
             <h1><?php _e('Easy Slug Protect 設定', $text_domain); ?></h1>
             <?php
             // options.php が保存した設定エラーをリダイレクト後の画面にも表示する。
-            // 保存拒否（保護済みメディアあり／Rewrite適用不可）を成功と誤認させない。
+            // 保存拒否（確認不足／Rewrite適用不可）を成功と誤認させない。
             settings_errors(ESP_Config::OPTION_KEY);
             ?>
 
@@ -464,7 +464,15 @@ class ESP_Admin_Menu {
                                     <?php _e('メディア保護を有効にする', $text_domain); ?>
                                 </label>
                                 <p class="description">
-                                    <?php _e('保護済みメディアが0件と確認できる場合だけOFFにできます。保護対象が残っている場合やDB状態が不明な場合は、画像の公開を防ぐため設定変更を拒否します。', $text_domain); ?>
+                                    <?php _e('OFFにすると保護指定済みの画像も公開されます。保護指定の情報は残るため、ONに戻すと保護を再開できます。ただしOFF中に取得・キャッシュされた画像は回収できません。', $text_domain); ?>
+                                </p>
+                                <p>
+                                    <label>
+                                        <input type="checkbox"
+                                            name="<?php echo $option_key; ?>[media][confirm_disable]"
+                                            value="1">
+                                        <strong><?php _e('保護指定済みメディアが公開されることを理解しました（保護指定が残る状態でOFFにする場合は必須）', $text_domain); ?></strong>
+                                    </label>
                                 </p>
                             </td>
                         </tr>
