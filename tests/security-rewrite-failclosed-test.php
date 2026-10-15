@@ -320,11 +320,11 @@ check(ESP_Media_Protection::can_enable_media_protection() === false,
 $wpdb->count = 0;
 $wpdb->last_error = '';
 
-// OFFへの保存後に旧Rewriteが残ったとしても、既知の公開画像は200相当で配信する。
+// OFFへの保存後に保護メタが残り、旧Rewriteがあっても公開画像を配信。
 $public_image = $GLOBALS['test_dir'] . '/public.jpg';
 file_put_contents($public_image, 'public bytes');
 $GLOBALS['enabled'] = false;
-$wpdb->count = 0;
+$wpdb->count = 1; // 旧版の保護メタは残っている
 $wpdb->last_error = '';
 $GLOBALS['test_media_query'] = 'public.jpg';
 $_SERVER['REQUEST_URI'] = '/wp-content/uploads/public.jpg';
