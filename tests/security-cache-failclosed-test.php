@@ -37,8 +37,21 @@ function wp_doing_cron() { return true; }
 class BrokenDB {
     public $postmeta = 'wp_postmeta';
     public $last_error = 'Database unavailable';
-    public function prepare($sql, ...$args) { return $sql; }
+    public $live_online = false;
+    public $last_post_id = 0;
+    public function prepare($sql, ...$args) {
+        if (strpos($sql, 'SELECT meta_value FROM') !== false) {
+            $this->last_post_id = (int)($args[0] ?? 0);
+        }
+        return $sql;
+    }
     public function get_results($query) { return null; }
+    public function get_var($query) {
+        $this->last_error = $this->live_online ? '' : 'Database unavailable';
+        return $this->live_online
+            ? ($GLOBALS['live_media_meta'][$this->last_post_id] ?? null)
+            : null;
+    }
 }
 $wpdb = new BrokenDB();
 function __($msg, $domain = null) { return $msg; }
@@ -76,6 +89,8 @@ $response = $media->check_rest_media_access(new WP_REST_Response(), (object) ['I
 check($response->get_status() === 200, 'existing upload_files capability preserves REST media single item');
 
 $GLOBALS['can_upload'] = false;
+// 認可キャッシュ検査を通るケースではREST最終DB照会を成功させる。
+$wpdb->live_online = true;
 $authProperty = (new ReflectionClass('ESP_Media_Protection'))->getProperty('auth');
 $authProperty->setValue($media, new class {
     public function is_logged_in($path) { return false; }
@@ -99,4 +114,8 @@ $response = $media->check_rest_media_access(new WP_REST_Response(), (object) ['I
 check($response->get_status() === 403,
     'live media metadata prevents REST response after stale generation omitted new protected item');
 unset($GLOBALS['live_media_meta'][99]);
+$wpdb->live_online = false;
+$response = $media->check_rest_media_access(new WP_REST_Response(), (object) ['ID' => 99], $request);
+check($response->get_status() === 503,
+    'REST revalidation refuses publication when the live metadata query fails');
 echo "All cache fail-closed tests passed.\n";
