@@ -1143,7 +1143,7 @@ class ESP_Media_Protection {
      * 実際のWebサーバーでのRewrite動作検証に代わるものではない。
      */
     private static function rewrite_file_matches_policy($enabled) {
-        $dir = wp_upload_dir();
+        $dir = wp_upload_dir(null, false);
         if (!empty($dir['error']) || empty($dir['basedir'])) {
             return false;
         }
@@ -1398,7 +1398,7 @@ class ESP_Media_Protection {
         $home_path = $home_path ? trailingslashit($home_path) : '/';
         
         // wp-content/uploads/のパスを取得
-        $upload_dir = wp_upload_dir();
+        $upload_dir = wp_upload_dir(null, !$read_only);
         $upload_path = str_replace(ABSPATH, '', $upload_dir['basedir']);
         $upload_path = str_replace('\\', '/', $upload_path); // Windows対応
         
