@@ -52,7 +52,7 @@ function __($value, $domain = null) { return $value; }
 function sanitize_text_field($value) { return trim((string) $value); }
 function is_wp_error($value) { return $value instanceof WP_Error; }
 function home_url($path = '') { return 'https://example.test' . $path; }
-function wp_upload_dir() { return ['basedir' => $GLOBALS['test_dir'], 'error' => '']; }
+function wp_upload_dir() { return ['basedir' => $GLOBALS['test_dir'], 'baseurl' => 'https://example.test/wp-content/uploads', 'error' => '']; }
 function get_query_var($key) { return $GLOBALS['test_media_query'] ?? ''; }
 function is_404() { return false; }
 function status_header($code) { $GLOBALS['test_http_status'] = $code; }
@@ -223,6 +223,30 @@ fclose($lockHandle);
 check($media->update_htaccess() === true, 'known protected media updates rewrite');
 $new = file_get_contents($file);
 check(strpos($new, 'esp-media') !== false && strpos($new, '# Other plugin rule') !== false, 'generated rewrite keeps unrelated rules');
+
+check(strpos($new, $foreign) === 0 &&
+    strpos($new, '# BEGIN ESP Media Protection') >= strlen($foreign),
+    'R01: existing foreign rules execute before ESP rewrite');
+$foreign_deny = "RewriteEngine On\nRewriteRule ^private/ - [F,L]\n";
+file_put_contents($file, $foreign_deny);
+check($media->update_htaccess() === true,
+    'R01: foreign [F,L] denial is compatible with safe ESP rewrite installation');
+$with_deny = file_get_contents($file);
+check(strpos($with_deny, $foreign_deny) === 0 &&
+    $matchesPolicy->invoke(null, true) === true,
+    'R01: third-party denial precedes ESP rewrite and passes policy check');
+$foreign_bypass = "RewriteEngine On\nRewriteRule ^private/ - [L]\n";
+file_put_contents($file, $foreign_bypass);
+$conflict = $media->update_htaccess();
+check($conflict instanceof WP_Error &&
+    $conflict->get_error_code() === 'esp_htaccess_foreign_rewrite_conflict' &&
+    file_get_contents($file) === $foreign_bypass &&
+    $matchesPolicy->invoke(null, true) === false,
+    'R01: foreign early-exit Rewrite is not silently accepted as protected');
+file_put_contents($file, $new);
+check($matchesPolicy->invoke(null, true) === true,
+    'R01: safe rewrite order restores verified policy');
+
 check(strpos($new, 'avif') !== false, 'AVIF is covered in replacement');
 // LiteSpeedキー未設定の読取専用監査は、設定・Rewriteを一切変更しない。
 $_SERVER['SERVER_SOFTWARE'] = 'LiteSpeed';
@@ -517,6 +541,26 @@ $reflection->getProperty('deriver')->setValue($media, $delivered);
 $media->handle_media_access();
 check($delivered->files === [realpath($public_image)],
     'disabled media serves public image when stale ON Rewrite still routes it into WordPress');
+// OFFでも公開トップのクエリがuploadsの拒否ルールを迂回しない。
+$GLOBALS['test_media_query'] = 'public.jpg';
+$_SERVER['REQUEST_URI'] = '/?esp-media=public.jpg';
+$direct_denied = false;
+try { $media->handle_media_access(); } catch (RuntimeException $error) {
+    $direct_denied = $error->getMessage() === 'intercepted media 404';
+}
+check($direct_denied && $GLOBALS['test_http_status'] === 404 &&
+    $delivered->files === [realpath($public_image)],
+    'R02: direct public esp-media query cannot deliver uploads file while OFF');
+// 元URLのファイル名とクエリの指定先が異なる場合も拒否する。
+$_SERVER['REQUEST_URI'] = '/wp-content/uploads/another.jpg?esp-media=public.jpg';
+$mismatch_denied = false;
+try { $media->handle_media_access(); } catch (RuntimeException $error) {
+    $mismatch_denied = $error->getMessage() === 'intercepted media 404';
+}
+check($mismatch_denied && count($delivered->files) === 1,
+    'R02: mismatched source URL cannot route to a different uploads file');
+$_SERVER['REQUEST_URI'] = '/wp-content/uploads/public.jpg';
+
 unlink($public_image);
 unset($GLOBALS['test_media_query']);
 $enabledProp->setValue($media, true);
