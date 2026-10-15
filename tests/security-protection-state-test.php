@@ -78,6 +78,7 @@ class BootTestDB {
     }
 }
 class ESP_Media_Protection {
+    const REWRITE_ENDPOINT = 'esp-media';
     public static $apply_ok = true;
     public static $audit_ok = true;
     public static $checks = 0;
