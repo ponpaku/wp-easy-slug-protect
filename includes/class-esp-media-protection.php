@@ -1325,10 +1325,12 @@ class ESP_Media_Protection {
      * @return bool 成功時true
      */
     public function update_htaccess($force_litespeed_key_regeneration = false, $deactivating = false, $route_override = null) {
-        if (!$this->is_apache()) {
-            return $deactivating || !$this->enabled
-                ? true
-                : new WP_Error('esp_htaccess_unsupported', __('ApacheまたはLiteSpeed環境でのみ利用できます。', ESP_Config::TEXT_DOMAIN));
+        // WordPress管理画面と異なりWP-CLIではSERVER_SOFTWAREが空になり得る。
+        // ESP自身の既存ブロックの削除はWebサーバー種別に依存しない。
+        // ただし、サーバー不明時の保護ONルール新規設置は推測で許可しない。
+        if (!$this->is_apache() && !$deactivating && $this->enabled) {
+            return new WP_Error('esp_htaccess_unsupported',
+                __('ApacheまたはLiteSpeed環境でのみ利用できます。', ESP_Config::TEXT_DOMAIN));
         }
 
         $upload_dir = wp_upload_dir();
@@ -1337,6 +1339,22 @@ class ESP_Media_Protection {
         }
 
         $htaccess_file = trailingslashit($upload_dir['basedir']) . '.htaccess';
+        if ($deactivating || !self::is_media_protection_enabled()) {
+            // 既存ESPブロックなしなら変更不要。CLI/Nginxで空ファイルやロックを
+            // 作らず、読み取り失敗・部分マーカーは後続のエラー経路へ渡す。
+            if (!file_exists($htaccess_file) && !is_link($htaccess_file)) {
+                return true;
+            }
+            $present = @file_get_contents($htaccess_file);
+            if ($present === false) {
+                return new WP_Error('esp_htaccess_read_failed',
+                    __('既存の.htaccessを読み取れません。', ESP_Config::TEXT_DOMAIN));
+            }
+            if (!str_contains($present, '# BEGIN ESP Media Protection') &&
+                !str_contains($present, '# END ESP Media Protection')) {
+                return true;
+            }
+        }
         $lock_file = $htaccess_file . '.esp.lock';
         $lock = @fopen($lock_file, 'c');
         if ($lock === false) {
