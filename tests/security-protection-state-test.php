@@ -79,6 +79,8 @@ class BootTestDB {
 }
 class ESP_Media_Protection {
     const REWRITE_ENDPOINT = 'esp-media';
+    public static $protected_records = false;
+    public static function protected_media_records_exist() { return self::$protected_records; }
     public static $apply_ok = true;
     public static $audit_ok = true;
     public static $checks = 0;
@@ -468,5 +470,29 @@ check(ESP_Protection_State::boot($setup) === true &&
     get_option('esp_runtime_state') === 'READY' &&
     $setup->checks === $before_cli_checks + 1,
     'next HTTP server context can complete deferred strict verification');
+// CLI有効化時は保護メディアが無いことを確定できる時だけHTTP検証を延期する。
+unset($_SERVER['SERVER_SOFTWARE']);
+$GLOBALS['options']['esp_runtime_state'] = 'READY';
+$GLOBALS['options'][ESP_Config::OPTION_KEY] = ['path' => [], 'media' => ['enabled' => true]];
+ESP_Media_Protection::$protected_records = false;
+check(ESP_Protection_State::defer_cli_activation_verification() === true &&
+    get_option('esp_runtime_state') === 'VERIFY_REQUIRED',
+    'R03: CLI activation with zero protected media defers to verified HTTP startup');
+ESP_Media_Protection::$protected_records = true;
+check(ESP_Protection_State::defer_cli_activation_verification() === false &&
+    get_option('esp_runtime_state') === 'VERIFY_REQUIRED',
+    'R03: CLI activation must not leave already-protected media without verified Rewrite');
+ESP_Media_Protection::$protected_records = null;
+check(ESP_Protection_State::defer_cli_activation_verification() === false,
+    'R03: unknown protected-media count cannot be silently deferred');
+$GLOBALS['options'][ESP_Config::OPTION_KEY] = ['path' => [], 'media' => ['enabled' => false]];
+check(ESP_Protection_State::defer_cli_activation_verification() === true,
+    'R03: explicit media OFF can defer CLI activation despite old protection metadata');
+$GLOBALS['options'][ESP_Config::OPTION_KEY] = ['path' => [], 'media' => ['enabled' => true]];
+ESP_Media_Protection::$protected_records = false;
+$_SERVER['SERVER_SOFTWARE'] = 'Apache/2.4';
+check(ESP_Protection_State::boot($setup) === true,
+    'R03: next HTTP request completes verification after safe CLI deferral');
+
 
 echo "All protection runtime tests passed.\n";
