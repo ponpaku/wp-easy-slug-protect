@@ -39,13 +39,25 @@ class RewriteTestDB {
     public $count = 1;
     public $live_path = null;
     public $live_error = false;
+    public $attached_id = null;
+    public $attached_query_error = false;
+    public $candidate_ids = [];
+    public $candidate_query_error = false;
     public function prepare($sql, ...$args) { return $sql; }
     public function get_var($query) {
         if (strpos($query, 'SELECT meta_value FROM') !== false) {
             $this->last_error = $this->live_error ? 'DB unavailable' : '';
             return $this->live_error ? null : $this->live_path;
         }
+        if (strpos($query, 'SELECT post_id FROM') !== false) {
+            $this->last_error = $this->attached_query_error ? 'Attached-file SELECT failed' : '';
+            return $this->attached_query_error ? null : $this->attached_id;
+        }
         return $this->count;
+    }
+    public function get_col($query) {
+        $this->last_error = $this->candidate_query_error ? 'AVIF candidate SELECT failed' : '';
+        return $this->candidate_query_error ? null : $this->candidate_ids;
     }
 }
 function __($value, $domain = null) { return $value; }
@@ -54,6 +66,11 @@ function is_wp_error($value) { return $value instanceof WP_Error; }
 function home_url($path = '') { return 'https://example.test' . $path; }
 function wp_upload_dir() { return ['basedir' => $GLOBALS['test_dir'], 'baseurl' => 'https://example.test/wp-content/uploads', 'error' => '']; }
 function get_query_var($key) { return $GLOBALS['test_media_query'] ?? ''; }
+function is_admin() { return false; }
+function current_user_can($capability) { return false; }
+function wp_die($message, $title = '', $args = []) {
+    throw new RuntimeException('intercepted media ' . (is_array($args) ? ($args['response'] ?? 0) : $title));
+}
 function is_404() { return false; }
 function status_header($code) { $GLOBALS['test_http_status'] = $code; }
 function nocache_headers() {}
@@ -592,6 +609,98 @@ check(glob($actual_dir . '/.esp-*') === [] &&
 @unlink($link_dir);
 @rmdir($actual_dir);
 $GLOBALS['test_dir'] = $original_dir;
+
+// R01: 添付照会に失敗した時だけ配信を止める（正常な未登録は従来公開）。
+$test_public = $GLOBALS['test_dir'] . '/ordinary.jpg';
+$test_avif = $GLOBALS['test_dir'] . '/ordinary-200x200.avif';
+file_put_contents($test_public, 'ordinary bytes');
+file_put_contents($test_avif, 'avif bytes');
+$resolveAttachment = $reflection->getMethod('get_attachment_id_from_path');
+$wpdb->attached_id = null;
+$wpdb->attached_query_error = false;
+$wpdb->candidate_ids = [];
+check($resolveAttachment->invoke($media, $test_public) === false,
+    'R01: successful attachment SELECT with no rows is explicitly unregistered');
+$wpdb->attached_query_error = true;
+check($resolveAttachment->invoke($media, $test_public) === null,
+    'R01: primary attachment SELECT error is unknown, not unregistered');
+$wpdb->attached_query_error = false;
+$wpdb->candidate_query_error = true;
+check($resolveAttachment->invoke($media, $test_avif) === null,
+    'R01: AVIF parent candidate SELECT error is also unknown');
+$wpdb->candidate_query_error = false;
+check($resolveAttachment->invoke($media, $test_avif) === false,
+    'R01: successful AVIF candidate SELECT with zero rows remains unregistered');
+$wpdb->attached_id = 42;
+check($resolveAttachment->invoke($media, $test_public) === 42,
+    'R01: valid primary attachment ID is retained');
+
+$delivery = new class {
+    public $files = [];
+    public function deliver($path) { $this->files[] = $path; return true; }
+};
+$reflection->getProperty('deriver')->setValue($media, $delivery);
+$enabledProp->setValue($media, true);
+$GLOBALS['test_media_query'] = 'ordinary.jpg';
+$_SERVER['REQUEST_URI'] = '/wp-content/uploads/ordinary.jpg';
+$wpdb->attached_query_error = true;
+$denied = false;
+try { $media->handle_media_access(); } catch (RuntimeException $e) {
+    $denied = $e->getMessage() === 'intercepted media 503';
+}
+check($denied && $GLOBALS['test_http_status'] === 503 && $delivery->files === [],
+    'R01: anonymous PHP media response is denied when attachment lookup fails');
+$wpdb->attached_query_error = false;
+$wpdb->attached_id = 42;
+$wpdb->live_error = true;
+$denied = false;
+try { $media->handle_media_access(); } catch (RuntimeException $e) {
+    $denied = $e->getMessage() === 'intercepted media 503';
+}
+check($denied && $GLOBALS['test_http_status'] === 503 && $delivery->files === [],
+    'R01: attached media fails closed when live protected-path read fails');
+$wpdb->live_error = false;
+$wpdb->live_path = null;
+$media->handle_media_access();
+check($delivery->files === [realpath($test_public)],
+    'R01: attached public file remains available after successful unprotected metadata read');
+$wpdb->attached_id = null;
+$media->handle_media_access();
+check(count($delivery->files) === 2,
+    'R01: normal unregistered public media remains available');
+unset($GLOBALS['test_media_query']);
+unlink($test_public);
+unlink($test_avif);
+
+// R02: Webサーバー情報がないWP-CLIでもESP自身のRewriteだけ除去する。
+$GLOBALS['enabled'] = true;
+$_SERVER['SERVER_SOFTWARE'] = 'Apache/2.4';
+check($media->update_htaccess() === true, 'R02: prepare installed ESP Rewrite for CLI removal test');
+$before_cli = file_get_contents($file);
+check(strpos($before_cli, '# BEGIN ESP Media Protection') !== false,
+    'R02: Rewrite is installed before CLI deactivation');
+unset($_SERVER['SERVER_SOFTWARE']);
+check($media->update_htaccess(false, true) === true &&
+    file_get_contents($file) === $foreign,
+    'R02: CLI without SERVER_SOFTWARE removes ESP block but preserves foreign bytes');
+@unlink($file . '.esp.lock');
+check($media->update_htaccess(false, true) === true && !file_exists($file . '.esp.lock'),
+    'R02: repeated CLI deactivation needs no rewrite lock without ESP marker');
+$_SERVER['SERVER_SOFTWARE'] = 'Apache/2.4';
+check($media->update_htaccess() === true,
+    'R02: reinstall ESP block before simulated lock failure');
+unset($_SERVER['SERVER_SOFTWARE']);
+$cli_lock = fopen($file . '.esp.lock', 'c');
+flock($cli_lock, LOCK_EX);
+$cli_error = $media->update_htaccess(false, true);
+check($cli_error instanceof WP_Error && $cli_error->get_error_code() === 'esp_htaccess_locked' &&
+    strpos(file_get_contents($file), '# BEGIN ESP Media Protection') !== false,
+    'R02: locked CLI deactivation reports failure instead of claiming deletion');
+flock($cli_lock, LOCK_UN);
+fclose($cli_lock);
+check($media->update_htaccess(false, true) === true && file_get_contents($file) === $foreign,
+    'R02: CLI can finish removal when writer lock is released');
+$_SERVER['SERVER_SOFTWARE'] = 'Apache/2.4';
 
 @unlink($file);
 @unlink($file . '.esp.lock');
