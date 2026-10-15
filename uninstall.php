@@ -172,6 +172,9 @@ delete_option('esp_post_auth_epoch');
 delete_option('esp_media_auth_epoch');
 delete_option('esp_rewrite_policy_version');
 delete_option('esp_rewrite_last_error');
+delete_option('esp_runtime_state');
+delete_option('esp_runtime_verify_lock');
+delete_option('esp_integrity_last_audit');
 delete_option('esp_integrity_check_progress');
 
 // 投稿メタデータの削除
@@ -195,7 +198,8 @@ $cron_hooks = [
     ESP_Config::DAILY_CLEANUP_HOOK,
     ESP_Config::INTEGRITY_CHECK_HOOK,
     'esp_media_cache_refresh',
-    'esp_all_cache_refresh'
+    'esp_all_cache_refresh',
+    'esp_verify_runtime_once'
 ];
 
 foreach ($cron_hooks as $hook) {
