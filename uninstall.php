@@ -45,7 +45,8 @@ function esp_uninstall_restore_if_unchanged($file, $backup, $installed, $mode) {
 
 /**
  * アンインストール時も既存.htaccessを直接上書きしない。
- * 保護マーカーが不正なら推測で削除せず、DB削除も中止する。
+ * 保護マーカーが不正なら推測で削除しない。失敗しても管理者の
+ * WordPress標準アンインストールとDB削除は妨げず、手動復旧を記録する。
  */
 function esp_uninstall_remove_rewrite_safely() {
     $dir = wp_upload_dir();
