@@ -14,11 +14,17 @@ class ESP_Option {
     public static function update_settings($settings) {
         $GLOBALS['litespeed_key_writes'] = ($GLOBALS['litespeed_key_writes'] ?? 0) + 1;
         if (!empty($GLOBALS['litespeed_key_write_failure'])) { return false; }
+        if (!empty($GLOBALS['litespeed_key_throw_before_write'])) {
+            throw new RuntimeException('Simulated failure before key persistence');
+        }
         if (!empty($GLOBALS['simulate_litespeed_option_hook'])) {
             $nested = (new ReflectionClass('ESP_Media_Protection'))->newInstanceWithoutConstructor();
             $GLOBALS['nested_key_update_safe'] = $nested->on_settings_save() === true;
         }
         $GLOBALS['litespeed_key'] = $settings['media']['litespeed_key'];
+        if (!empty($GLOBALS['litespeed_key_throw_after_write'])) {
+            throw new RuntimeException('Simulated option hook failure after persistence');
+        }
         return true;
     }
 }
@@ -88,6 +94,29 @@ check(ESP_Media_Protection::can_assign_protected_media() === false,
 $_SERVER['SERVER_SOFTWARE'] = 'nginx/1.26';
 check(ESP_Media_Protection::can_assign_protected_media() === true,
     'explicit Nginx deployment retains externally administered Rewrite policy');
+check(ESP_Media_Protection::ensure_rewrite_policy() === true,
+    'explicit Nginx uses an externally administered policy during verification');
+unset($_SERVER['SERVER_SOFTWARE']);
+$wpdb->count = 1;
+check(ESP_Media_Protection::ensure_rewrite_policy() === false &&
+    ESP_Media_Protection::audit_rewrite_policy() === false &&
+    ESP_Media_Protection::can_enable_media_protection() === false,
+    'unknown server cannot verify an existing protected-media deployment');
+$wpdb->count = null;
+$wpdb->last_error = 'DB unavailable';
+check(ESP_Media_Protection::ensure_rewrite_policy() === false &&
+    ESP_Media_Protection::audit_rewrite_policy() === false,
+    'unknown server plus unknown media records never passes verification');
+$wpdb->count = 0;
+$wpdb->last_error = '';
+check(ESP_Media_Protection::ensure_rewrite_policy() === true &&
+    ESP_Media_Protection::can_enable_media_protection() === true,
+    'unknown server with confirmed zero records keeps public site available');
+$GLOBALS['enabled'] = false;
+$wpdb->count = 1;
+check(ESP_Media_Protection::ensure_rewrite_policy() === true,
+    'explicitly disabled media protection remains available on unknown server');
+$GLOBALS['enabled'] = true;
 $_SERVER['SERVER_SOFTWARE'] = 'Apache/2.4';
 
 $matchesPolicy = $reflection->getMethod('rewrite_file_matches_policy');
@@ -191,6 +220,28 @@ check($media->update_htaccess(true) === true &&
 check(!empty($GLOBALS['nested_key_update_safe']),
     'WordPress update_option hook does not recurse into another Rewrite write while the lock is held');
 unset($GLOBALS['simulate_litespeed_option_hook']);
+
+// DB保存前の例外はRewriteを旧状態へ戻す。保存済みの例外は
+// DB/Rewriteの一致を優先し、旧Rewriteに誤って巻き戻さない。
+$before_exception_key = $GLOBALS['litespeed_key'];
+$before_exception_rules = file_get_contents($file);
+$GLOBALS['litespeed_key_throw_before_write'] = true;
+$write_error = $media->update_htaccess(true);
+unset($GLOBALS['litespeed_key_throw_before_write']);
+check($write_error instanceof WP_Error &&
+    $write_error->get_error_code() === 'esp_litespeed_key_write' &&
+    $GLOBALS['litespeed_key'] === $before_exception_key &&
+    file_get_contents($file) === $before_exception_rules,
+    'LiteSpeed exception before DB persistence rolls back to old key and rules');
+
+$GLOBALS['litespeed_key_throw_after_write'] = true;
+$success_after_hook_exception = $media->update_htaccess(true);
+unset($GLOBALS['litespeed_key_throw_after_write']);
+check($success_after_hook_exception === true &&
+    $GLOBALS['litespeed_key'] !== $before_exception_key &&
+    strpos(file_get_contents($file), $GLOBALS['litespeed_key']) !== false &&
+    ESP_Media_Protection::audit_rewrite_policy() === true,
+    'LiteSpeed exception after DB persistence retains matching new key and rules');
 
 // 既存のApache分岐テストへ戻す。
 $_SERVER['SERVER_SOFTWARE'] = 'Apache/2.4';
