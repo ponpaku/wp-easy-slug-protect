@@ -356,7 +356,7 @@ final class ESP_Protection_State {
      * 一度もDDLを実行せず、必要テーブルの列と原子的な試行制限索引を確認する。
      * #44のMigratorが版印と全テーブルの検証を正式管理するまでの橋渡し。
      */
-    private static function verify_legacy_security_schema() {
+    public static function verify_legacy_security_schema() {
         global $wpdb;
         if (!is_object($wpdb) || !isset($wpdb->prefix)) {
             return false;
