@@ -136,7 +136,7 @@ class ESP_Setup {
             $media_protection = new ESP_Media_Protection();
             $result = $media_protection->update_htaccess(false, true);
             if ($result !== true) {
-                error_log('ESP: Deactivation kept media Rewrite rules to prevent direct access to protected or unknown files');
+                error_log('ESP: Deactivation could not remove ESP media Rewrite rules; manual .htaccess cleanup may be needed');
             }
         }
 
