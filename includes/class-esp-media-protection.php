@@ -667,7 +667,14 @@ class ESP_Media_Protection {
         if (empty($requested_file)) {
             return;
         }
-        
+
+        // 公開クエリ変数はRewriteの拡張子制限を経ずに呼び出せる。
+        // 設定OFF・管理者・保護ONのいずれでも、対象外ファイルをPHP配信しない。
+        if (!self::is_allowed_media_request($requested_file)) {
+            $this->send_404();
+            return;
+        }
+
         // ファイルパスの検証とサニタイズ
         $file_path = $this->validate_file_path($requested_file);
         if (!$file_path) {
@@ -746,6 +753,41 @@ class ESP_Media_Protection {
 
             $this->send_404();
         }
+    }
+
+    /**
+     * 公開esp-mediaクエリ経由で配信してよいファイル名だけを受け付ける。
+     * 配信許可のための入口検査であり、添付IDの帰属判定（#42）ではない。
+     */
+    private static function is_allowed_media_request($requested_file) {
+        if (!is_string($requested_file) || $requested_file === '') {
+            return false;
+        }
+
+        // validate_file_path()と同じ最大3回だけURLデコードして検査する。
+        for ($i = 0; $i < 3; $i++) {
+            $decoded = rawurldecode($requested_file);
+            if ($decoded === $requested_file) {
+                break;
+            }
+            $requested_file = $decoded;
+        }
+
+        // 隠しファイル・隠しディレクトリ、パスの不正区切り、制御文字を拒否。
+        // .htaccess / .htpasswd / .user.ini 等はOFF時でも配信してはならない。
+        if ($requested_file === '' || $requested_file[0] === '/' ||
+            strpos($requested_file, '\\') !== false ||
+            preg_match('/[\\x00-\\x1F\\x7F]/', $requested_file)) {
+            return false;
+        }
+        foreach (explode('/', $requested_file) as $segment) {
+            if ($segment === '' || $segment[0] === '.') {
+                return false;
+            }
+        }
+
+        return in_array(strtolower(pathinfo($requested_file, PATHINFO_EXTENSION)),
+            self::PROTECTED_EXTENSIONS, true);
     }
 
     /**
@@ -1196,20 +1238,10 @@ class ESP_Media_Protection {
      * @return bool 成功時true
      */
     public function update_htaccess($force_litespeed_key_regeneration = false, $deactivating = false, $route_override = null) {
-        if ($deactivating) {
-            // プラグイン停止後は既存の保護画像を認証できなくなる。
-            // DB照会で保護対象0件を確認できない限り、Webサーバー側の
-            // 最後の保護ルールを削除しない。
-            $records = self::has_any_protected_media_records();
-            if ($records !== false) {
-                return new WP_Error('esp_deactivate_protected_media',
-                    __('保護メディアが存在するか確認できないため、サーバー保護ルールを維持します。', ESP_Config::TEXT_DOMAIN));
-            }
-        }
         if (!$this->is_apache()) {
-            return $this->enabled
-                ? new WP_Error('esp_htaccess_unsupported', __('ApacheまたはLiteSpeed環境でのみ利用できます。', ESP_Config::TEXT_DOMAIN))
-                : true;
+            return $deactivating || !$this->enabled
+                ? true
+                : new WP_Error('esp_htaccess_unsupported', __('ApacheまたはLiteSpeed環境でのみ利用できます。', ESP_Config::TEXT_DOMAIN));
         }
 
         $upload_dir = wp_upload_dir();
@@ -1255,14 +1287,8 @@ class ESP_Media_Protection {
                     $end_at <= $begin_at))) {
                 return new WP_Error('esp_htaccess_ambiguous', __('ESP保護ルールの境界が不正なため自動更新しません。', ESP_Config::TEXT_DOMAIN));
             }
-            // プラグイン無効化時はPHP認可ハンドラーも消えるため、
-            // 保護済み添付が残る限りRewriteを維持する。
-            // 一方、管理者が設定をOFFにした場合は意図的な公開なので除去可。
-            if ($deactivating && !$route_media && $begin_count === 1 &&
-                self::has_any_protected_media_records() !== false) {
-                return new WP_Error('esp_htaccess_protected_media_remain',
-                    __('保護済みメディアが存在するか不明なため、既存のRewrite保護を維持します。', ESP_Config::TEXT_DOMAIN));
-            }
+            // WordPressの明示的なプラグイン無効化では、保護メタ件数にかかわらず
+            // ESPのRewriteだけを取り除く。他者のルールは従来どおり保全する。
 
             // マーカーを独立した行として厳密に認識し、ESP以外の全バイトを保持。
             // コメント中の同名文字列や不正な境界にマッチさせない。
@@ -1659,15 +1685,15 @@ class ESP_Media_Protection {
 
     /**
      * 管理者がOFFにする際の警告判定。true:保護メタあり、
-     * false:0件、null:DB状態不明（切替は拒否）。
+     * false:0件、null:DB状態不明（確認を要するが明示的OFFは妨げない）。
      */
     public static function protected_media_records_exist() {
         return self::has_any_protected_media_records();
     }
 
-    /** 明示的な無効化時にメタの有無を問わず設定変更できる。 */
+    /** 管理者の明示的なOFFはDB照会状態によって拒否しない。 */
     public static function can_disable_media_protection() {
-        return self::has_any_protected_media_records() !== null;
+        return true;
     }
 
     /**
