@@ -566,6 +566,12 @@ class ESP_Media_Protection {
      * リライトルールを追加
      */
     public function add_rewrite_rules() {
+        // 保存済みWordPress Rewriteや.htaccessが一時的に残る場合にも
+        // OFF時の公開ファイルをPHPから安全に配信できるよう変数だけ登録する。
+        add_filter('query_vars', static function ($vars) {
+            $vars[] = self::REWRITE_ENDPOINT;
+            return $vars;
+        });
         if (!$this->enabled) {
             return;
         }
@@ -584,21 +590,13 @@ class ESP_Media_Protection {
             'top'
         );
         
-        // クエリ変数を追加
-        add_filter('query_vars', function($vars) {
-            $vars[] = self::REWRITE_ENDPOINT;
-            return $vars;
-        });
+
     }
 
     /**
     * メディアファイルへのアクセスを処理（クリーンアップ版）
     */
     public function handle_media_access() {
-        if (!$this->enabled) {
-            return;
-        }
-
         // リクエストURIから直接判定
         $request_uri = $_SERVER['REQUEST_URI'] ?? '';
         $is_media_request = false;
@@ -636,6 +634,18 @@ class ESP_Media_Protection {
         $file_path = $this->validate_file_path($requested_file);
         if (!$file_path) {
             $this->send_404();
+            return;
+        }
+
+        // OFFへの変更直後など、以前のRewriteが残っても公開画像を404にしない。
+        // ただし保護レコード0件をDBで確定できなければ絶対に直接配信しない。
+        // このDBクエリは「OFFかつPHPへ実際に回送された画像」に限る。
+        if (!$this->enabled) {
+            if (self::has_any_protected_media_records() !== false) {
+                $this->send_403();
+                return;
+            }
+            $this->deliver_media($file_path);
             return;
         }
 
@@ -1046,7 +1056,7 @@ class ESP_Media_Protection {
             return;
         }
         echo '<div class="notice notice-error"><p>' .
-            esc_html__('Easy Slug Protect: メディア保護Rewriteの適用に失敗しました。uploads/.htaccess の状態と書込権限を確認してください。次回のアクセス時に再適用を試みます。', ESP_Config::TEXT_DOMAIN) .
+            esc_html__('Easy Slug Protect: メディア保護Rewriteの適用に失敗しました。uploads/.htaccess の状態と書込権限を確認してください。管理者が再検証するまで新規保護メディアの登録を拒否します。', ESP_Config::TEXT_DOMAIN) .
             ' (' . esc_html((string) $error) . ')</p></div>';
     }
 
@@ -1608,17 +1618,9 @@ class ESP_Media_Protection {
      * 後段で設定の保存に失敗した場合、次の起動ゲートがOFFルールへ復旧する。
      */
     public static function can_enable_media_protection() {
-        if (!preg_match('/apache|litespeed/i', $_SERVER['SERVER_SOFTWARE'] ?? '')) {
-            return true; // Nginxは運用者が外部のRewriteを設定する。
-        }
-        if (self::rewrite_file_matches_policy(true)) {
-            return true;
-        }
-        // 設定サニタイズ中に通常コンストラクタを実行すると、管理フックや
-        // キャッシュ再生成を追加登録するため、安全なRewrite処理だけを呼ぶ。
-        $media = (new \ReflectionClass(self::class))->newInstanceWithoutConstructor();
-        return $media->update_htaccess(false, false, true) === true &&
-            self::rewrite_file_matches_policy(true);
+        // sanitize_callback内ではDBに保存されていないため、Rewriteを変更しない。
+        // ON→保護登録は、保護メタ書込前のcan_assign_protected_mediaが厳密に検証する。
+        return self::has_any_protected_media_records() === false;
     }
 
     /**
