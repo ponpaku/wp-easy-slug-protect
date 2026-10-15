@@ -285,15 +285,58 @@ class ESP_Setup {
      * アップデート確認と実行
      */
     public function update_check() {
-        $current_db_version = get_option('esp_db_version', 0);
+        $current_db_version = get_option('esp_db_version', null);
         $required_db_version = ESP_Config::OPTION_DEFAULTS['db_version'];
-        
+
+        // 既存サイトで版印だけが消失した場合、0とみなして旧移行を再実行すると
+        // 保護パスIDが再発行される。構造を読み取り専用で確認してから版印だけ復旧。
+        if ($current_db_version === null || $current_db_version === false || $current_db_version === '') {
+            if (!self::has_stable_path_ids() ||
+                !class_exists('ESP_Protection_State') ||
+                !ESP_Protection_State::verify_legacy_security_schema()) {
+                error_log('ESP: db_version missing and schema cannot be safely identified; migration refused');
+                return false; // 曖昧な部分移行は#44で明示復旧。破壊的再実行はしない。
+            }
+            update_option('esp_db_version', $required_db_version);
+            return (int) get_option('esp_db_version', 0) === (int) $required_db_version;
+        }
+
+        if (!is_int($current_db_version) &&
+            !(is_string($current_db_version) && ctype_digit($current_db_version))) {
+            return false;
+        }
+        $current_db_version = (int) $current_db_version;
+        if ($current_db_version > $required_db_version) {
+            return false; // 将来版のスキーマに古いコードの移行を適用しない。
+        }
+
         if ($current_db_version < $required_db_version) {
             if (!$this->migrate_to_version($current_db_version, $required_db_version)) {
                 return false;
             }
             update_option('esp_db_version', $required_db_version);
             if ((int) get_option('esp_db_version', 0) !== (int) $required_db_version) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * 再移行で参照関係が失われないよう、既存パスIDの整合性を確認する。
+     * 空のパス集合は新規導入サイトでも成立する。
+     */
+    private static function has_stable_path_ids() {
+        $settings = ESP_Option::get_all_settings();
+        if (!is_array($settings) || !isset($settings['path']) ||
+            !is_array($settings['path'])) {
+            return false;
+        }
+        foreach ($settings['path'] as $id => $path) {
+            if (!is_string($id) || $id === '' ||
+                !is_array($path) || !isset($path['id'], $path['path']) ||
+                !is_string($path['id']) || $path['id'] !== $id ||
+                !is_string($path['path']) || trim($path['path'], " /\\t\\n\\r") === '') {
                 return false;
             }
         }
