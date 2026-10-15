@@ -115,7 +115,9 @@ final class ESP_Protection_State {
             !self::is_esp_install($hook_extra)) {
             return $response;
         }
-        self::mark_verification_required();
+        // 他のpost_installフィルターによる失敗やWPのロールバックも
+        // 考慮し、最終状態への遷移はリクエスト終了時に行う。
+        self::schedule_verification_after_shutdown();
         return $response;
     }
 
