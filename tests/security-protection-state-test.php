@@ -186,21 +186,64 @@ check(!empty($GLOBALS['scheduled']['esp_verify_runtime_once']),
 check(ESP_Protection_State::boot($setup) === true &&
     get_option('esp_runtime_state') === 'READY' && $setup->checks === 1,
     'first anonymous request verifies and recovers unattended update');
-$GLOBALS['options']['esp_runtime_state'] = 'UPDATING';
+// WordPress CoreのPlugin_Upgrader::bulk_upgrade()は個別インストールに
+// type/actionを渡さない。AJAX更新もこの形式を使う。
+$bulk_extra = [
+    'plugin' => 'easy-slug-protect/easy-slug-protect.php',
+    'temp_backup' => ['slug' => 'easy-slug-protect'],
+];
+$GLOBALS['options']['esp_runtime_state'] = 'READY';
+check($pre(true, ['plugin' => 'other-plugin/main.php']) === true &&
+    get_option('esp_runtime_state') === 'READY',
+    'other plugin in bulk update never changes ESP state');
+check($pre(true, ['type'=>'plugin','action'=>'install',
+    'plugin'=>'easy-slug-protect/easy-slug-protect.php']) === true &&
+    get_option('esp_runtime_state') === 'READY',
+    'ESP installation is not mistaken for a plugin upgrade');
+check($pre(true, $bulk_extra) === true &&
+    get_option('esp_runtime_state') === 'UPDATING',
+    'bulk/AJAX update marks ESP UPDATING without type or action');
+check($post(true, $bulk_extra, []) === true &&
+    get_option('esp_runtime_state') === 'VERIFY_REQUIRED',
+    'bulk/AJAX post-install schedules new-code validation');
+check(ESP_Protection_State::boot($setup) === true,
+    'anonymous traffic after successful bulk upgrade verifies once');
+
 $complete = $GLOBALS['actions']['upgrader_process_complete'][0][0];
+// 失敗した一括更新では、shutdownでバックアップが復元されるまで
+// 新コード検証を開始してはいけない。
+$GLOBALS['options']['esp_runtime_state'] = 'UPDATING';
 $complete(null, ['action'=>'update', 'type'=>'plugin',
     'plugins'=>['easy-slug-protect/easy-slug-protect.php']]);
+check(get_option('esp_runtime_state') === 'UPDATING',
+    'bulk process completion waits for shutdown rollback before verification');
+foreach ($GLOBALS['actions']['shutdown'] as $entry) {
+    if ($entry[1] === 200) { call_user_func($entry[0]); }
+}
 check(get_option('esp_runtime_state') === 'VERIFY_REQUIRED',
-    'process completion also schedules a one-off verification');
+    'bulk completion at shutdown enables one-shot verification');
 check(ESP_Protection_State::boot($setup) === true,
-    'process-completion recovery works without an admin visit');
+    'bulk failure recovery verifies before reopening site');
+
+$GLOBALS['options']['esp_runtime_state'] = 'UPDATING';
+$failed_result = $GLOBALS['filters']['upgrader_install_package_result'][0][0];
+$failure = new WP_Error('filesystem_failure', 'Install failed');
+check($failed_result($failure, $bulk_extra) === $failure &&
+    get_option('esp_runtime_state') === 'UPDATING',
+    'failed individual install stays UPDATING until rollback finishes');
+foreach ($GLOBALS['actions']['shutdown'] as $entry) {
+    if ($entry[1] === 200) { call_user_func($entry[0]); }
+}
+check(get_option('esp_runtime_state') === 'VERIFY_REQUIRED',
+    'failed upgrade schedules verification after WordPress rollback');
+check(ESP_Protection_State::boot($setup) === true,
+    'rolled-back update resumes only after strict validation');
 
 $GLOBALS['options']['esp_runtime_state'] = 'READY';
 $GLOBALS['reject_update'] = true;
-$err = $pre(true, ['action'=>'update', 'type'=>'plugin', 'plugins'=>[
-    'easy-slug-protect/easy-slug-protect.php']]);
+$err = $pre(true, $bulk_extra);
 check($err instanceof WP_Error && $err->get_error_code() === 'esp_upgrade_pending_unavailable',
-    'upgrade blocked if PENDING cannot be durably recorded');
+    'bulk/AJAX update blocked if UPDATING cannot be durably recorded');
 unset($GLOBALS['reject_update']);
 
 $setup->ok = false;
