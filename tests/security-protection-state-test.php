@@ -36,8 +36,8 @@ class BootTestDB {
         $this->queries++;
         $this->last_error = $this->online ? '' : 'Disconnected';
         if (!$this->online || !$this->legacy_schema_valid) { return []; }
-        return ['ip_address', 'path', 'path_id', 'time', 'password_version', 'user_id',
-            'token', 'expires', 'window_started', 'attempts', 'blocked_until',
+        return ['id', 'ip_address', 'path', 'path_id', 'time', 'password_version', 'user_id',
+            'token', 'created', 'expires', 'window_started', 'attempts', 'blocked_until',
             'updated_at', 'attempt_times', 'last_attempt_token'];
     }
     public function get_results($query, $output = null) {
