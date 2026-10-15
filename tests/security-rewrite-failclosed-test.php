@@ -30,6 +30,8 @@ function __($value, $domain = null) { return $value; }
 function is_wp_error($value) { return $value instanceof WP_Error; }
 function home_url($path = '') { return 'https://example.test' . $path; }
 function wp_upload_dir() { return ['basedir' => $GLOBALS['test_dir'], 'error' => '']; }
+function get_query_var($key) { return $GLOBALS['test_media_query'] ?? ''; }
+function is_404() { return false; }
 function trailingslashit($path) { return rtrim($path, '/') . '/'; }
 function get_option($key, $default = null) { return $GLOBALS['options'][$key] ?? $default; }
 function update_option($key, $value, $autoload = null) { $GLOBALS['options'][$key] = $value; return true; }
@@ -250,6 +252,29 @@ check(ESP_Media_Protection::can_assign_protected_media() === true,
     'protected metadata becomes assignable only with active Rewrite');
 check(strpos(file_get_contents($file), $foreign) !== false,
     'post-save Rewrite preserves foreign rules');
+
+// OFFへの保存後に旧Rewriteが残ったとしても、既知の公開画像は200相当で配信する。
+$public_image = $GLOBALS['test_dir'] . '/public.jpg';
+file_put_contents($public_image, 'public bytes');
+$GLOBALS['enabled'] = false;
+$wpdb->count = 0;
+$wpdb->last_error = '';
+$GLOBALS['test_media_query'] = 'public.jpg';
+$_SERVER['REQUEST_URI'] = '/wp-content/uploads/public.jpg';
+$enabledProp = $reflection->getProperty('enabled');
+$enabledProp->setValue($media, false);
+$delivered = new class {
+    public $files = [];
+    public function deliver($file) { $this->files[] = $file; return true; }
+};
+$reflection->getProperty('deriver')->setValue($media, $delivered);
+$media->handle_media_access();
+check($delivered->files === [realpath($public_image)],
+    'disabled media serves public image when stale ON Rewrite still routes it into WordPress');
+unlink($public_image);
+unset($GLOBALS['test_media_query']);
+$enabledProp->setValue($media, true);
+$GLOBALS['enabled'] = true;
 
 // uploadsのルートがシンボリックリンクでも、実体ディレクトリ内の一時ファイルを
 // 安全に置換できることを検証する（PHPのtempnam()はリンク先を返す場合がある）。
