@@ -206,4 +206,4 @@ foreach ($cron_hooks as $hook) {
     wp_clear_scheduled_hook($hook);
 }
 
-// Rewriteブロックは上部の安全な原子的更新処理で削除済み。
+// Rewriteブロックは上部で安全に除去を試みた。失敗時はエラーログに手動確認の必要性を記録。
