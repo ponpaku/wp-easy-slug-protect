@@ -28,6 +28,9 @@ class ESP_Media_Protection {
      */
     private $enabled = true;
 
+    /** Rewrite置換完了までDBに保存しないLiteSpeedキー（更新実行中のみ）。 */
+    private $rewrite_key_candidate = null;
+
     /**
      * @var string メディア保護用メタキー
      */
@@ -1138,7 +1141,7 @@ class ESP_Media_Protection {
      * キャッシュ上のバージョン印だけでなく、配置済みルールの内容を検証する。
      * 実際のWebサーバーでのRewrite動作検証に代わるものではない。
      */
-    private static function rewrite_file_matches_policy($enabled) {
+    private static function rewrite_file_matches_policy($enabled, $litespeed_key_override = null) {
         $dir = wp_upload_dir(null, false);
         if (!empty($dir['error']) || empty($dir['basedir'])) {
             return false;
@@ -1169,7 +1172,7 @@ class ESP_Media_Protection {
         // リクエストごとのルール照合では、キャッシュや各種フックを初期化しない。
         // .htaccessの内容を比較する処理だけを実行する。
         $media = (new \ReflectionClass(self::class))->newInstanceWithoutConstructor();
-        $expected = $media->get_htaccess_rules(false, true, true);
+        $expected = $media->get_htaccess_rules(false, true, true, $litespeed_key_override);
         if (is_wp_error($expected)) {
             return false;
         }
@@ -1259,7 +1262,14 @@ class ESP_Media_Protection {
             if ($without_esp === null || ($begin_count === 1 && $replacements !== 1)) {
                 return new WP_Error('esp_htaccess_parse_failed', __('保護ルールの境界を厳密に解析できません。', ESP_Config::TEXT_DOMAIN));
             }
-            $esp_rules = $this->get_htaccess_rules($force_litespeed_key_regeneration, $route_media);
+            // RewriteとDBのキーを同時更新できないため、まず新しいキーを
+            // メモリに保持してRewriteを設置・検証し、その後DBへ保存する。
+            $this->rewrite_key_candidate = null;
+            if ($route_media && $this->is_litespeed() &&
+                ($force_litespeed_key_regeneration || self::get_litespeed_key_value() === '')) {
+                $this->rewrite_key_candidate = $this->generate_litespeed_key();
+            }
+            $esp_rules = $this->get_htaccess_rules(false, $route_media, false, $this->rewrite_key_candidate);
             if (is_wp_error($esp_rules)) {
                 return $esp_rules;
             }
@@ -1331,12 +1341,17 @@ class ESP_Media_Protection {
             }
             $temp = null;
 
-            if (!$this->verify_rewrite_installation($htaccess_file, $new_rules, $route_media)) {
+            $verified = $this->verify_rewrite_installation($htaccess_file, $new_rules, $route_media);
+            $key_committed = $verified && (
+                $this->rewrite_key_candidate === null ||
+                self::commit_litespeed_key($this->rewrite_key_candidate)
+            );
+            if (!$verified || !$key_committed) {
                 // 他のプロセスによる変更を旧データで上書きしない。
                 if (!$exists || @file_get_contents($htaccess_file) !== $new_rules) {
                     $keep_backup = $exists;
-                    return new WP_Error('esp_htaccess_verify_failed',
-                        __('書込み後の検証が失敗しました。外部変更の可能性があるため自動復元を中止しました。', ESP_Config::TEXT_DOMAIN));
+                    return new WP_Error($verified ? 'esp_litespeed_key_write' : 'esp_htaccess_verify_failed',
+                        __('RewriteまたはLiteSpeedキーの確定に失敗しました。安全に元のファイルへ復元できず、管理者による確認が必要です。', ESP_Config::TEXT_DOMAIN));
                 }
                 if (!@chmod($backup, $mode) || (@fileperms($backup) & 0777) !== $mode ||
                     @file_get_contents($backup) !== $old) {
@@ -1356,11 +1371,14 @@ class ESP_Media_Protection {
                     return new WP_Error('esp_htaccess_restore_verify_failed',
                         __('旧Rewrite設定を復元しましたが照合に失敗しました。', ESP_Config::TEXT_DOMAIN));
                 }
-                return new WP_Error('esp_htaccess_rolled_back',
-                    __('Rewrite検証に失敗したため、以前の設定に復元しました。', ESP_Config::TEXT_DOMAIN));
+                return new WP_Error($verified ? 'esp_litespeed_key_write' : 'esp_htaccess_rolled_back',
+                    $verified
+                        ? __('LiteSpeedキーの保存に失敗したため、以前のRewrite設定に復元しました。', ESP_Config::TEXT_DOMAIN)
+                        : __('Rewrite検証に失敗したため、以前の設定に復元しました。', ESP_Config::TEXT_DOMAIN));
             }
             return true;
         } finally {
+            $this->rewrite_key_candidate = null;
             if ($temp && is_file($temp)) {
                 @unlink($temp);
             }
@@ -1378,7 +1396,7 @@ class ESP_Media_Protection {
      */
     protected function verify_rewrite_installation($file, $expected, $enabled) {
         return @file_get_contents($file) === $expected &&
-            self::rewrite_file_matches_policy($enabled);
+            self::rewrite_file_matches_policy($enabled, $this->rewrite_key_candidate);
     }
 
     /**
@@ -1387,7 +1405,7 @@ class ESP_Media_Protection {
      * @param bool $force_litespeed_key_regeneration LiteSpeedキーを再生成するかどうか
      * @return string .htaccessルール
      */
-    private function get_htaccess_rules($force_litespeed_key_regeneration = false, $has_protected_media = null, $read_only = false) {
+    private function get_htaccess_rules($force_litespeed_key_regeneration = false, $has_protected_media = null, $read_only = false, $litespeed_key_override = null) {
         if ($has_protected_media === null) {
             $has_protected_media = self::is_media_protection_enabled();
         }
@@ -1414,9 +1432,8 @@ class ESP_Media_Protection {
             if ($this->is_litespeed()) {
                 // 監査・既存ルール比較はキーを生成しない。
                 // キーの作成・更新は明示的なRewrite更新処理だけで行う。
-                $litespeed_key = $read_only
-                    ? self::get_litespeed_key_value()
-                    : $this->ensure_litespeed_key($force_litespeed_key_regeneration);
+                $litespeed_key = $litespeed_key_override !== null
+                    ? $litespeed_key_override : self::get_litespeed_key_value();
                 if ($litespeed_key instanceof WP_Error) {
                     return $litespeed_key;
                 }
@@ -1537,32 +1554,20 @@ class ESP_Media_Protection {
     }
 
     /**
-     * LiteSpeed用のキーを取得（存在しない場合は生成して保存）
-     *
-     * @param bool $force_regeneration 強制的にキーを再生成するかどうか
+     * 配置済みRewriteを照合した後に限ってキーを保存する。
+     * 保存できなければ呼出元でRewriteを元の内容へ復元する。
      */
-    private function ensure_litespeed_key($force_regeneration = false) {
-        // 強制再生成が不要で、保存済みのキーがあればそれを利用
-        $existing = self::get_litespeed_key_value();
-        if (!$force_regeneration && $existing !== '') {
-            return $existing;
-        }
-
-        // 未保存または強制再生成が必要な場合は新たにキーを生成
-        $key = $this->generate_litespeed_key();
-
+    private static function commit_litespeed_key($key) {
         $settings = ESP_Option::get_all_settings();
-        if (!isset($settings['media']) || !is_array($settings['media'])) {
-            $settings['media'] = array();
+        if (!is_array($settings)) {
+            return false;
         }
-
+        if (!isset($settings['media']) || !is_array($settings['media'])) {
+            $settings['media'] = [];
+        }
         $settings['media'][self::OPTION_LITESPEED_KEY] = $key;
         ESP_Option::update_settings($settings);
-        if (self::get_litespeed_key_value() !== $key) {
-            return new WP_Error('esp_litespeed_key_write', __('LiteSpeed認証キーを保存できません。', ESP_Config::TEXT_DOMAIN));
-        }
-
-        return $key;
+        return self::get_litespeed_key_value() === $key;
     }
 
     /**
