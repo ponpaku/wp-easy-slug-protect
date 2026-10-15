@@ -72,6 +72,15 @@ PR #49の `ESP_Protection_State::boot()` は非READY時に `ESP_Core` / `ESP_Fil
 
 Apache 2.4.68の独立したRewrite試験：第三者 `RewriteRule ^private/ - [F,L]` 単独で403、ESPを前に置くとWordPress相当入口に200、第三者拒否を先に置くと403、公開画像はWordPress入口へ200。**実WordPressでの認可・本文・LiteSpeedの実HTTPは未検証。**
 
+## 2026-10-16 追加レビュー（HEAD e0fbff93）のR01/R02と局所修正
+
+このR01/R02は上節の「第三者Rewrite迂回／公開クエリ」とは**別の指摘**である。
+
+- **追加R01 — 添付ID解決時のDB照会失敗：** PHP経由のメディア配信では `get_attachment_id_from_path()` の結果を **ID取得成功 / SQL成功・添付なし / SQL失敗・不明** の3状態に分離した。DBエラー・例外・不正な照会結果は `null` として503、正常な未登録は従来の配信方針を維持。AVIFの親候補DB照会にも同条件を適用する。取得済み添付の保護メタも、既存のREST用DB直接照会 `read_live_protected_media_path()` を再利用し、不明を「保護なし」と扱わない。**保護メタ直接照会が登録済みメディアに1回増える**ため、公開画像の性能測定は引き続き受け入れ条件。
+- **追加R02 — WP-CLIでの無効化：** `SERVER_SOFTWARE` が不明でも、明示無効化・メディア保護OFF時はuploads/.htaccessのESPマーカーを確認し、存在すれば従来のflock・一時ファイル・復元・検証による削除を試みる。マーカーのない既存ファイルや未作成ファイルには新たなRewriteやロックを作らない。削除不能なら `WP_Error` を返し、呼び出し側で無効化を妨げず `error_log` に残す。OFF→ONの保護事前適用（`route_override=true`）はこの早期no-opの対象外。
+
+**検証：** `tests/security-rewrite-failclosed-test.php` に添付SELECT失敗、AVIF候補SELECT失敗、保護メタ照会失敗、正常未登録、`SERVER_SOFTWARE` 不明の無効化とロック失敗を追加。`tests/security-avif-test.php` のDBスタブを実際の `wpdb->last_error` 契約に整合。実WordPressとWebサーバーでのHTTP本文・エラー注入・性能比較は未完了。#42のResolver全体、#43の恒久配信ポリシーには変更を広げない。
+
 ## マージ前の実HTTP受け入れ試験（未実施）
 
 実際の保護ファイルを使用し、秘密のパスや本文を公開PRへ記録しない。
