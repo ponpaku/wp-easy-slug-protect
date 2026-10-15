@@ -320,6 +320,14 @@ class ESP_Setup {
             return (int) get_option('esp_db_version', 0) === (int) $required_db_version;
         }
 
+        // 版印が0でも既存の保護パスがID付与済みならV1変換を再実行しない。
+        // 部分移行の解消は#44へ委ね、既存のIDを壊す推測はしない。
+        $existing_settings = ESP_Option::get_all_settings();
+        if ($current_db_version < 1 && is_array($existing_settings) &&
+            !empty($existing_settings['path']) && self::has_stable_path_ids()) {
+            return false;
+        }
+
         if ($current_db_version < $required_db_version) {
             if (!$this->migrate_to_version($current_db_version, $required_db_version)) {
                 return false;
