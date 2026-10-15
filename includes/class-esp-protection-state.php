@@ -580,6 +580,8 @@ final class ESP_Protection_State {
             return true;
         }
         if (!function_exists('is_singular') || !is_singular() ||
+            (function_exists('is_front_page') && is_front_page()) ||
+            (function_exists('is_home') && is_home()) ||
             (function_exists('is_attachment') && is_attachment())) {
             return true;
         }
