@@ -38,6 +38,7 @@ final class ESP_Protection_State {
     public static function register_runtime_hooks($setup) {
         add_filter('upgrader_pre_install', [self::class, 'before_plugin_upgrade'], 10, 2);
         add_filter('upgrader_post_install', [self::class, 'after_plugin_upgrade'], 10, 3);
+        add_filter('upgrader_install_package_result', [self::class, 'after_install_package_result'], 10, 2);
         add_action('upgrader_process_complete', [self::class, 'upgrade_process_complete'], 10, 2);
         add_action('esp_verify_runtime_once', static function () use ($setup) {
             self::verify_once($setup);
@@ -67,24 +68,35 @@ final class ESP_Protection_State {
         return self::verify_and_commit($setup);
     }
 
-    private static function target_is_esp($extra) {
+    /**
+     * 対象プラグインの識別。単体/一括の install_package() には
+     * plugin のみが渡ることがあるため、type/action は存在する場合だけ検証する。
+     */
+    private static function is_esp_install($extra) {
+        if (!is_array($extra) ||
+            (isset($extra['type']) && $extra['type'] !== 'plugin') ||
+            (isset($extra['action']) && $extra['action'] !== 'update')) {
+            return false;
+        }
+        return isset($extra['plugin']) &&
+            $extra['plugin'] === plugin_basename(ESP_PATH . 'easy-slug-protect.php');
+    }
+
+    /** upgrader_process_complete はtype/actionを持つ別形式のイベント。 */
+    private static function is_esp_completed_update($extra) {
         if (!is_array($extra) || ($extra['type'] ?? '') !== 'plugin' ||
             ($extra['action'] ?? '') !== 'update') {
             return false;
         }
-        $targets = [];
-        if (isset($extra['plugin'])) {
-            $targets[] = $extra['plugin'];
-        }
-        if (isset($extra['plugins']) && is_array($extra['plugins'])) {
-            $targets = array_merge($targets, $extra['plugins']);
-        }
-        return in_array(plugin_basename(ESP_PATH . 'easy-slug-protect.php'), $targets, true);
+        $plugin = plugin_basename(ESP_PATH . 'easy-slug-protect.php');
+        return ($extra['plugin'] ?? null) === $plugin ||
+            (isset($extra['plugins']) && is_array($extra['plugins']) &&
+                in_array($plugin, $extra['plugins'], true));
     }
 
-    /** 標準更新前に停止状態を永続化する。 */
+    /** インストール開始前に、更新中フラグの永続化に成功した場合のみ続行。 */
     public static function before_plugin_upgrade($response, $hook_extra) {
-        if (is_wp_error($response) || !self::target_is_esp($hook_extra)) {
+        if (is_wp_error($response) || !self::is_esp_install($hook_extra)) {
             return $response;
         }
         if (!self::set_runtime_state('UPDATING')) {
@@ -95,28 +107,48 @@ final class ESP_Protection_State {
     }
 
     /**
-     * 旧PHPコードで発火する更新完了フックではREADYにせず、新コード側へ検証を委譲。
+     * 置換完了の判定は旧PHPコードで行われ得る。
+     * 新コードによる一度限りの検証を予約し、ここではREADYにしない。
      */
     public static function after_plugin_upgrade($response, $hook_extra, $result) {
         if (is_wp_error($response) || $response === false ||
-            !self::target_is_esp($hook_extra)) {
+            !self::is_esp_install($hook_extra)) {
             return $response;
         }
-        if (get_option(self::RUNTIME_STATE_OPTION, null) === 'UPDATING') {
-            self::mark_verification_required();
-        }
+        self::mark_verification_required();
         return $response;
     }
 
-    public static function upgrade_process_complete($upgrader, $hook_extra) {
-        if (self::target_is_esp($hook_extra) &&
+    /**
+     * install_package()が失敗した場合、WPのバックアップ復元はshutdownで
+     * 行われ得る。復元完了後に検証待ちへ遷移させる。
+     */
+    public static function after_install_package_result($result, $hook_extra) {
+        if (self::is_esp_install($hook_extra) &&
+            (is_wp_error($result) || $result === false) &&
             get_option(self::RUNTIME_STATE_OPTION, null) === 'UPDATING') {
-            self::mark_verification_required();
+            self::schedule_verification_after_shutdown();
         }
+        return $result;
     }
 
-    private static function mark_verification_required() {
-        if (self::set_runtime_state('VERIFY_REQUIRED') &&
+    public static function upgrade_process_complete($upgrader, $hook_extra) {
+        if (!self::is_esp_completed_update($hook_extra) ||
+            get_option(self::RUNTIME_STATE_OPTION, null) !== 'UPDATING') {
+            return;
+        }
+        // 一括更新の一部失敗も扱う。成功時はpost_installですでに遷移済み。
+        self::schedule_verification_after_shutdown();
+    }
+
+    private static function schedule_verification_after_shutdown() {
+        // WP_Upgraderのshutdown時ロールバック（優先度10）より後で処理する。
+        add_action('shutdown', [self::class, 'mark_verification_required'], 200);
+    }
+
+    public static function mark_verification_required() {
+        if (get_option(self::RUNTIME_STATE_OPTION, null) === 'UPDATING' &&
+            self::set_runtime_state('VERIFY_REQUIRED') &&
             !wp_next_scheduled('esp_verify_runtime_once')) {
             wp_schedule_single_event(time(), 'esp_verify_runtime_once');
         }
