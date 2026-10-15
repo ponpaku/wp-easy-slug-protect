@@ -19,10 +19,16 @@ class ESP_Setup {
         $this->create_options();
         $this->schedule_cron_jobs();
 
+        // WP-CLIではWebサーバー種別が未設定のことがある。サーバー側ルールを
+        // 推測で更新せず、安全性を確認できる場合だけ初回HTTPへ検証を延期する。
+        $cli_without_web_server = defined('WP_CLI') && WP_CLI &&
+            trim((string) ($_SERVER['SERVER_SOFTWARE'] ?? '')) === '';
         // メディア保護の初期設定
         if (class_exists('ESP_Media_Protection')) {
             $media_protection = new ESP_Media_Protection();
-            $media_protection->update_htaccess();
+            if (!$cli_without_web_server) {
+                $media_protection->update_htaccess();
+            }
             // 初回のメディアキャッシュ生成
             $media_protection->regenerate_media_cache();
         }
@@ -35,6 +41,12 @@ class ESP_Setup {
 
         flush_rewrite_rules();
 
+        // Webサーバー不明のWP-CLIでは保護メディアなしを確認できる場合だけ
+        // VERIFY_REQUIREDで有効化し、次のHTTPでRewriteを含めて厳密検証。
+        // 保護メディアが残る場合は静的直URLの漏洩を防げないため拒否する。
+        if ($cli_without_web_server) {
+            return ESP_Protection_State::defer_cli_activation_verification();
+        }
         // 初回・再有効化とも検証を必須にする。失敗を成功として扱わない。
         return ESP_Protection_State::verify_and_commit($this);
     }
