@@ -332,4 +332,24 @@ $html = ob_get_clean();
 check(strpos($html, 'uploads/.htaccess') !== false &&
     strpos($html, 'esp_verify_runtime') !== false,
     'recovery panel offers explicit CSRF-protected validation');
+// WP-CLIの自動CronではWebサーバーのRewriteを検証できないことがある。
+define('WP_CLI', true);
+unset($_SERVER['SERVER_SOFTWARE']);
+$GLOBALS['options']['esp_runtime_state'] = 'VERIFY_REQUIRED';
+$before_cli_checks = $setup->checks;
+check(ESP_Protection_State::boot($setup) === false &&
+    get_option('esp_runtime_state') === 'VERIFY_REQUIRED' &&
+    $setup->checks === $before_cli_checks,
+    'WP-CLI without server identity defers verification without persisting FAILED');
+$cli_cron = $GLOBALS['actions']['esp_verify_runtime_once'][0][0];
+$cli_cron();
+check(get_option('esp_runtime_state') === 'VERIFY_REQUIRED' &&
+    $setup->checks === $before_cli_checks,
+    'CLI-triggered verification Cron does not strand a valid site in FAILED');
+$_SERVER['SERVER_SOFTWARE'] = 'Apache/2.4';
+check(ESP_Protection_State::boot($setup) === true &&
+    get_option('esp_runtime_state') === 'READY' &&
+    $setup->checks === $before_cli_checks + 1,
+    'next HTTP server context can complete deferred strict verification');
+
 echo "All protection runtime tests passed.\n";
