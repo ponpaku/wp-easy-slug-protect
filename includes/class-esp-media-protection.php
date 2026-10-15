@@ -668,9 +668,12 @@ class ESP_Media_Protection {
             return;
         }
 
-        // 公開クエリ変数はRewriteの拡張子制限を経ずに呼び出せる。
-        // 設定OFF・管理者・保護ONのいずれでも、対象外ファイルをPHP配信しない。
-        if (!self::is_allowed_media_request($requested_file)) {
+        // 公開クエリ変数は誰でも任意に指定できる。内部Rewriteの結果と
+        // 外部の ?esp-media=... を混同して第三者のuploads拒否を迂回させない。
+        // REQUEST_URIはRewrite前の元URLなので、要求されたuploadsの相対パスと
+        // 配信対象の一致を必要条件とする（URL形状だけで認可したわけではない）。
+        if (!self::is_allowed_media_request($requested_file) ||
+            !self::is_original_upload_request($requested_file)) {
             $this->send_404();
             return;
         }
@@ -788,6 +791,44 @@ class ESP_Media_Protection {
 
         return in_array(strtolower(pathinfo($requested_file, PATHINFO_EXTENSION)),
             self::PROTECTED_EXTENSIONS, true);
+    }
+
+    /**
+     * 直接クエリはWordPressのトップURLからuploads内の任意ファイルへ到達する。
+     * 本来のuploads URLに向けた要求以外は、OFF時・ON時とも配信しない。
+     * サーバー側Rewriteで元URLが保持されない環境では安全側の404とする。
+     */
+    private static function is_original_upload_request($requested_file) {
+        if (!is_string($requested_file) || $requested_file === '') {
+            return false;
+        }
+        $uploads = wp_upload_dir(null, false);
+        if (!is_array($uploads) || !empty($uploads['error']) ||
+            empty($uploads['baseurl']) || !is_string($uploads['baseurl'])) {
+            return false;
+        }
+        $root = parse_url($uploads['baseurl'], PHP_URL_PATH);
+        $original = parse_url((string) ($_SERVER['REQUEST_URI'] ?? ''), PHP_URL_PATH);
+        if (!is_string($root) || !is_string($original)) {
+            return false;
+        }
+        $prefix = rtrim($root, '/') . '/';
+        if (strncmp($original, $prefix, strlen($prefix)) !== 0) {
+            return false;
+        }
+        $relative = substr($original, strlen($prefix));
+        // 二重・三重エンコードも同じ最大回数で比較し、リクエスト改ざんを拒否。
+        for ($i = 0; $i < 3; $i++) {
+            $next = rawurldecode($relative);
+            if ($next === $relative) { break; }
+            $relative = $next;
+        }
+        for ($i = 0; $i < 3; $i++) {
+            $next = rawurldecode($requested_file);
+            if ($next === $requested_file) { break; }
+            $requested_file = $next;
+        }
+        return $relative === $requested_file && self::is_allowed_media_request($relative);
     }
 
     /**
@@ -1224,6 +1265,15 @@ class ESP_Media_Protection {
             return false;
         }
         $block = substr($contents, $start, $end - $start + strlen('# END ESP Media Protection'));
+        // ルール本文が合致していても先頭配置なら第三者の拒否を迂回する。
+        // 既存ルール末尾に配置されていること、第三者に保護迂回の危険が
+        // あるRewriteRuleが無いことを、保護成立の必要条件にする。
+        $after_esp = substr($contents, $end + strlen('# END ESP Media Protection'));
+        $before_esp = substr($contents, 0, $start);
+        if (trim($after_esp) !== '' ||
+            self::foreign_rewrite_can_bypass_protection($before_esp)) {
+            return false;
+        }
         // リクエストごとのルール照合では、キャッシュや各種フックを初期化しない。
         // .htaccessの内容を比較する処理だけを実行する。
         $media = (new \ReflectionClass(self::class))->newInstanceWithoutConstructor();
@@ -1312,11 +1362,19 @@ class ESP_Media_Protection {
             if (is_wp_error($esp_rules)) {
                 return $esp_rules;
             }
-            $new_rules = $route_media ? $esp_rules . $without_esp : $without_esp;
+            // 他者の拒否をESPのPHP配信で飛ばさないため、ESPは既存ルールの後。
+            // ただし他者の[L]などがESP保護を回避し得る場合は設置を拒否。
+            if ($route_media && self::foreign_rewrite_can_bypass_protection($without_esp)) {
+                return new WP_Error('esp_htaccess_foreign_rewrite_conflict',
+                    __('他のRewriteルールがESPの保護を迂回する可能性があるため、自動設置しません。管理者がルールの優先順位を確認してください。', ESP_Config::TEXT_DOMAIN));
+            }
+            $separator = $route_media && $without_esp !== '' &&
+                !preg_match('/(?:\\r\\n|\\n|\\r)\\z/', $without_esp) ? "\n" : '';
+            $new_rules = $route_media ? $without_esp . $separator . $esp_rules : $without_esp;
             // 書込み前に、新しいESPブロックが一組だけ存在することを確認する。
             if ($route_media && (substr_count($new_rules, '# BEGIN ESP Media Protection') !== 1 ||
                 substr_count($new_rules, '# END ESP Media Protection') !== 1 ||
-                strpos($new_rules, $esp_rules) !== 0)) {
+                substr($new_rules, -strlen($esp_rules)) !== $esp_rules)) {
                 return new WP_Error('esp_htaccess_invalid_result',
                     __('生成したRewrite保護ルールの構造が不正です。', ESP_Config::TEXT_DOMAIN));
             }
@@ -1440,6 +1498,35 @@ class ESP_Media_Protection {
             @flock($lock, LOCK_UN);
             @fclose($lock);
         }
+    }
+
+    /**
+     * RewriteがESPより先に評価される際に、保護対象を迂回させる可能性のある
+     * 第三者Rewriteを「安全」と推測しない。明示的な[F]/[G]拒否だけ受理。
+     * 条件式の成立をPHPで完全解析するのは不可能なので、曖昧な場合は拒否。
+     */
+    private static function foreign_rewrite_can_bypass_protection($foreign_rules) {
+        foreach (preg_split('/\\r\\n|\\n|\\r/', $foreign_rules) as $line) {
+            $line = trim($line);
+            if (preg_match('/^RewriteRule\\s/i', $line) !== 1) {
+                continue;
+            }
+            if (!preg_match('/^RewriteRule\\s+\\S+\\s+\\S+(?:\\s+\\[([^\\]]*)\\])?(?:\\s*(?:#.*)?)?$/i',
+                $line, $matches)) {
+                return true;
+            }
+            $flags = isset($matches[1]) ? explode(',', $matches[1]) : [];
+            $denies = false;
+            foreach ($flags as $flag) {
+                if (in_array(strtoupper(trim($flag)), ['F', 'FORBIDDEN', 'G', 'GONE'], true)) {
+                    $denies = true;
+                }
+            }
+            if (!$denies) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
