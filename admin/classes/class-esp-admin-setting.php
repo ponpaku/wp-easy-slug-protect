@@ -112,8 +112,8 @@ class ESP_Settings {
             isset($input['media']) ? $input['media'] : ESP_Option::get_current_setting('media')
         );
 
-        // OFF→ONでは保護メタの保存より先にRewrite配置を確定する。
-        // 失敗時はOFFを維持し、一般公開ページの全503を発生させない。
+        // OFF→ONのサニタイズ段階ではRewriteに触れない。
+        // まず保護対象0件を検証し、DB保存が成功した後のフックでRewriteを更新する。
         $old_media = ESP_Option::get_current_setting('media');
         $old_enabled = !is_array($old_media) ||
             !array_key_exists('enabled', $old_media) || (bool) $old_media['enabled'];
@@ -123,7 +123,7 @@ class ESP_Settings {
             add_settings_error(
                 ESP_Config::OPTION_KEY,
                 'esp_media_enable_rejected',
-                __('メディア保護Rewriteを安全に設置できないため、メディア保護ONへの変更を保存しませんでした。', ESP_Config::TEXT_DOMAIN),
+                __('既存の保護メディアが0件と確認できないため、メディア保護ONへの変更を保存しませんでした。', ESP_Config::TEXT_DOMAIN),
                 'error'
             );
         }
