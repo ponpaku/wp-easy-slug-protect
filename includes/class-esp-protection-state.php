@@ -18,6 +18,9 @@ final class ESP_Protection_State {
     const RUNTIME_STATE_OPTION = 'esp_runtime_state';
     const AUDIT_OPTION = 'esp_integrity_last_audit';
 
+    /** 同じPHPリクエストでの再入検証も防ぐ。 */
+    private static $verification_in_progress = false;
+
     public static function boot($setup) {
         $state = get_option(self::RUNTIME_STATE_OPTION, null);
         // READYの通常アクセスでは一切の更新・DB版・Rewrite検査を実行しない。
@@ -65,7 +68,7 @@ final class ESP_Protection_State {
         if (!in_array($state, [null, 'PENDING', 'VERIFY_REQUIRED'], true)) {
             return $state === 'READY';
         }
-        return self::verify_and_commit($setup);
+        return self::verify_and_commit($setup, true);
     }
 
     /**
@@ -210,15 +213,28 @@ final class ESP_Protection_State {
     }
 
     /** 管理者による検証、プラグイン有効化、更新後の復旧でのみ実行する。 */
-    public static function verify_and_commit($setup) {
+    public static function verify_and_commit($setup, $only_if_pending = false) {
+        if (self::$verification_in_progress) {
+            return false;
+        }
         $lock = self::acquire_verification_lock();
         if ($lock === null) {
             return false; // 他リクエストが検証中 / DBロック利用不可
         }
+        self::$verification_in_progress = true;
         try {
+            // GET_LOCK取得待ちの間に別プロセスがREADYへ遷移したなら、
+            // 初回アクセスの自動検証をもう一度実行しない。
+            if ($only_if_pending) {
+                $state = get_option(self::RUNTIME_STATE_OPTION, null);
+                if (!in_array($state, [null, 'PENDING', 'VERIFY_REQUIRED'], true)) {
+                    return $state === 'READY';
+                }
+            }
             return self::verify_and_commit_unlocked($setup, $lock);
         } finally {
             self::release_verification_lock($lock);
+            self::$verification_in_progress = false;
         }
     }
 
