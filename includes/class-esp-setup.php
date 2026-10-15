@@ -310,6 +310,16 @@ class ESP_Setup {
             return false; // 将来版のスキーマに古いコードの移行を適用しない。
         }
 
+        // 途中で版印だけ古いまま残ったサイトも、完全移行済みなら
+        // 旧Migrationを重複適用せず、整合を確認して版印だけ進める。
+        if ($current_db_version < $required_db_version &&
+            self::has_stable_path_ids() &&
+            class_exists('ESP_Protection_State') &&
+            ESP_Protection_State::verify_legacy_security_schema()) {
+            update_option('esp_db_version', $required_db_version);
+            return (int) get_option('esp_db_version', 0) === (int) $required_db_version;
+        }
+
         if ($current_db_version < $required_db_version) {
             if (!$this->migrate_to_version($current_db_version, $required_db_version)) {
                 return false;
