@@ -20,6 +20,12 @@ final class ESP_Protection_State {
 
     public static function boot($setup) {
         $state = get_option(self::RUNTIME_STATE_OPTION, null);
+        // READYの通常アクセスでは一切の更新・DB版・Rewrite検査を実行しない。
+        // 新しいコードが初めて起動した時だけ、管理者アクセスを待たずに検証する。
+        if (in_array($state, [null, 'PENDING', 'VERIFY_REQUIRED'], true)) {
+            self::verify_once($setup);
+            $state = get_option(self::RUNTIME_STATE_OPTION, null);
+        }
         $settings = get_option(ESP_Config::OPTION_KEY, null);
         if ($state === 'READY' && self::valid_settings($settings)) {
             return true;
@@ -28,21 +34,15 @@ final class ESP_Protection_State {
         return false;
     }
 
-    /** WordPress更新と復旧のフックはREADYでない場合も登録する。 */
+    /** WordPress更新開始・完了、単発Cron、管理者復旧を登録する。 */
     public static function register_runtime_hooks($setup) {
         add_filter('upgrader_pre_install', [self::class, 'before_plugin_upgrade'], 10, 2);
+        add_filter('upgrader_post_install', [self::class, 'after_plugin_upgrade'], 10, 3);
+        add_action('upgrader_process_complete', [self::class, 'upgrade_process_complete'], 10, 2);
+        add_action('esp_verify_runtime_once', static function () use ($setup) {
+            self::verify_once($setup);
+        });
         add_action('admin_notices', [self::class, 'render_audit_notice']);
-        // 未導入の状態印や標準更新によるPENDINGを、最初の管理者アクセスで検証する。
-        // FAILEDは毎回再試行せず、明示的な復旧操作を要求する。
-        add_action('admin_init', static function () use ($setup) {
-            if (!current_user_can('manage_options')) {
-                return;
-            }
-            $state = get_option(self::RUNTIME_STATE_OPTION, null);
-            if ($state === null || $state === 'PENDING' || $state === 'UNKNOWN') {
-                self::verify_and_commit($setup);
-            }
-        }, 1);
         add_action('admin_post_esp_verify_runtime', static function () use ($setup) {
             if (!current_user_can('manage_options')) {
                 wp_die(__('操作権限がありません。', ESP_Config::TEXT_DOMAIN), '', ['response' => 403]);
@@ -54,9 +54,94 @@ final class ESP_Protection_State {
         });
     }
 
+    /**
+     * 初回導入・検証待ちに限り一度だけ厳密検証する。
+     * 排他が取れない別リクエストは一時的に拒否し、未検証で通過させない。
+     * FAILED/UPDATINGを自動解除しない。復旧用の管理画面は利用できる。
+     */
+    private static function verify_once($setup) {
+        $state = get_option(self::RUNTIME_STATE_OPTION, null);
+        if (!in_array($state, [null, 'PENDING', 'VERIFY_REQUIRED'], true)) {
+            return $state === 'READY';
+        }
+        $lock_key = 'esp_runtime_verify_lock';
+        $now = time();
+        if (!add_option($lock_key, $now, '', false)) {
+            $held_at = get_option($lock_key, 0);
+            if (!is_numeric($held_at) || $now - (int)$held_at < 300) {
+                return false;
+            }
+            // 異常終了した検証の排他だけを期限切れとして回収する。
+            delete_option($lock_key);
+            if (!add_option($lock_key, $now, '', false)) {
+                return false;
+            }
+        }
+        try {
+            return self::verify_and_commit($setup);
+        } finally {
+            delete_option($lock_key);
+        }
+    }
+
+    private static function target_is_esp($extra) {
+        if (!is_array($extra) || ($extra['type'] ?? '') !== 'plugin' ||
+            ($extra['action'] ?? '') !== 'update') {
+            return false;
+        }
+        $targets = [];
+        if (isset($extra['plugin'])) {
+            $targets[] = $extra['plugin'];
+        }
+        if (isset($extra['plugins']) && is_array($extra['plugins'])) {
+            $targets = array_merge($targets, $extra['plugins']);
+        }
+        return in_array(plugin_basename(ESP_PATH . 'easy-slug-protect.php'), $targets, true);
+    }
+
+    /** 標準更新前に停止状態を永続化する。 */
+    public static function before_plugin_upgrade($response, $hook_extra) {
+        if (is_wp_error($response) || !self::target_is_esp($hook_extra)) {
+            return $response;
+        }
+        if (!self::set_runtime_state('UPDATING')) {
+            return new WP_Error('esp_upgrade_pending_unavailable',
+                __('保護状態を更新中として記録できないため、ESPの更新を中止しました。', ESP_Config::TEXT_DOMAIN));
+        }
+        return $response;
+    }
+
+    /**
+     * 旧PHPコードで発火する更新完了フックではREADYにせず、新コード側へ検証を委譲。
+     */
+    public static function after_plugin_upgrade($response, $hook_extra, $result) {
+        if (is_wp_error($response) || $response === false ||
+            !self::target_is_esp($hook_extra)) {
+            return $response;
+        }
+        if (get_option(self::RUNTIME_STATE_OPTION, null) === 'UPDATING') {
+            self::mark_verification_required();
+        }
+        return $response;
+    }
+
+    public static function upgrade_process_complete($upgrader, $hook_extra) {
+        if (self::target_is_esp($hook_extra) &&
+            get_option(self::RUNTIME_STATE_OPTION, null) === 'UPDATING') {
+            self::mark_verification_required();
+        }
+    }
+
+    private static function mark_verification_required() {
+        if (self::set_runtime_state('VERIFY_REQUIRED') &&
+            !wp_next_scheduled('esp_verify_runtime_once')) {
+            wp_schedule_single_event(time(), 'esp_verify_runtime_once');
+        }
+    }
+
     /** 記録した状態だけを参照し、コード/DB版の検査は行わない。 */
     private static function set_runtime_state($state) {
-        if (!in_array($state, ['READY', 'PENDING', 'FAILED', 'UNKNOWN'], true)) {
+        if (!in_array($state, ['READY', 'PENDING', 'FAILED', 'UNKNOWN', 'UPDATING', 'VERIFY_REQUIRED'], true)) {
             return false;
         }
         update_option(self::RUNTIME_STATE_OPTION, $state, true);
