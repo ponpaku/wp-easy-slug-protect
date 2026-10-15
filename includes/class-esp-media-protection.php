@@ -1175,7 +1175,7 @@ class ESP_Media_Protection {
         // リクエストごとのルール照合では、キャッシュや各種フックを初期化しない。
         // .htaccessの内容を比較する処理だけを実行する。
         $media = (new \ReflectionClass(self::class))->newInstanceWithoutConstructor();
-        $expected = $media->get_htaccess_rules(false, true, true, $litespeed_key_override);
+        $expected = $media->get_htaccess_rules(true, true, $litespeed_key_override);
         if (is_wp_error($expected)) {
             return false;
         }
@@ -1272,7 +1272,7 @@ class ESP_Media_Protection {
                 ($force_litespeed_key_regeneration || self::get_litespeed_key_value() === '')) {
                 $this->rewrite_key_candidate = $this->generate_litespeed_key();
             }
-            $esp_rules = $this->get_htaccess_rules(false, $route_media, false, $this->rewrite_key_candidate);
+            $esp_rules = $this->get_htaccess_rules($route_media, false, $this->rewrite_key_candidate);
             if (is_wp_error($esp_rules)) {
                 return $esp_rules;
             }
@@ -1405,10 +1405,10 @@ class ESP_Media_Protection {
     /**
      * .htaccess用のルールを生成
      *
-     * @param bool $force_litespeed_key_regeneration LiteSpeedキーを再生成するかどうか
-     * @return string .htaccessルール
+     * @param bool|null $has_protected_media ルールを適用するか
+     * @return string|WP_Error .htaccessルール
      */
-    private function get_htaccess_rules($force_litespeed_key_regeneration = false, $has_protected_media = null, $read_only = false, $litespeed_key_override = null) {
+    private function get_htaccess_rules($has_protected_media = null, $read_only = false, $litespeed_key_override = null) {
         if ($has_protected_media === null) {
             $has_protected_media = self::is_media_protection_enabled();
         }
