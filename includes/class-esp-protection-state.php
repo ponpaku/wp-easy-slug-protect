@@ -64,24 +64,7 @@ final class ESP_Protection_State {
         if (!in_array($state, [null, 'PENDING', 'VERIFY_REQUIRED'], true)) {
             return $state === 'READY';
         }
-        $lock_key = 'esp_runtime_verify_lock';
-        $now = time();
-        if (!add_option($lock_key, $now, '', false)) {
-            $held_at = get_option($lock_key, 0);
-            if (!is_numeric($held_at) || $now - (int)$held_at < 300) {
-                return false;
-            }
-            // 異常終了した検証の排他だけを期限切れとして回収する。
-            delete_option($lock_key);
-            if (!add_option($lock_key, $now, '', false)) {
-                return false;
-            }
-        }
-        try {
-            return self::verify_and_commit($setup);
-        } finally {
-            delete_option($lock_key);
-        }
+        return self::verify_and_commit($setup);
     }
 
     private static function target_is_esp($extra) {
@@ -150,6 +133,28 @@ final class ESP_Protection_State {
 
     /** 管理者による検証、プラグイン有効化、更新後の復旧でのみ実行する。 */
     public static function verify_and_commit($setup) {
+        // 自動検証・管理者の再検証・有効化のすべてを同じ排他で保護する。
+        $lock_key = 'esp_runtime_verify_lock';
+        $now = time();
+        if (!add_option($lock_key, $now, '', false)) {
+            $held_at = get_option($lock_key, 0);
+            if (!is_numeric($held_at) || $now - (int)$held_at < 300) {
+                return false;
+            }
+            // 異常終了した検証の排他を期限切れとして回収。
+            delete_option($lock_key);
+            if (!add_option($lock_key, $now, '', false)) {
+                return false;
+            }
+        }
+        try {
+            return self::verify_and_commit_unlocked($setup);
+        } finally {
+            delete_option($lock_key);
+        }
+    }
+
+    private static function verify_and_commit_unlocked($setup) {
         if (!self::set_runtime_state('PENDING')) {
             return false;
         }
