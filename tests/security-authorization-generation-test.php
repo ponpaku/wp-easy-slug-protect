@@ -100,6 +100,14 @@ check_auth(ESP_Authorization_Cache::guard_postmeta_delete(null, 42,
     'media OFF permits clearing stale protected metadata');
 $GLOBALS['options'][ESP_Config::OPTION_KEY]['media']['enabled'] = true;
 
+// WP-CLIはSERVER_SOFTWAREがないので、Nginxと誤認して書込みを通してはならない。
+unset($_SERVER['SERVER_SOFTWARE']);
+check_auth(ESP_Authorization_Cache::guard_postmeta_write(null, 42,
+    ESP_Media_Protection::META_KEY_PROTECTED_PATH, 'one') === false,
+    'WP-CLI without server identity rejects protected media metadata write');
+// 以後の失効失敗注入は、Nginx外部Rewriteが設定されている前提の分岐で実施。
+$_SERVER['SERVER_SOFTWARE'] = 'nginx/1.26';
+
 // 同時にepochの保存とtransient削除が失敗するケースは、現在のリクエストで
 // 保護メタデータの更新をブロックし、読み取り・公開も拒否する。
 $oldGeneration = ESP_Authorization_Cache::signature('media');
