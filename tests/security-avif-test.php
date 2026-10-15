@@ -11,6 +11,7 @@ class ESP_Option {
 }
 class TestWPDB {
     public $postmeta = 'wp_postmeta';
+    public $last_error = '';
     public $rows = [];
     public $metadata = [];
     public function prepare($sql, ...$args) {
