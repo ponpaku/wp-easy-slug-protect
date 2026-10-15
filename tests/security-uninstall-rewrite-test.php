@@ -8,7 +8,8 @@ mkdir($GLOBALS['test_dir'], 0700);
 $htaccess = $GLOBALS['test_dir'] . '/.htaccess';
 $foreign = "# Another plugin\r\nRewriteEngine On\r\nRewriteRule ^other$ index.php [L]\r\n";
 $esp = "# BEGIN ESP Media Protection\nRewriteRule ^protected$ index.php?esp-media=x [L]\n# END ESP Media Protection\n";
-file_put_contents($htaccess, $esp . $foreign);
+$initial_invalid = "# BEGIN ESP Media Protection\n# END ESP Media Protection\n# END ESP Media Protection\n" . $foreign;
+file_put_contents($htaccess, $initial_invalid);
 chmod($htaccess, 0640);
 
 class UninstallTestDB {
@@ -28,14 +29,23 @@ function check_uninstall($value, $message) {
     if (!$value) { fwrite(STDERR, "FAIL: $message\n"); exit(1); }
     echo "PASS: $message\n";
 }
+// WordPressから削除を指示されたら、Rewrite保全に失敗しても削除処理は止めない。
 require __DIR__ . '/../uninstall.php';
+check_uninstall(file_get_contents($htaccess) === $initial_invalid,
+    'uninstall leaves ambiguous third-party/ESP markers untouched');
+check_uninstall(count($wpdb->queries) === 4,
+    'DB cleanup continues even if Rewrite cleanup needs manual action');
+
+// 正常なマーカーでの部分除去は独立して確認する。
+file_put_contents($htaccess, $esp . $foreign);
+check_uninstall(esp_uninstall_remove_rewrite_safely() === true,
+    'uninstall safely removes its own valid Rewrite block');
 check_uninstall(file_get_contents($htaccess) === $foreign,
     'uninstall removes only ESP block, preserving foreign rules byte for byte');
 check_uninstall((fileperms($htaccess) & 0777) === 0640,
     'uninstall preserves file permissions');
-check_uninstall(count($wpdb->queries) === 4, 'DB cleanup continues only after safe Rewrite removal');
 check_uninstall(glob($GLOBALS['test_dir'] . '/.htaccess.esp-*') === [],
-    'temporary and backup files are removed after successful uninstall');
+    'temporary and backup files are removed after successful Rewrite cleanup');
 
 // 検証異常後の復元関数を直接試験する：自分の置換だけ安全に戻す。
 $installed = "# Other plugin\\r\\nRewriteRule ^test$ index.php [L]\\r\\n";
