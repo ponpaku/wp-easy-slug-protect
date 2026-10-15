@@ -179,10 +179,14 @@ check(ESP_Protection_State::boot($setup) === false && $setup->checks === 0,
 $post = $GLOBALS['filters']['upgrader_post_install'][0][0];
 check($post(true, ['action'=>'update', 'type'=>'plugin',
     'plugin'=>'easy-slug-protect/easy-slug-protect.php'], []) === true &&
-    get_option('esp_runtime_state') === 'VERIFY_REQUIRED',
-    'successful updater stage schedules new-code validation');
-check(!empty($GLOBALS['scheduled']['esp_verify_runtime_once']),
-    'one-off Cron is scheduled for unattended validation');
+    get_option('esp_runtime_state') === 'UPDATING',
+    'successful updater stage waits until request shutdown to mark verification');
+foreach ($GLOBALS['actions']['shutdown'] as $entry) {
+    if ($entry[1] === 200) { call_user_func($entry[0]); }
+}
+check(get_option('esp_runtime_state') === 'VERIFY_REQUIRED' &&
+    !empty($GLOBALS['scheduled']['esp_verify_runtime_once']),
+    'one-off Cron is scheduled after update lifecycle has finished');
 check(ESP_Protection_State::boot($setup) === true &&
     get_option('esp_runtime_state') === 'READY' && $setup->checks === 1,
     'first anonymous request verifies and recovers unattended update');
@@ -204,8 +208,13 @@ check($pre(true, $bulk_extra) === true &&
     get_option('esp_runtime_state') === 'UPDATING',
     'bulk/AJAX update marks ESP UPDATING without type or action');
 check($post(true, $bulk_extra, []) === true &&
-    get_option('esp_runtime_state') === 'VERIFY_REQUIRED',
-    'bulk/AJAX post-install schedules new-code validation');
+    get_option('esp_runtime_state') === 'UPDATING',
+    'bulk/AJAX post-install waits for shutdown before completion');
+foreach ($GLOBALS['actions']['shutdown'] as $entry) {
+    if ($entry[1] === 200) { call_user_func($entry[0]); }
+}
+check(get_option('esp_runtime_state') === 'VERIFY_REQUIRED',
+    'bulk/AJAX update schedules one-time validation at shutdown');
 check(ESP_Protection_State::boot($setup) === true,
     'anonymous traffic after successful bulk upgrade verifies once');
 
