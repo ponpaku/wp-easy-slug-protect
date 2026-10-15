@@ -37,6 +37,28 @@ check_uninstall(count($wpdb->queries) === 4, 'DB cleanup continues only after sa
 check_uninstall(glob($GLOBALS['test_dir'] . '/.htaccess.esp-*') === [],
     'temporary and backup files are removed after successful uninstall');
 
+// 検証異常後の復元関数を直接試験する：自分の置換だけ安全に戻す。
+$installed = "# Other plugin\\r\\nRewriteRule ^test$ index.php [L]\\r\\n";
+$previous = "# Original third-party bytes\\r\\nRewriteEngine On\\r\\n";
+$backup = $GLOBALS['test_dir'] . '/.htaccess.esp-restore-test';
+file_put_contents($htaccess, $installed);
+file_put_contents($backup, $previous);
+chmod($backup, 0600);
+check_uninstall(esp_uninstall_restore_if_unchanged($htaccess, $backup, $installed, 0640),
+    'uninstall restores previous bytes when installed file is unchanged');
+check_uninstall(file_get_contents($htaccess) === $previous &&
+    (fileperms($htaccess) & 0777) === 0640,
+    'uninstall rollback preserves old bytes and permissions');
+file_put_contents($htaccess, '# External change\\n');
+file_put_contents($backup, $previous);
+chmod($backup, 0600);
+check_uninstall(!esp_uninstall_restore_if_unchanged($htaccess, $backup, $installed, 0640),
+    'uninstall never overwrites a concurrent external change');
+check_uninstall(file_get_contents($htaccess) === '# External change\\n' &&
+    file_get_contents($backup) === $previous,
+    'backup remains available when safe restoration is impossible');
+unlink($backup);
+
 $ambiguous = "# BEGIN ESP Media Protection\n# END ESP Media Protection\n# END ESP Media Protection\n" . $foreign;
 file_put_contents($htaccess, $ambiguous);
 check_uninstall(esp_uninstall_remove_rewrite_safely() === false,
