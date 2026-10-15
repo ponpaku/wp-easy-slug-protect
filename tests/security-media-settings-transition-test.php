@@ -11,8 +11,8 @@ $GLOBALS['current_settings'] = [
     'media' => ['enabled' => true, 'delivery_method' => 'auto'],
 ];
 $GLOBALS['safe_to_disable'] = false;
-$GLOBALS['can_install_rewrite'] = true;
-$GLOBALS['rewrite_install_checks'] = 0;
+$GLOBALS['known_zero_media_before_enabling'] = true;
+$GLOBALS['pre_save_media_checks'] = 0;
 $GLOBALS['settings_errors'] = [];
 $GLOBALS['count_checks'] = 0;
 class ESP_Option {
@@ -26,8 +26,8 @@ class ESP_Media_Protection {
         return $GLOBALS['safe_to_disable'] === true;
     }
     public static function can_enable_media_protection() {
-        $GLOBALS['rewrite_install_checks']++;
-        return $GLOBALS['can_install_rewrite'] === true;
+        $GLOBALS['pre_save_media_checks']++;
+        return $GLOBALS['known_zero_media_before_enabling'] === true;
     }
 }
 class ESP_Mail {
@@ -91,21 +91,21 @@ check_transition($sanitized['media']['enabled'] === true,
     'ON restoration is not blocked by protected media');
 check_transition($GLOBALS['count_checks'] === $checks,
     'saving ON does not incur unnecessary protected-media COUNT');
-// OFF→ONはRewriteを設置できなければ旧OFF状態のまま保存する。
+// OFF→ONでは保護対象0件の確認のみ行い、Rewriteは設定保存成功後に設置する。
 $GLOBALS['current_settings']['media']['enabled'] = false;
-$GLOBALS['can_install_rewrite'] = false;
+$GLOBALS['known_zero_media_before_enabling'] = false;
 $GLOBALS['settings_errors'] = [];
 $sanitized = $settings->sanitize_settings($input);
 check_transition($sanitized['media']['enabled'] === false,
-    'OFF to ON rejected before saving when Rewrite cannot be installed');
+    'OFF to ON rejected when protected count cannot be confirmed empty');
 check_transition(count($GLOBALS['settings_errors']) === 1 &&
     $GLOBALS['settings_errors'][0]['code'] === 'esp_media_enable_rejected',
-    'Rewrite preflight failure is visible in the settings UI');
-$GLOBALS['can_install_rewrite'] = true;
+    'pre-save media count failure is visible in the settings UI');
+$GLOBALS['known_zero_media_before_enabling'] = true;
 $GLOBALS['settings_errors'] = [];
 $sanitized = $settings->sanitize_settings($input);
 check_transition($sanitized['media']['enabled'] === true,
-    'OFF to ON allowed when Rewrite has been installed');
+    'OFF to ON allowed with verified zero protected media');
 check_transition($GLOBALS['settings_errors'] === [],
-    'successful Rewrite preflight permits normal save');
+    'metadata preflight permits saving without touching Rewrite');
 echo "All media setting transition tests passed.\n";
