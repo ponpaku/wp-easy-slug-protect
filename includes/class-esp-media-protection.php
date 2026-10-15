@@ -1645,8 +1645,14 @@ class ESP_Media_Protection {
         if (!self::is_media_protection_enabled()) {
             return false;
         }
-        if (!preg_match('/apache|litespeed/i', $_SERVER['SERVER_SOFTWARE'] ?? '')) {
+        $software = self::get_server_software();
+        if (self::is_nginx_server()) {
             return true; // Nginxの保護ルールは外部設定の責務。
+        }
+        if (!preg_match('/apache|litespeed/i', $software)) {
+            // WP-CLI等でSERVER_SOFTWAREが未設定なら配信方式は特定できない。
+            // Nginxと推測して保護メタの先行登録を許可しない。
+            return false;
         }
         // ensureは0件時に一般公開ページの503を回避し得るため、
         // 保護メタを書き込む際は必ず実ファイルの捕捉ルールを検証する。
