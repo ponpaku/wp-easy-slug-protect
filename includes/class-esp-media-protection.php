@@ -1339,7 +1339,8 @@ class ESP_Media_Protection {
         }
 
         $htaccess_file = trailingslashit($upload_dir['basedir']) . '.htaccess';
-        if ($deactivating || !self::is_media_protection_enabled()) {
+        if ($deactivating || ($route_override === null && !self::is_media_protection_enabled())) {
+            // OFF→ONの事前Rewrite設置（route_override=true）は素通りさせない。
             // 既存ESPブロックなしなら変更不要。CLI/Nginxで空ファイルやロックを
             // 作らず、読み取り失敗・部分マーカーは後続のエラー経路へ渡す。
             if (!file_exists($htaccess_file) && !is_link($htaccess_file)) {
