@@ -148,12 +148,11 @@ function esp_uninstall_remove_rewrite_safely() {
     }
 }
 
-// 設定・テーブルを削除した後では復元不能になるため、最初に保全処理を行う。
+// ESP自身のRewriteだけを安全に除去する。他者のルールは決して推測で編集しない。
+// 書込権限や他者の同時変更で失敗しても、明示的なアンインストールは阻止しない。
+// 残ったESP RewriteはWebサーバー側で手動除去が必要となり得る。
 if (!esp_uninstall_remove_rewrite_safely()) {
-    error_log('ESP Uninstall: .htaccess preservation failed; refusing to remove stored settings and tables');
-    // 単にreturnすると、WordPress側が続けてプラグインファイルを削除して
-    // 保護Rewriteだけが残る可能性がある。削除処理自体を停止する。
-    wp_die(__('Easy Slug Protect: .htaccess の安全な更新を確認できませんでした。プラグインの削除を中止してください。', ESP_Config::TEXT_DOMAIN));
+    error_log('ESP Uninstall: could not remove ESP Rewrite safely; administrator may need to remove the ESP block from uploads/.htaccess manually');
 }
 
 // データベースの削除処理
