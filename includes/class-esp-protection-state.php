@@ -496,7 +496,8 @@ final class ESP_Protection_State {
 
                 // RESTの投稿一覧等はテンプレートフックを通らず保護情報を含み得る。
                 add_filter('rest_pre_dispatch', static function ($result, $server = null, $request = null) use ($paths, $media_enabled, $message) {
-                    if ($result !== null || current_user_can('manage_options')) {
+                    // 別フィルターがREST応答を先に作っていても保護ゲートは迂回させない。
+                    if (current_user_can('manage_options')) {
                         return $result;
                     }
                     // 保護パスあり・認可フック未登録中は匿名RESTで内容を公開しない。
