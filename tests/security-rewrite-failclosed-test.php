@@ -13,6 +13,7 @@ class ESP_Option {
     }
     public static function update_settings($settings) {
         $GLOBALS['litespeed_key_writes'] = ($GLOBALS['litespeed_key_writes'] ?? 0) + 1;
+        if (!empty($GLOBALS['litespeed_key_write_failure'])) { return false; }
         $GLOBALS['litespeed_key'] = $settings['media']['litespeed_key'];
         return true;
     }
@@ -76,6 +77,15 @@ $wpdb->live_error = false;
 $wpdb->live_path = null;
 $wpdb->last_error = '';
 
+// SERVER_SOFTWARE未設定のWP-CLIではNginxと推測して保護メタを追加しない。
+unset($_SERVER['SERVER_SOFTWARE']);
+check(ESP_Media_Protection::can_assign_protected_media() === false,
+    'WP-CLI without web-server context cannot register protected media');
+$_SERVER['SERVER_SOFTWARE'] = 'nginx/1.26';
+check(ESP_Media_Protection::can_assign_protected_media() === true,
+    'explicit Nginx deployment retains externally administered Rewrite policy');
+$_SERVER['SERVER_SOFTWARE'] = 'Apache/2.4';
+
 $matchesPolicy = $reflection->getMethod('rewrite_file_matches_policy');
 check($matchesPolicy->invoke(null, true) === false, 'incomplete legacy rewrite cannot satisfy policy marker');
 
@@ -134,6 +144,46 @@ check(ESP_Media_Protection::audit_rewrite_policy() === true,
 check($GLOBALS['litespeed_key_writes'] === $writes_after_install &&
     file_get_contents($file) === $installed_litespeed_rules,
     'LiteSpeed audit stays read-only after successful rule installation');
+// 新キーが先にDBへ保存され、Rewrite失敗で旧キーと不一致になることを防ぐ。
+$previous_litespeed_key = $GLOBALS['litespeed_key'];
+$previous_litespeed_rules = file_get_contents($file);
+$lock_file_handle = fopen($file . '.esp.lock', 'c');
+flock($lock_file_handle, LOCK_EX);
+$write_error = $media->update_htaccess(true);
+check($write_error instanceof WP_Error &&
+    $GLOBALS['litespeed_key'] === $previous_litespeed_key &&
+    file_get_contents($file) === $previous_litespeed_rules,
+    'LiteSpeed forced rotation under Rewrite lock failure preserves the old key and rules');
+flock($lock_file_handle, LOCK_UN);
+fclose($lock_file_handle);
+
+class ESP_Failing_LiteSpeed_Verifier extends ESP_Media_Protection {
+    protected function verify_rewrite_installation($file, $expected, $enabled) {
+        return false;
+    }
+}
+$bad_litespeed = (new ReflectionClass('ESP_Failing_LiteSpeed_Verifier'))->newInstanceWithoutConstructor();
+$write_error = $bad_litespeed->update_htaccess(true);
+check($write_error instanceof WP_Error &&
+    $write_error->get_error_code() === 'esp_htaccess_rolled_back' &&
+    $GLOBALS['litespeed_key'] === $previous_litespeed_key &&
+    file_get_contents($file) === $previous_litespeed_rules,
+    'LiteSpeed verification failure restores the previous Rewrite without changing the key');
+
+$GLOBALS['litespeed_key_write_failure'] = true;
+$write_error = $media->update_htaccess(true);
+unset($GLOBALS['litespeed_key_write_failure']);
+check($write_error instanceof WP_Error &&
+    $write_error->get_error_code() === 'esp_litespeed_key_write' &&
+    $GLOBALS['litespeed_key'] === $previous_litespeed_key &&
+    file_get_contents($file) === $previous_litespeed_rules,
+    'LiteSpeed database key commit failure rolls back to the old Rewrite and key');
+check($media->update_htaccess(true) === true &&
+    $GLOBALS['litespeed_key'] !== $previous_litespeed_key &&
+    strpos(file_get_contents($file), $GLOBALS['litespeed_key']) !== false &&
+    ESP_Media_Protection::audit_rewrite_policy() === true,
+    'successful LiteSpeed forced key rotation commits the new key only after rules pass verification');
+
 // 既存のApache分岐テストへ戻す。
 $_SERVER['SERVER_SOFTWARE'] = 'Apache/2.4';
 check($media->update_htaccess() === true,
