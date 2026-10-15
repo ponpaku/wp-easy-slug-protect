@@ -109,6 +109,36 @@ foreach ([false, true] as $media_enabled) {
     check($denied && $GLOBALS['test_http_status'] === 404,
         'public query for .htaccess is rejected before OFF/ON delivery');
 }
+// リンクの表示名が画像でも、実体が隠し設定ファイルなら配信しない。
+// uploadsと同じ接頭辞の兄弟ディレクトリもuploads配下と誤認しない。
+$link_alias = $GLOBALS['test_dir'] . '/alias.jpg';
+$outside_dir = $GLOBALS['test_dir'] . '-backup';
+mkdir($outside_dir, 0700);
+$outside_file = $outside_dir . '/outside.jpg';
+file_put_contents($outside_file, 'outside uploads');
+check(symlink($file, $link_alias), 'setup file alias to hidden Rewrite configuration');
+check(symlink($outside_file, $GLOBALS['test_dir'] . '/escape.jpg'),
+    'setup uploads sibling-directory alias');
+foreach (['alias.jpg', 'escape.jpg'] as $alias) {
+    $GLOBALS['test_media_query'] = $alias;
+    $_SERVER['REQUEST_URI'] = '/?esp-media=' . $alias;
+    foreach ([false, true] as $media_enabled) {
+        $enabledProp->setValue($media, $media_enabled);
+        unset($GLOBALS['test_http_status']);
+        $denied = false;
+        try {
+            $media->handle_media_access();
+        } catch (RuntimeException $error) {
+            $denied = $error->getMessage() === 'intercepted media 404';
+        }
+        check($denied && $GLOBALS['test_http_status'] === 404,
+            'canonical media validation rejects hidden or outside linked targets');
+    }
+}
+unlink($link_alias);
+unlink($GLOBALS['test_dir'] . '/escape.jpg');
+unlink($outside_file);
+rmdir($outside_dir);
 unset($GLOBALS['test_media_query']);
 $enabledProp->setValue($media, true);
 
