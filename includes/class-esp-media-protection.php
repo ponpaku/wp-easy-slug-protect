@@ -1173,7 +1173,7 @@ class ESP_Media_Protection {
         // リクエストごとのルール照合では、キャッシュや各種フックを初期化しない。
         // .htaccessの内容を比較する処理だけを実行する。
         $media = (new \ReflectionClass(self::class))->newInstanceWithoutConstructor();
-        $expected = $media->get_htaccess_rules(false, true);
+        $expected = $media->get_htaccess_rules(false, true, true);
         if (is_wp_error($expected)) {
             return false;
         }
@@ -1390,7 +1390,7 @@ class ESP_Media_Protection {
      * @param bool $force_litespeed_key_regeneration LiteSpeedキーを再生成するかどうか
      * @return string .htaccessルール
      */
-    private function get_htaccess_rules($force_litespeed_key_regeneration = false, $has_protected_media = null) {
+    private function get_htaccess_rules($force_litespeed_key_regeneration = false, $has_protected_media = null, $read_only = false) {
         if ($has_protected_media === null) {
             $has_protected_media = self::is_media_protection_enabled();
         }
@@ -1415,10 +1415,17 @@ class ESP_Media_Protection {
         // 有効なら保護メディアが0件でもルールを適用（初回追加の直配信漏洩防止）
         if ($has_protected_media) {
             if ($this->is_litespeed()) {
-                // LiteSpeed用の認証キーを必ず確保
-                $litespeed_key = $this->ensure_litespeed_key($force_litespeed_key_regeneration);
+                // 監査・既存ルール比較はキーを生成しない。
+                // キーの作成・更新は明示的なRewrite更新処理だけで行う。
+                $litespeed_key = $read_only
+                    ? self::get_litespeed_key_value()
+                    : $this->ensure_litespeed_key($force_litespeed_key_regeneration);
                 if ($litespeed_key instanceof WP_Error) {
                     return $litespeed_key;
+                }
+                if ($litespeed_key === '') {
+                    return new WP_Error('esp_litespeed_key_missing',
+                        __('LiteSpeedの保護キーがありません。管理者によるRewrite更新が必要です。', ESP_Config::TEXT_DOMAIN));
                 }
                 $escaped_key = preg_quote($litespeed_key, '/');
                 $query_key = ESP_Config::LITESPEED_QUERY_KEY;
