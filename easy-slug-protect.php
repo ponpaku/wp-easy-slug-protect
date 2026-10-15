@@ -34,7 +34,7 @@ class Easy_Slug_Protect {
      */
     public function __construct() {
         // 必要なファイルを読み込む
-        $this->load_dependencies();
+        self::load_dependencies();
 
         // セットアップクラスのインスタンス化
         $this->setup = new ESP_Setup();
