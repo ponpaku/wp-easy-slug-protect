@@ -125,6 +125,7 @@ class ESP_Setup {
         wp_clear_scheduled_hook(ESP_Config::INTEGRITY_CHECK_HOOK);
         wp_clear_scheduled_hook('esp_media_cache_refresh');
         wp_clear_scheduled_hook('esp_all_cache_refresh');
+        wp_clear_scheduled_hook('esp_verify_runtime_once');
         
         // キャッシュのクリア
         delete_transient('esp_protected_posts');
