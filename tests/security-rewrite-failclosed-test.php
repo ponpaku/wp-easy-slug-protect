@@ -206,19 +206,29 @@ check(ESP_Media_Protection::ensure_rewrite_policy() === true,
 check(ESP_Media_Protection::can_assign_protected_media() === false,
     'unknown Rewrite policy prevents assigning first protected image');
 $GLOBALS['enabled'] = false;
+check(ESP_Media_Protection::can_enable_media_protection() === true,
+    'OFF to ON pre-save validation checks only zero protected media');
+check(file_get_contents($file) === $foreign,
+    'pre-save validation never installs Rewrite, even if an option write subsequently fails');
+$wpdb->count = null;
+$wpdb->last_error = 'DB unavailable';
 check(ESP_Media_Protection::can_enable_media_protection() === false,
-    'OFF to ON rewrite preflight rejects a locked file');
+    'OFF to ON rejects unknown protection state without touching Rewrite');
+check(file_get_contents($file) === $foreign,
+    'DB-failed setting save cannot alter foreign Rewrite rules');
+$wpdb->count = 0;
+$wpdb->last_error = '';
 flock($writeLock, LOCK_UN);
 fclose($writeLock);
-check(ESP_Media_Protection::can_enable_media_protection() === true,
-    'OFF to ON preflight installs the required Rewrite before saving settings');
-check($matchesPolicy->invoke(null, true) === true,
-    'pre-installed enabled Rewrite is complete even while settings are still OFF');
 $GLOBALS['enabled'] = true;
+check($media->update_htaccess() === true,
+    'confirmed settings save installs Rewrite in post-save handler');
+check($matchesPolicy->invoke(null, true) === true,
+    'post-save enabled Rewrite is complete');
 check(ESP_Media_Protection::can_assign_protected_media() === true,
     'protected metadata becomes assignable only with active Rewrite');
-check(file_get_contents($file) !== $foreign,
-    'preflight retains foreign rules while adding ESP rules');
+check(strpos(file_get_contents($file), $foreign) !== false,
+    'post-save Rewrite preserves foreign rules');
 
 // uploadsのルートがシンボリックリンクでも、実体ディレクトリ内の一時ファイルを
 // 安全に置換できることを検証する（PHPのtempnam()はリンク先を返す場合がある）。
