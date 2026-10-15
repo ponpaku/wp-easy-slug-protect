@@ -24,6 +24,8 @@ jobs:
         run: php tests/security-rate-limit-test.php
       - name: Test InnoDB and rate limit schema validation
         run: php tests/security-schema-test.php
+      - name: Test missing migration marker compatibility
+        run: php tests/security-migration-marker-test.php
       - name: Test AVIF media protection and rewrite coverage
         run: php tests/security-avif-test.php
       - name: Test fail-closed rewrite replacement
