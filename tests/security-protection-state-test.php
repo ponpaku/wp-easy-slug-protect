@@ -259,6 +259,7 @@ $request_unrelated = new class {
 };
 check($media_rest(null, null, $request_media) instanceof WP_Error &&
     $media_rest(null, null, $request_media)->get_error_data()['status'] === 503 &&
+    $media_rest('early_response', null, $request_media) instanceof WP_Error &&
     $media_rest(null, null, $request_unrelated) === null,
     'R02: media-only failure rejects REST media but not unrelated REST');
 $media_redirect = $GLOBALS['actions']['template_redirect'][0][0];
@@ -300,8 +301,9 @@ $aggregate_denied = false;
 try { $path_redirect(); } catch (RuntimeException $e) { $aggregate_denied = true; }
 check($aggregate_denied, 'R02: archive/feed/search-style aggregates remain denied');
 $protected_rest = $GLOBALS['filters']['rest_pre_dispatch'][0][0];
-check($protected_rest(null, null, $request_unrelated) instanceof WP_Error,
-    'R02: anonymous REST stays closed when protected paths exist and filters are absent');
+check($protected_rest(null, null, $request_unrelated) instanceof WP_Error &&
+    $protected_rest('early_response', null, $request_unrelated) instanceof WP_Error,
+    'R02: anonymous REST stays closed even if another filter pre-populated a response');
 
 // 設定破損・欠損は例外として広範囲を拒否する。
 $GLOBALS['options'][ESP_Config::OPTION_KEY] = false;
