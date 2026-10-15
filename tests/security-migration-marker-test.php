@@ -69,11 +69,26 @@ check_marker(serialize($GLOBALS['options'][ESP_Config::OPTION_KEY]) === $origina
     $protected_media_path_id === $id && $wpdb->writes === 0,
     'existing path ID and attached media reference stay unchanged');
 
+// 版印が古いだけの完全移行済みサイトでもIDを書き換えない。
+$GLOBALS['options']['esp_db_version'] = 0;
+check_marker($setup->update_check() === true &&
+    get_option('esp_db_version') === ESP_Config::OPTION_DEFAULTS['db_version'] &&
+    serialize($GLOBALS['options'][ESP_Config::OPTION_KEY]) === $original &&
+    $wpdb->writes === 0,
+    'stale version-zero marker on completed schema preserves existing path IDs');
+
 unset($GLOBALS['options']['esp_db_version']);
 $wpdb->schema_complete = false;
 check_marker($setup->update_check() === false &&
     !array_key_exists('esp_db_version', $GLOBALS['options']) && $wpdb->writes === 0,
     'unknown or incomplete schema is not treated as old version zero');
+// 旧版の移行が部分的に終わりパスIDだけ存在する場合も、
+ // V1処理を再適用せず管理者による復旧を待つ。
+$GLOBALS['options']['esp_db_version'] = 0;
+check_marker($setup->update_check() === false && $wpdb->writes === 0 &&
+    $GLOBALS['options'][ESP_Config::OPTION_KEY]['path'][$id]['id'] === $id,
+    'incomplete schema with existing IDs refuses destructive re-migration');
+unset($GLOBALS['options']['esp_db_version']);
 $wpdb->schema_complete = true;
 $GLOBALS['options'][ESP_Config::OPTION_KEY]['path'] = [
     $id => ['id' => 'path_mismatched', 'path' => '/members/'],
