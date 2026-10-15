@@ -46,7 +46,7 @@ class Easy_Slug_Protect {
     /**
      * 依存ファイルの読み込み
      */
-    private function load_dependencies() {
+    public static function load_dependencies() {
         // コアクラスの読み込み
         require_once ESP_PATH . 'includes/class-esp-core.php';
         require_once ESP_PATH . 'includes/class-esp-setup.php';
@@ -166,9 +166,17 @@ class Easy_Slug_Protect {
  * プラグインの有効化時の処理
  */
 function esp_activate() {
-    require_once ESP_PATH . 'includes/class-esp-setup.php';
+    // WordPressの初回有効化ではplugins_loadedが再実行されない。
+    // 通常起動と同じ依存クラスを明示的にロードしてから厳密検証する。
+    Easy_Slug_Protect::load_dependencies();
     $setup = new ESP_Setup();
-    $setup->activate();
+    if (!$setup->activate()) {
+        wp_die(
+            __('Easy Slug Protect: 保護状態の初期検証に失敗しました。有効化を中止し、DBとuploads/.htaccessを確認してください。', ESP_Config::TEXT_DOMAIN),
+            '',
+            ['response' => 500]
+        );
+    }
 }
 register_activation_hook(__FILE__, 'esp_activate');
 
