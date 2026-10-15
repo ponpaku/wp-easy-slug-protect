@@ -89,12 +89,14 @@ $wpdb->count = '';
 $wpdb->last_error = '';
 check($media->update_htaccess() === true, 'Rewrite policy also ignores invalid COUNT results');
 $wpdb->count = 1;
-check(ESP_Media_Protection::can_disable_media_protection() === false,
-    'pre-save guard refuses OFF when protected media exists');
+check(ESP_Media_Protection::can_disable_media_protection() === true &&
+    ESP_Media_Protection::protected_media_records_exist() === true,
+    'intentional OFF permits protected records while surfacing warning state');
 $wpdb->count = null;
 $wpdb->last_error = 'DB unavailable';
-check(ESP_Media_Protection::can_disable_media_protection() === false,
-    'pre-save guard refuses OFF when protected media query fails');
+check(ESP_Media_Protection::can_disable_media_protection() === false &&
+    ESP_Media_Protection::protected_media_records_exist() === null,
+    'unknown DB state rejects OFF even with administrator confirmation');
 $wpdb->count = 0;
 $wpdb->last_error = '';
 check(ESP_Media_Protection::can_disable_media_protection() === true,
