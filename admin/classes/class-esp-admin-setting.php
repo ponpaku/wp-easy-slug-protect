@@ -117,17 +117,25 @@ class ESP_Settings {
             !array_key_exists('enabled', $old_media) || (bool) $old_media['enabled'];
         $new_enabled = !empty($sanitized['media']['enabled']);
 
-        if (!$old_enabled && $new_enabled &&
-            !ESP_Media_Protection::can_enable_media_protection()) {
-            // 既存の保護メタがあれば、設定をONにする前にRewriteの設置を必須とする。
-            // DB件数が不明、またはRewrite設置に失敗したときは旧OFF設定を維持。
-            $sanitized['media']['enabled'] = false;
-            add_settings_error(
-                ESP_Config::OPTION_KEY,
-                'esp_media_enable_rejected',
-                __('保護メディアの状態を確認できないか、配信保護ルールを安全に設置できませんでした。ONへの変更は保存されていません。', ESP_Config::TEXT_DOMAIN),
-                'error'
-            );
+        if (!$old_enabled && $new_enabled) {
+            if (!ESP_Media_Protection::can_enable_media_protection()) {
+                // 既存の保護メタがあれば、設定をONにする前にRewriteの設置を必須とする。
+                // DB件数が不明、またはRewrite設置に失敗したときは旧OFF設定を維持。
+                $sanitized['media']['enabled'] = false;
+                add_settings_error(
+                    ESP_Config::OPTION_KEY,
+                    'esp_media_enable_rejected',
+                    __('保護メディアの状態を確認できないか、配信保護ルールを安全に設置できませんでした。ONへの変更は保存されていません。', ESP_Config::TEXT_DOMAIN),
+                    'error'
+                );
+            } else {
+                // LiteSpeedで保存前のRewrite設置が初回キーを作った場合、
+                // options.php の後段保存が古い空キーで上書きしないよう引き継ぐ。
+                $key = ESP_Media_Protection::get_litespeed_key_value();
+                if ($key !== '') {
+                    $sanitized['media'][ESP_Media_Protection::OPTION_LITESPEED_KEY] = $key;
+                }
+            }
         }
 
         if ($old_enabled && !$new_enabled) {
