@@ -135,6 +135,8 @@ function add_action($hook, $callback, $priority = 10, $args = 1) {
 function plugin_basename($file) { return 'easy-slug-protect/easy-slug-protect.php'; }
 function current_user_can($capability) { return $capability === 'manage_options' && ($GLOBALS['test_manage_options'] ?? true); }
 function is_singular() { return $GLOBALS['test_singular'] ?? true; }
+function is_front_page() { return $GLOBALS['test_front_page'] ?? false; }
+function is_home() { return $GLOBALS['test_home'] ?? false; }
 function is_attachment() { return $GLOBALS['test_attachment'] ?? false; }
 function get_queried_object_id() { return $GLOBALS['test_queried_id'] ?? 42; }
 function get_permalink($id) { return $GLOBALS['test_permalink'] ?? 'https://example.com/about/'; }
@@ -296,6 +298,11 @@ $canonical_denied = false;
 try { $path_redirect(); } catch (RuntimeException $e) { $canonical_denied = true; }
 check($canonical_denied, 'R02: query-ID alias of protected permalink cannot bypass deny');
 $GLOBALS['test_permalink'] = 'https://example.com/about/';
+$GLOBALS['test_front_page'] = true;
+$front_denied = false;
+try { $path_redirect(); } catch (RuntimeException $e) { $front_denied = true; }
+check($front_denied, 'R02: static front page is treated as potentially aggregate content');
+$GLOBALS['test_front_page'] = false;
 $GLOBALS['test_singular'] = false;
 $aggregate_denied = false;
 try { $path_redirect(); } catch (RuntimeException $e) { $aggregate_denied = true; }
