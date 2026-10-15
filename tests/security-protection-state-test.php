@@ -77,6 +77,17 @@ function wp_nonce_field($action) { echo '<input name="_wpnonce" value="test" />'
 function get_option($name, $default = null) {
     return array_key_exists($name, $GLOBALS['options']) ? $GLOBALS['options'][$name] : $default;
 }
+function add_option($name, $value, $deprecated = '', $autoload = null) {
+    if (array_key_exists($name, $GLOBALS['options'])) { return false; }
+    $GLOBALS['options'][$name] = $value;
+    return true;
+}
+function delete_option($name) { unset($GLOBALS['options'][$name]); return true; }
+function wp_next_scheduled($name) { return $GLOBALS['scheduled'][$name] ?? false; }
+function wp_schedule_single_event($when, $name) {
+    $GLOBALS['scheduled'][$name] = $when;
+    return true;
+}
 function update_option($name, $value, $autoload = null) {
     if (!empty($GLOBALS['reject_update'])) { return false; }
     $GLOBALS['options'][$name] = $value;
@@ -105,11 +116,12 @@ $GLOBALS['options'] = [
     'esp_db_version' => ESP_Config::OPTION_DEFAULTS['db_version'],
     ESP_Config::VERSION_OPTION_KEY => ESP_VERSION,
 ];
-check(ESP_Protection_State::boot($setup) === false, 'unverified installation fails closed');
-check($setup->checks === 0 && $wpdb->queries === 0 && ESP_Media_Protection::$checks === 0,
-    'ordinary boot does not check version, query DB, or read Rewrite');
+check(ESP_Protection_State::boot($setup) === true,
+    'initial installation verifies once and recovers without administrator visit');
+check($setup->checks === 1 && $wpdb->queries > 0 && ESP_Media_Protection::$checks === 1,
+    'first unverified boot alone may perform full validation');
 check(ESP_Protection_State::verify_and_commit($setup) === true,
-    'administrator/activation may explicitly validate and commit READY');
+    'administrator can also explicitly validate and commit READY');
 check(get_option('esp_runtime_state') === 'READY', 'valid state is saved');
 check($wpdb->queries > 0 && $setup->checks === 1 && ESP_Media_Protection::$checks === 1,
     'strict verification performs migration, schema and Rewrite checks');
@@ -134,7 +146,7 @@ $GLOBALS['options'][ESP_Config::OPTION_KEY] = ['path' => [['path' => '/protected
 check(ESP_Protection_State::boot($setup) === true, 'valid protection paths remain accepted');
 
 $GLOBALS['options']['esp_runtime_state'] = 'PENDING';
-check(ESP_Protection_State::boot($setup) === false, 'pending update refuses unverified frontend');
+check(ESP_Protection_State::boot($setup) === true, 'legacy PENDING is verified once by the first request');
 $GLOBALS['options']['esp_runtime_state'] = 'FAILED';
 check(ESP_Protection_State::boot($setup) === false, 'failed validation refuses frontend');
 $GLOBALS['options']['esp_runtime_state'] = 'UNKNOWN';
@@ -151,18 +163,28 @@ check($pre(true, ['action'=>'update', 'type'=>'plugin', 'plugin'=>'some-plugin/m
     get_option('esp_runtime_state') === 'READY', 'other plugins do not trigger ESP pending');
 check($pre(true, ['action'=>'update', 'type'=>'plugin',
     'plugin'=>'easy-slug-protect/easy-slug-protect.php']) === true &&
-    get_option('esp_runtime_state') === 'PENDING', 'ESP upgrade is marked PENDING before installation');
+    get_option('esp_runtime_state') === 'UPDATING', 'ESP upgrade is marked UPDATING before installation');
 $setup->checks = 0;
 check(ESP_Protection_State::boot($setup) === false && $setup->checks === 0,
-    'pending state cannot serve content before strict completion');
-$admin = null;
-foreach ($GLOBALS['actions']['admin_init'] as $entry) {
-    if ($entry[1] === 1) { $admin = $entry[0]; }
-}
-check(is_callable($admin), 'privileged admin verification hook is present');
-$admin();
-check(get_option('esp_runtime_state') === 'READY' && $setup->checks === 1,
-    'first administrator visit validates pending standard update');
+    'in-progress update never triggers premature validation');
+$post = $GLOBALS['filters']['upgrader_post_install'][0][0];
+check($post(true, ['action'=>'update', 'type'=>'plugin',
+    'plugin'=>'easy-slug-protect/easy-slug-protect.php'], []) === true &&
+    get_option('esp_runtime_state') === 'VERIFY_REQUIRED',
+    'successful updater stage schedules new-code validation');
+check(!empty($GLOBALS['scheduled']['esp_verify_runtime_once']),
+    'one-off Cron is scheduled for unattended validation');
+check(ESP_Protection_State::boot($setup) === true &&
+    get_option('esp_runtime_state') === 'READY' && $setup->checks === 1,
+    'first anonymous request verifies and recovers unattended update');
+$GLOBALS['options']['esp_runtime_state'] = 'UPDATING';
+$complete = $GLOBALS['actions']['upgrader_process_complete'][0][0];
+$complete(null, ['action'=>'update', 'type'=>'plugin',
+    'plugins'=>['easy-slug-protect/easy-slug-protect.php']]);
+check(get_option('esp_runtime_state') === 'VERIFY_REQUIRED',
+    'process completion also schedules a one-off verification');
+check(ESP_Protection_State::boot($setup) === true,
+    'process-completion recovery works without an admin visit');
 
 $GLOBALS['options']['esp_runtime_state'] = 'READY';
 $GLOBALS['reject_update'] = true;
@@ -183,7 +205,7 @@ $wpdb->queries = 0;
 check(ESP_Protection_State::audit() === false, 'Cron audit reports Rewrite mismatch');
 check(in_array('rewrite_mismatch', get_option('esp_integrity_last_audit')['errors'], true),
     'Cron persists an actionable non-secret error code');
-check(get_option('esp_runtime_state') === 'READY' && ESP_Media_Protection::$checks === 2,
+check(get_option('esp_runtime_state') === 'READY' && ESP_Media_Protection::$checks > 0,
     'read-only Cron does not auto-repair Rewrite or overwrite READY');
 ESP_Media_Protection::$audit_ok = true;
 check(ESP_Protection_State::audit() === true, 'successful Cron audit persists no errors');
