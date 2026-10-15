@@ -132,7 +132,19 @@ function add_action($hook, $callback, $priority = 10, $args = 1) {
     $GLOBALS['actions'][$hook][] = [$callback, $priority];
 }
 function plugin_basename($file) { return 'easy-slug-protect/easy-slug-protect.php'; }
-function current_user_can($capability) { return $capability === 'manage_options'; }
+function current_user_can($capability) { return $capability === 'manage_options' && ($GLOBALS['test_manage_options'] ?? true); }
+function is_singular() { return $GLOBALS['test_singular'] ?? true; }
+function is_attachment() { return $GLOBALS['test_attachment'] ?? false; }
+function get_queried_object_id() { return $GLOBALS['test_queried_id'] ?? 42; }
+function get_permalink($id) { return $GLOBALS['test_permalink'] ?? 'https://example.com/about/'; }
+function home_url($path = '') { return 'https://example.com' . $path; }
+function get_query_var($name, $default = null) { return $GLOBALS['test_query_vars'][$name] ?? $default; }
+function wp_doing_ajax() { return $GLOBALS['test_doing_ajax'] ?? false; }
+function nocache_headers() {}
+function status_header($status) { $GLOBALS['test_http_status'] = $status; }
+function wp_die($message, $title = '', $options = []) {
+    throw new RuntimeException('wp_die_' . ($options['response'] ?? 0));
+}
 function add_menu_page($page_title, $menu_title, $capability, $menu_slug, $callback, $icon = '', $position = null) {
     $GLOBALS['admin_menu'] = compact('page_title', 'menu_title', 'capability', 'menu_slug', 'callback');
 }
@@ -213,6 +225,101 @@ check(ESP_Protection_State::boot($setup) === false, 'unknown state refuses front
 $rest = $GLOBALS['filters']['rest_pre_dispatch'][0][0];
 check($rest(null) instanceof WP_Error && $rest(null)->get_error_data()['status'] === 503,
     'REST access refused when protection state unknown');
+
+
+// R02: 設定が判明している場合は状態FAILEDだけではサイト全体を止めない。
+// 以後は一つのPHPプロセス内で複数リクエストを模擬するためフックを初期化する。
+$GLOBALS['filters']['rest_pre_dispatch'] = [];
+$GLOBALS['actions']['template_redirect'] = [];
+$GLOBALS['actions']['admin_init'] = [];
+$GLOBALS['options']['esp_runtime_state'] = 'FAILED';
+$GLOBALS['options'][ESP_Config::OPTION_KEY] = ['path' => [], 'media' => ['enabled' => false]];
+$checks_before = $setup->checks;
+check(ESP_Protection_State::boot($setup) === false &&
+    $setup->checks === $checks_before &&
+    empty($GLOBALS['actions']['template_redirect']) &&
+    empty($GLOBALS['filters']['rest_pre_dispatch']),
+    'R02: path empty and explicitly media OFF keeps unrelated WordPress content available');
+
+// 設定上は保護パス0件でも、media ON中のPHP配信は保護ゲートを通す。
+$GLOBALS['options'][ESP_Config::OPTION_KEY] = ['path' => [], 'media' => ['enabled' => true]];
+$GLOBALS['filters']['rest_pre_dispatch'] = [];
+$GLOBALS['actions']['template_redirect'] = [];
+check(ESP_Protection_State::boot($setup) === false &&
+    !empty($GLOBALS['actions']['template_redirect']),
+    'R02: media ON and non-READY installs an explicit PHP media deny gate');
+$GLOBALS['test_manage_options'] = false;
+$media_rest = $GLOBALS['filters']['rest_pre_dispatch'][0][0];
+$request_media = new class {
+    public function get_route() { return '/wp/v2/media/5'; }
+};
+$request_unrelated = new class {
+    public function get_route() { return '/wp/v2/types'; }
+};
+check($media_rest(null, null, $request_media) instanceof WP_Error &&
+    $media_rest(null, null, $request_media)->get_error_data()['status'] === 503 &&
+    $media_rest(null, null, $request_unrelated) === null,
+    'R02: media-only failure rejects REST media but not unrelated REST');
+$media_redirect = $GLOBALS['actions']['template_redirect'][0][0];
+$GLOBALS['wp'] = (object) ['request' => 'about', 'query_vars' => []];
+$GLOBALS['test_singular'] = true;
+$media_redirect(); // unrelated single page is not denied
+$_GET['esp-media'] = 'private/photo.jpg';
+$media_denied = false;
+try { $media_redirect(); } catch (RuntimeException $e) { $media_denied = $e->getMessage() === 'wp_die_503'; }
+unset($_GET['esp-media']);
+check($media_denied && $GLOBALS['test_http_status'] === 503,
+    'R02: explicitly routed media cannot be delivered on failed startup');
+
+// 保護パスが既知でも集約表示/正規URL/RESTを漏洩させず、無関係な単体ページは維持。
+$GLOBALS['options'][ESP_Config::OPTION_KEY] = [
+    'path' => [['path' => '/members', 'id' => 'path_1']],
+    'media' => ['enabled' => false],
+];
+$GLOBALS['filters']['rest_pre_dispatch'] = [];
+$GLOBALS['actions']['template_redirect'] = [];
+check(ESP_Protection_State::boot($setup) === false,
+    'R02: known protected paths remain non-READY without normal auth init');
+$path_redirect = $GLOBALS['actions']['template_redirect'][0][0];
+$GLOBALS['wp'] = (object) ['request' => 'about', 'query_vars' => []];
+$GLOBALS['test_permalink'] = 'https://example.com/about/';
+$path_redirect(); // unrelated singular
+$GLOBALS['wp']->request = 'members/secret';
+$protected_denied = false;
+try { $path_redirect(); } catch (RuntimeException $e) { $protected_denied = true; }
+check($protected_denied, 'R02: known protected URL is refused while normal auth is unavailable');
+$GLOBALS['wp']->request = '';
+$GLOBALS['test_permalink'] = 'https://example.com/members/secret/';
+$canonical_denied = false;
+try { $path_redirect(); } catch (RuntimeException $e) { $canonical_denied = true; }
+check($canonical_denied, 'R02: query-ID alias of protected permalink cannot bypass deny');
+$GLOBALS['test_permalink'] = 'https://example.com/about/';
+$GLOBALS['test_singular'] = false;
+$aggregate_denied = false;
+try { $path_redirect(); } catch (RuntimeException $e) { $aggregate_denied = true; }
+check($aggregate_denied, 'R02: archive/feed/search-style aggregates remain denied');
+$protected_rest = $GLOBALS['filters']['rest_pre_dispatch'][0][0];
+check($protected_rest(null, null, $request_unrelated) instanceof WP_Error,
+    'R02: anonymous REST stays closed when protected paths exist and filters are absent');
+
+// 設定破損・欠損は例外として広範囲を拒否する。
+$GLOBALS['options'][ESP_Config::OPTION_KEY] = false;
+$GLOBALS['filters']['rest_pre_dispatch'] = [];
+$GLOBALS['actions']['template_redirect'] = [];
+check(ESP_Protection_State::boot($setup) === false,
+    'R02: unreadable path settings must never be treated as empty paths');
+$broken_rest = $GLOBALS['filters']['rest_pre_dispatch'][0][0];
+check($broken_rest(null)->get_error_data()['status'] === 503,
+    'R02: unknown protection scope still refuses public REST');
+$broken_redirect = $GLOBALS['actions']['template_redirect'][0][0];
+$broken_denied = false;
+try { $broken_redirect(); } catch (RuntimeException $e) { $broken_denied = true; }
+check($broken_denied, 'R02: completely unknown protection scope fails closed');
+// 後続の既存更新テストは正常設定・管理者権限に戻して継続する。
+$GLOBALS['test_manage_options'] = true;
+$GLOBALS['test_singular'] = true;
+$GLOBALS['options'][ESP_Config::OPTION_KEY] = ['path' => [], 'media' => ['enabled' => true]];
+
 
 ESP_Protection_State::register_runtime_hooks($setup);
 check(isset($GLOBALS['filters']['upgrader_pre_install']), 'upgrade-preflight hook registered');
