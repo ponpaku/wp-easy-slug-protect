@@ -83,9 +83,17 @@ check_transition($GLOBALS['settings_errors'] === [],
 $GLOBALS['protected_records'] = null;
 $GLOBALS['settings_errors'] = [];
 $sanitized = $settings->sanitize_settings($input);
+check_transition($sanitized['media']['enabled'] === false &&
+    $GLOBALS['settings_errors'] === [],
+    'confirmed OFF remains allowed when the DB count is unavailable');
+
+unset($input['media']['confirm_disable']);
+$GLOBALS['settings_errors'] = [];
+$sanitized = $settings->sanitize_settings($input);
 check_transition($sanitized['media']['enabled'] === true &&
-    count($GLOBALS['settings_errors']) === 1,
-    'unknown DB state rejects disabling even with confirmation');
+    count($GLOBALS['settings_errors']) === 1 &&
+    $GLOBALS['settings_errors'][0]['code'] === 'esp_media_disable_rejected',
+    'unknown DB state still requires disclosure confirmation');
 
 $GLOBALS['protected_records'] = false;
 unset($input['media']['confirm_disable']);
