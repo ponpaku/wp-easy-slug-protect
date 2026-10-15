@@ -845,11 +845,14 @@ class ESP_Media_Protection {
             return false;
         }
         
-        // ベースディレクトリ外へのアクセスを防ぐ
-        if (strpos($file_path, $base_path) !== 0) {
+        // 接頭辞だけの比較ではuploads-backup等の兄弟ディレクトリを通してしまう。
+        // 実体パスでディレクトリ境界を確認し、リンク先の隠しファイルも拒否する。
+        $base_prefix = rtrim($base_path, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
+        if (strpos($file_path, $base_prefix) !== 0 ||
+            !self::is_allowed_media_request(substr($file_path, strlen($base_prefix)))) {
             return false;
         }
-        
+
         // ファイルが存在し、通常ファイルであることを確認
         if (!file_exists($file_path) || !is_file($file_path) || is_link($file_path)) {
             return false;
