@@ -35,10 +35,8 @@ class ESP_Setup {
 
         flush_rewrite_rules();
 
-        // 初回有効化は変更イベント。通常アクセスに初期化を先送りしない。
-        if (class_exists('ESP_Protection_State')) {
-            ESP_Protection_State::verify_and_commit($this);
-        }
+        // 初回・再有効化とも検証を必須にする。失敗を成功として扱わない。
+        return ESP_Protection_State::verify_and_commit($this);
     }
 
     /**
