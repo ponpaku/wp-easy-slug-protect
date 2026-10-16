@@ -1575,11 +1575,31 @@ class ESP_Media_Protection {
                     $denies = true;
                 }
             }
-            if (!$denies) {
+            if (!$denies && !self::is_non_media_literal_rewrite($matches[1], $matches[2], $flags)) {
                 return true;
             }
         }
         return false;
+    }
+
+    /**
+     * 第三者Rewriteとの非重複を確実に証明できる最小限の例外。
+     * 完全一致の相対ファイル名・拡張子だけに限定し、ESPが捕捉する
+     * 拡張子は除外する。任意の正規表現や外部設定の一般解析はしない。
+     */
+    private static function is_non_media_literal_rewrite($pattern, $target, $flags) {
+        if ($target !== '-' ||
+            !preg_match('/^\\^(?:[a-zA-Z0-9_-]+\\/)*[a-zA-Z0-9_-]+\\\\\\.([a-zA-Z0-9]+)\\$/D',
+                $pattern, $matches) ||
+            in_array(strtolower($matches[1]), self::PROTECTED_EXTENSIONS, true)) {
+            return false;
+        }
+        foreach ($flags as $flag) {
+            if (!in_array(strtoupper(trim($flag)), ['L', 'END', 'NC'], true)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
