@@ -1667,7 +1667,12 @@ class ESP_Media_Protection {
             $rules .= "{$indent}RewriteCond %{REQUEST_FILENAME} -f\n";
             $rules .= "{$indent}RewriteCond %{REQUEST_URI} ^.*\\.({$extensions_pattern})$ [NC]\n";
 
-            $rewrite_flags = $this->is_litespeed() ? '[L,QSA]' : '[L]';
+            // mod_rewriteは照合前にURLをデコードするため、&/+/#/?/空白等を
+            // クエリ値へ埋め込む前に再エスケープする。全面[B]はディレクトリの
+            // / まで%2Fにしてしまうので、Apache 2.4.26+の選択的[B=]を使う。
+            // 引用符は空白を含むフラグ引数に必要。通常のサブディレクトリは維持。
+            $rewrite_flags = $this->is_litespeed()
+                ? '"[B= %&+#?;,L,QSA]"' : '"[B= %&+#?;,L]"';
             $rules .= "{$indent}RewriteRule ^(.+)$ {$home_path}index.php?" . self::REWRITE_ENDPOINT . "=$1 {$rewrite_flags}\n";
         }
         
