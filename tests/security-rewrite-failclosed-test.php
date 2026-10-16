@@ -264,6 +264,34 @@ file_put_contents($file, $new);
 check($matchesPolicy->invoke(null, true) === true,
     'R01: safe rewrite order restores verified policy');
 
+// R02: Rewrite対象拡張子と明確に非重複な「完全一致・非置換」ルールのみ共存。
+$foreign_unrelated = "RewriteEngine On\nRewriteRule ^healthcheck\\.php$ - [L]\n";
+file_put_contents($file, $foreign_unrelated);
+check($media->update_htaccess() === true &&
+    $matchesPolicy->invoke(null, true) === true &&
+    strpos(file_get_contents($file), $foreign_unrelated) === 0,
+    'R02: literal healthcheck.php rule is provably outside ESP protected extensions');
+$foreign_protected_txt = "RewriteEngine On\nRewriteRule ^healthcheck\\.txt$ - [L]\n";
+file_put_contents($file, $foreign_protected_txt);
+$txt_conflict = $media->update_htaccess();
+check($txt_conflict instanceof WP_Error &&
+    $txt_conflict->get_error_code() === 'esp_htaccess_foreign_rewrite_conflict' &&
+    file_get_contents($file) === $foreign_protected_txt,
+    'R02: literal .txt is still protected and cannot bypass ESP');
+$foreign_image = "RewriteEngine On\nRewriteRule ^public\\.jpg$ - [L]\n";
+file_put_contents($file, $foreign_image);
+check($media->update_htaccess() instanceof WP_Error &&
+    file_get_contents($file) === $foreign_image,
+    'R02: exact image early-exit rule remains rejected');
+$foreign_wildcard = "RewriteEngine On\nRewriteRule ^anything.* - [L]\n";
+file_put_contents($file, $foreign_wildcard);
+check($media->update_htaccess() instanceof WP_Error,
+    'R02: unbounded Rewrite pattern is not accepted by narrow exception');
+file_put_contents($file, $new);
+check($matchesPolicy->invoke(null, true) === true,
+    'R02: restoring verified existing policy remains possible');
+
+
 check(strpos($new, 'avif') !== false, 'AVIF is covered in replacement');
 // LiteSpeedキー未設定の読取専用監査は、設定・Rewriteを一切変更しない。
 $_SERVER['SERVER_SOFTWARE'] = 'LiteSpeed';
