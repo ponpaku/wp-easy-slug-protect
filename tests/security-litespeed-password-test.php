@@ -35,8 +35,15 @@ function update_option($name, $value, $autoload = null) {
     // WordPress core calls sanitize_option() on update_option(), regardless
     // of whether the update originates in options.php or internal PHP code.
     $GLOBALS['sanitize_calls']++;
+    $old_value = $GLOBALS['stored_settings'];
     $value = call_user_func($GLOBALS['setting_sanitizer'], $value);
     $GLOBALS['stored_settings'] = $value;
+    // The option-update action also runs during internal key writes.
+    // Exercise that specific path here without bootstrapping unrelated WP hooks.
+    if (ESP_Media_Protection::is_committing_litespeed_key()) {
+        $GLOBALS['internal_update_hook_calls']++;
+        $GLOBALS['settings_instance']->handle_settings_update($old_value, $value);
+    }
     return true;
 }
 function register_setting($group, $key, $args) {
@@ -68,6 +75,8 @@ $GLOBALS['stored_settings']['path'] = [
     ],
 ];
 $settings = ESP_Settings::get_instance();
+$GLOBALS['settings_instance'] = $settings;
+$GLOBALS['internal_update_hook_calls'] = 0;
 $settings->register_settings();
 $reflection = new ReflectionClass('ESP_Media_Protection');
 $write_key = $reflection->getMethod('commit_litespeed_key');
@@ -77,6 +86,7 @@ $key = 'AABBCCDDEEFF11223344556677889900';
 check_password($write_key->invoke(null, $key) === true,
     'internal LiteSpeed key update succeeds through option sanitizer');
 check_password($GLOBALS['sanitize_calls'] === 1 &&
+    $GLOBALS['internal_update_hook_calls'] === 1 &&
     $GLOBALS['stored_settings']['media']['litespeed_key'] === $key &&
     $GLOBALS['stored_settings']['path'] === $initial_paths &&
     $GLOBALS['mail_count'] === 0,
