@@ -1749,6 +1749,11 @@ class ESP_Media_Protection {
      * 配置済みRewriteを照合した後に限ってキーを保存する。
      * 保存できなければ呼出元でRewriteを元の内容へ復元する。
      */
+    /** 内部キー保存中は、管理画面フォームのパスワードサニタイザを再実行しない。 */
+    public static function is_committing_litespeed_key() {
+        return self::$litespeed_key_commit_in_progress;
+    }
+
     private static function commit_litespeed_key($key) {
         $settings = ESP_Option::get_all_settings();
         if (!is_array($settings)) {
