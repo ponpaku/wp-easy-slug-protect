@@ -21,16 +21,56 @@ final class ESP_Protection_State {
     /** 同じPHPリクエストでの再入検証も防ぐ。 */
     private static $verification_in_progress = false;
 
+    private const VALID_STATES = [
+        'READY', 'PENDING', 'FAILED', 'UNKNOWN', 'UPDATING', 'VERIFY_REQUIRED',
+    ];
+
+    /**
+     * 永続状態の読取窓口。旧文字列形式は検証済み版を持たないものとして扱う。
+     * 不正なデータをREADYと解釈しない。未登録のみ初回検証の対象にする。
+     *
+     * @return array{state: string|null, version: string|null}
+     */
+    private static function get_runtime_state() {
+        $stored = get_option(self::RUNTIME_STATE_OPTION, null);
+        if ($stored === null) {
+            return ['state' => null, 'version' => null];
+        }
+        if (is_string($stored) && in_array($stored, self::VALID_STATES, true)) {
+            return ['state' => $stored, 'version' => null];
+        }
+        if (is_array($stored) &&
+            isset($stored['state']) && is_string($stored['state']) &&
+            in_array($stored['state'], self::VALID_STATES, true)) {
+            $version = $stored['version'] ?? null;
+            return [
+                'state' => $stored['state'],
+                'version' => is_string($version) && $version !== '' ? $version : null,
+            ];
+        }
+        return ['state' => 'UNKNOWN', 'version' => null];
+    }
+
+    /** READYは現在実行中のコードによる保護前提の検証を完了して初めて有効。 */
+    private static function is_verified_ready($runtime) {
+        return $runtime['state'] === 'READY' && $runtime['version'] === ESP_VERSION;
+    }
+
+    /** 旧READYやコードの手動差し替えも、一度限りの検証へ誘導する。 */
+    private static function needs_verification($runtime) {
+        return in_array($runtime['state'], [null, 'PENDING', 'VERIFY_REQUIRED'], true) ||
+            ($runtime['state'] === 'READY' && !self::is_verified_ready($runtime));
+    }
+
     public static function boot($setup) {
-        $state = get_option(self::RUNTIME_STATE_OPTION, null);
-        // READYの通常アクセスでは一切の更新・DB版・Rewrite検査を実行しない。
-        // 新しいコードが初めて起動した時だけ、管理者アクセスを待たずに検証する。
-        if (in_array($state, [null, 'PENDING', 'VERIFY_REQUIRED'], true)) {
+        $runtime = self::get_runtime_state();
+        // READYの通常アクセスでは軽量な版照合だけ。DB版・Rewriteの検査はしない。
+        if (self::needs_verification($runtime)) {
             self::verify_once($setup);
-            $state = get_option(self::RUNTIME_STATE_OPTION, null);
+            $runtime = self::get_runtime_state();
         }
         $settings = get_option(ESP_Config::OPTION_KEY, null);
-        if ($state === 'READY' && self::valid_settings($settings)) {
+        if (self::is_verified_ready($runtime) && self::valid_settings($settings)) {
             return true;
         }
         self::register_failure_hooks($settings);
@@ -93,9 +133,9 @@ final class ESP_Protection_State {
      * FAILED/UPDATINGを自動解除しない。復旧用の管理画面は利用できる。
      */
     private static function verify_once($setup) {
-        $state = get_option(self::RUNTIME_STATE_OPTION, null);
-        if (!in_array($state, [null, 'PENDING', 'VERIFY_REQUIRED'], true)) {
-            return $state === 'READY';
+        $runtime = self::get_runtime_state();
+        if (!self::needs_verification($runtime)) {
+            return self::is_verified_ready($runtime);
         }
         // WP-CLIのサーバー種別不明はRewriteの検証失敗を意味しない。
         // 検証待ちを維持し、Webサーバー情報のある最初のHTTPアクセスへ委ねる。
@@ -167,7 +207,7 @@ final class ESP_Protection_State {
     public static function after_install_package_result($result, $hook_extra) {
         if (self::is_esp_install($hook_extra) &&
             (is_wp_error($result) || $result === false) &&
-            get_option(self::RUNTIME_STATE_OPTION, null) === 'UPDATING') {
+            self::get_runtime_state()['state'] === 'UPDATING') {
             self::schedule_verification_after_shutdown();
         }
         return $result;
@@ -175,7 +215,7 @@ final class ESP_Protection_State {
 
     public static function upgrade_process_complete($upgrader, $hook_extra) {
         if (!self::is_esp_completed_update($hook_extra) ||
-            get_option(self::RUNTIME_STATE_OPTION, null) !== 'UPDATING') {
+            self::get_runtime_state()['state'] !== 'UPDATING') {
             return;
         }
         // 一括更新の一部失敗も扱う。成功時はpost_installですでに遷移済み。
@@ -188,20 +228,29 @@ final class ESP_Protection_State {
     }
 
     public static function mark_verification_required() {
-        if (get_option(self::RUNTIME_STATE_OPTION, null) === 'UPDATING' &&
+        if (self::get_runtime_state()['state'] === 'UPDATING' &&
             self::set_runtime_state('VERIFY_REQUIRED') &&
             !wp_next_scheduled('esp_verify_runtime_once')) {
             wp_schedule_single_event(time(), 'esp_verify_runtime_once');
         }
     }
 
-    /** 記録した状態だけを参照し、コード/DB版の検査は行わない。 */
+    /**
+     * state/versionを同じオプションに保存する。
+     * READYの確定時だけESP_VERSIONを刻み、それ以外は最後の検証済み版を保持。
+     * 版印は更新・移行の完了ではなく、保護前提の検証成功を意味する。
+     */
     private static function set_runtime_state($state) {
-        if (!in_array($state, ['READY', 'PENDING', 'FAILED', 'UNKNOWN', 'UPDATING', 'VERIFY_REQUIRED'], true)) {
+        if (!in_array($state, self::VALID_STATES, true)) {
             return false;
         }
-        update_option(self::RUNTIME_STATE_OPTION, $state, true);
-        return get_option(self::RUNTIME_STATE_OPTION, null) === $state;
+        $current = self::get_runtime_state();
+        $runtime = [
+            'state' => $state,
+            'version' => $state === 'READY' ? ESP_VERSION : $current['version'],
+        ];
+        update_option(self::RUNTIME_STATE_OPTION, $runtime, true);
+        return get_option(self::RUNTIME_STATE_OPTION, null) === $runtime;
     }
 
     /** 管理者による検証、プラグイン有効化、更新後の復旧でのみ実行する。 */
@@ -262,9 +311,9 @@ final class ESP_Protection_State {
             // GET_LOCK取得待ちの間に別プロセスがREADYへ遷移したなら、
             // 初回アクセスの自動検証をもう一度実行しない。
             if ($only_if_pending) {
-                $state = get_option(self::RUNTIME_STATE_OPTION, null);
-                if (!in_array($state, [null, 'PENDING', 'VERIFY_REQUIRED'], true)) {
-                    return $state === 'READY';
+                $runtime = self::get_runtime_state();
+                if (!self::needs_verification($runtime)) {
+                    return self::is_verified_ready($runtime);
                 }
             }
             return self::verify_and_commit_unlocked($setup, $lock);
@@ -345,7 +394,7 @@ final class ESP_Protection_State {
             if ($installed_version !== ESP_VERSION) {
                 $errors[] = 'version_unverified';
             }
-            if (get_option(self::RUNTIME_STATE_OPTION, null) !== 'READY') {
+            if (!self::is_verified_ready(self::get_runtime_state())) {
                 $errors[] = 'runtime_not_ready';
             }
         } catch (\Throwable $error) {
