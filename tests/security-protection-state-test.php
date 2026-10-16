@@ -181,6 +181,8 @@ check(ESP_Protection_State::verify_and_commit($setup) === true,
 check(get_option('esp_runtime_state') === runtime_value('READY'),
     'successful verification atomically stores READY with verified code version');
 check(saved_runtime_state() === 'READY', 'valid state is saved');
+check($wpdb->queries > 0 && $setup->checks === 2 && ESP_Media_Protection::$checks === 2,
+    'explicit verification performs migration, schema and Rewrite checks');
 
 // 旧文字列READYには検証済み版の証拠がない。現在版を勝手に付けず再検証する。
 $GLOBALS['options']['esp_runtime_state'] = 'READY';
@@ -214,8 +216,7 @@ $setup->checks = 0;
 check(ESP_Protection_State::boot($setup) === false && $setup->checks === 0,
     'malformed runtime option remains UNKNOWN without automatic promotion');
 $GLOBALS['options']['esp_runtime_state'] = runtime_value('READY');
-check($wpdb->queries > 0 && $setup->checks === 2 && ESP_Media_Protection::$checks === 2,
-    'explicit verification performs migration, schema and Rewrite checks');
+
 
 // 自動・手動の両検証は同じ排他を使い、同時移行を開始しない。
 $wpdb->lock_busy = true;
