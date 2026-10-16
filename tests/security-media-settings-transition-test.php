@@ -22,6 +22,7 @@ class ESP_Option {
 }
 class ESP_Media_Protection {
     const OPTION_LITESPEED_KEY = 'litespeed_key';
+    public static function is_committing_litespeed_key() { return false; }
     public static function get_litespeed_key_value() {
         return $GLOBALS['preinstalled_litespeed_key'] ?? '';
     }
