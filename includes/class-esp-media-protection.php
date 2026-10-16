@@ -1564,11 +1564,11 @@ class ESP_Media_Protection {
             if (preg_match('/^RewriteRule\\s/i', $line) !== 1) {
                 continue;
             }
-            if (!preg_match('/^RewriteRule\\s+\\S+\\s+\\S+(?:\\s+\\[([^\\]]*)\\])?(?:\\s*(?:#.*)?)?$/i',
+            if (!preg_match('/^RewriteRule\\s+(\\S+)\\s+(\\S+)(?:\\s+\\[([^\\]]*)\\])?(?:\\s*(?:#.*)?)?$/i',
                 $line, $matches)) {
                 return true;
             }
-            $flags = isset($matches[1]) ? explode(',', $matches[1]) : [];
+            $flags = isset($matches[3]) ? explode(',', $matches[3]) : [];
             $denies = false;
             foreach ($flags as $flag) {
                 if (in_array(strtoupper(trim($flag)), ['F', 'FORBIDDEN', 'G', 'GONE'], true)) {
