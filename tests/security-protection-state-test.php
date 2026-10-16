@@ -210,12 +210,6 @@ check(ESP_Protection_State::boot($setup) === true &&
     get_option('esp_runtime_state') === runtime_value('READY'),
     'retry after lock contention completes verification');
 
-// 壊れた配列を正常READYとして解釈しない。
-$GLOBALS['options']['esp_runtime_state'] = ['not_state' => 'READY'];
-$setup->checks = 0;
-check(ESP_Protection_State::boot($setup) === false && $setup->checks === 0,
-    'malformed runtime option remains UNKNOWN without automatic promotion');
-$GLOBALS['options']['esp_runtime_state'] = runtime_value('READY');
 
 
 // 自動・手動の両検証は同じ排他を使い、同時移行を開始しない。
@@ -543,5 +537,12 @@ $_SERVER['SERVER_SOFTWARE'] = 'Apache/2.4';
 check(ESP_Protection_State::boot($setup) === true,
     'R03: next HTTP request completes verification after safe CLI deferral');
 
+
+// 壊れた配列を正常READYとして解釈しない。
+$GLOBALS['options']['esp_runtime_state'] = ['not_state' => 'READY'];
+$setup->checks = 0;
+check(ESP_Protection_State::boot($setup) === false && $setup->checks === 0,
+    'malformed runtime option remains UNKNOWN without automatic promotion');
+$GLOBALS['options']['esp_runtime_state'] = runtime_value('READY');
 
 echo "All protection runtime tests passed.\n";
