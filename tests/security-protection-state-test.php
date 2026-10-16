@@ -198,17 +198,6 @@ check(ESP_Protection_State::boot($setup) === true && $setup->checks === 1 &&
     get_option('esp_runtime_state') === runtime_value('READY'),
     'mismatched READY version triggers one-shot verification and stamps current version');
 
-// バージョン不一致でもDBロック競合なら旧READYを受理せず、次回へ再試行。
-$GLOBALS['options']['esp_runtime_state'] = runtime_value('READY', '0.7.37');
-$wpdb->lock_busy = true;
-$setup->checks = 0;
-check(ESP_Protection_State::boot($setup) === false && $setup->checks === 0 &&
-    get_option('esp_runtime_state') === runtime_value('READY', '0.7.37'),
-    'version mismatch cannot bypass lock contention or falsely stamp READY');
-$wpdb->lock_busy = false;
-check(ESP_Protection_State::boot($setup) === true &&
-    get_option('esp_runtime_state') === runtime_value('READY'),
-    'retry after lock contention completes verification');
 
 
 
@@ -537,6 +526,18 @@ $_SERVER['SERVER_SOFTWARE'] = 'Apache/2.4';
 check(ESP_Protection_State::boot($setup) === true,
     'R03: next HTTP request completes verification after safe CLI deferral');
 
+
+// バージョン不一致でもDBロック競合なら旧READYを受理せず、次回へ再試行。
+$GLOBALS['options']['esp_runtime_state'] = runtime_value('READY', '0.7.37');
+$wpdb->lock_busy = true;
+$setup->checks = 0;
+check(ESP_Protection_State::boot($setup) === false && $setup->checks === 0 &&
+    get_option('esp_runtime_state') === runtime_value('READY', '0.7.37'),
+    'version mismatch cannot bypass lock contention or falsely stamp READY');
+$wpdb->lock_busy = false;
+check(ESP_Protection_State::boot($setup) === true &&
+    get_option('esp_runtime_state') === runtime_value('READY'),
+    'retry after lock contention completes verification');
 
 // 壊れた配列を正常READYとして解釈しない。
 $GLOBALS['options']['esp_runtime_state'] = ['not_state' => 'READY'];
