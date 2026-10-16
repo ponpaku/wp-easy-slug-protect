@@ -171,6 +171,12 @@ class ESP_Settings {
      * ハンドラーへのハンドラー
      */
     public function handle_settings_update($old_value, $value) {
+        // 内部LiteSpeedキー更新ではpath・キャッシュ・通知を再処理しない。
+        // Rewrite更新側は同じスコープでキーの適用・照合を実施する。
+        if (ESP_Media_Protection::is_committing_litespeed_key()) {
+            return;
+        }
+
         // パス設定の変更を処理
         if (isset($value['path'])) {
             $this->handle_update_path(
