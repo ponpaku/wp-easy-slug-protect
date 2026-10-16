@@ -64,9 +64,13 @@ $apache = $media_class->getMethod('get_htaccess_rules');
 $apache->setAccessible(true);
 $htaccess = $apache->invoke($media);
 check_avif(strpos($htaccess, 'avif') !== false && strpos($htaccess, 'webp') !== false, 'Apache/LiteSpeed rules protect AVIF and existing formats');
+check_avif(strpos($htaccess, 'esp-media=$1 "[B= %&+#?;,L]"') !== false,
+    'Apache media rewrite escapes query delimiters without escaping directory slashes');
 $_SERVER['SERVER_SOFTWARE'] = 'LiteSpeed/6.0';
 $htaccess = $apache->invoke($media);
 check_avif(strpos($htaccess, 'avif') !== false, 'LiteSpeed rules protect AVIF');
+check_avif(strpos($htaccess, 'esp-media=$1 "[B= %&+#?;,L,QSA]"') !== false,
+    'LiteSpeed media rewrite retains QSA and escapes reserved filename characters');
 $_SERVER['SERVER_SOFTWARE'] = 'nginx/1.27';
 $nginx = ESP_Media_Protection::generate_nginx_rules_for_admin();
 check_avif(is_array($nginx) && strpos($nginx['rules'], 'avif') !== false, 'Nginx rules protect AVIF');
