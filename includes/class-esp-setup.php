@@ -48,7 +48,25 @@ class ESP_Setup {
             return ESP_Protection_State::defer_cli_activation_verification();
         }
         // 初回・再有効化とも検証を必須にする。失敗を成功として扱わない。
-        return ESP_Protection_State::verify_and_commit($this);
+        $ready = ESP_Protection_State::verify_and_commit($this);
+        if (!$ready && class_exists('ESP_Media_Protection')) {
+            // 有効化失敗時はWordPressの無効化フックが実行されない。
+            // 保護メタ0件をDBから確定できたときだけ、残存Rewriteを撤去する。
+            // 保護メタあり／DB不明なら静的直URLの漏洩を避けるため維持する。
+            try {
+                if (ESP_Media_Protection::protected_media_records_exist() === false) {
+                    $cleanup = (new ESP_Media_Protection())->update_htaccess(false, true);
+                    if ($cleanup !== true) {
+                        error_log('ESP: Activation failed and media Rewrite cleanup failed; manual review required');
+                    }
+                } else {
+                    error_log('ESP: Activation failed; media Rewrite retained because protected records exist or are unknown');
+                }
+            } catch (\Throwable $error) {
+                error_log('ESP: Activation failed and media Rewrite cleanup could not be completed; manual review required');
+            }
+        }
+        return $ready;
     }
 
     /**
