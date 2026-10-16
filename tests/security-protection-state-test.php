@@ -57,7 +57,7 @@ class BootTestDB {
             if ($this->lock_busy || $this->lock_owner !== null) { return 0; }
             $this->lock_owner = $this->lock_connection;
             if ($this->complete_on_acquire) {
-                $GLOBALS['options']['esp_runtime_state'] = 'READY';
+                $GLOBALS['options']['esp_runtime_state'] = runtime_value('READY');
                 $this->complete_on_acquire = false;
             }
             return 1;
@@ -157,6 +157,13 @@ function check($ok, $msg) {
     if (!$ok) { fwrite(STDERR, "FAIL: $msg\n"); exit(1); }
     echo "PASS: $msg\n";
 }
+function runtime_value($state, $version = ESP_VERSION) {
+    return ['state' => $state, 'version' => $version];
+}
+function saved_runtime_state() {
+    $value = get_option('esp_runtime_state', null);
+    return is_array($value) ? ($value['state'] ?? null) : $value;
+}
 require __DIR__ . '/../includes/class-esp-protection-state.php';
 $wpdb = new BootTestDB();
 $setup = new TestSetup();
@@ -171,7 +178,42 @@ check($setup->checks === 1 && $wpdb->queries > 0 && ESP_Media_Protection::$check
     'first unverified boot alone may perform full validation');
 check(ESP_Protection_State::verify_and_commit($setup) === true,
     'administrator can also explicitly validate and commit READY');
-check(get_option('esp_runtime_state') === 'READY', 'valid state is saved');
+check(get_option('esp_runtime_state') === runtime_value('READY'),
+    'successful verification atomically stores READY with verified code version');
+check(saved_runtime_state() === 'READY', 'valid state is saved');
+
+// 旧文字列READYには検証済み版の証拠がない。現在版を勝手に付けず再検証する。
+$GLOBALS['options']['esp_runtime_state'] = 'READY';
+$setup->checks = 0;
+check(ESP_Protection_State::boot($setup) === true && $setup->checks === 1 &&
+    get_option('esp_runtime_state') === runtime_value('READY'),
+    'legacy string READY verifies once before converting to versioned state');
+
+// WordPress Upgraderのフックを通さずコードを更新した場合も検証し直す。
+$GLOBALS['options']['esp_runtime_state'] = runtime_value('READY', '0.7.37');
+$setup->checks = 0;
+check(ESP_Protection_State::boot($setup) === true && $setup->checks === 1 &&
+    get_option('esp_runtime_state') === runtime_value('READY'),
+    'mismatched READY version triggers one-shot verification and stamps current version');
+
+// バージョン不一致でもDBロック競合なら旧READYを受理せず、次回へ再試行。
+$GLOBALS['options']['esp_runtime_state'] = runtime_value('READY', '0.7.37');
+$wpdb->lock_busy = true;
+$setup->checks = 0;
+check(ESP_Protection_State::boot($setup) === false && $setup->checks === 0 &&
+    get_option('esp_runtime_state') === runtime_value('READY', '0.7.37'),
+    'version mismatch cannot bypass lock contention or falsely stamp READY');
+$wpdb->lock_busy = false;
+check(ESP_Protection_State::boot($setup) === true &&
+    get_option('esp_runtime_state') === runtime_value('READY'),
+    'retry after lock contention completes verification');
+
+// 壊れた配列を正常READYとして解釈しない。
+$GLOBALS['options']['esp_runtime_state'] = ['not_state' => 'READY'];
+$setup->checks = 0;
+check(ESP_Protection_State::boot($setup) === false && $setup->checks === 0,
+    'malformed runtime option remains UNKNOWN without automatic promotion');
+$GLOBALS['options']['esp_runtime_state'] = runtime_value('READY');
 check($wpdb->queries > 0 && $setup->checks === 2 && ESP_Media_Protection::$checks === 2,
     'explicit verification performs migration, schema and Rewrite checks');
 
@@ -180,7 +222,7 @@ $wpdb->lock_busy = true;
 $before_checks = $setup->checks;
 check(ESP_Protection_State::verify_and_commit($setup) === false &&
     $setup->checks === $before_checks &&
-    get_option('esp_runtime_state') === 'READY',
+    saved_runtime_state() === 'READY',
     'busy advisory lock refuses competing migration without changing state');
 $wpdb->lock_busy = false;
 $wpdb->lock_owner = 99;
@@ -217,7 +259,7 @@ check(ESP_Protection_State::boot($setup) === true, 'legacy PENDING is verified o
 $GLOBALS['options']['esp_runtime_state'] = 'VERIFY_REQUIRED';
 $GLOBALS['simulate_db_reconnect'] = true;
 check(ESP_Protection_State::boot($setup) === false &&
-    get_option('esp_runtime_state') === 'PENDING',
+    saved_runtime_state() === 'PENDING',
     'loss of MySQL lock during version check cannot publish READY or FAILED');
 unset($GLOBALS['simulate_db_reconnect']);
 $wpdb->lock_connection = 17;
@@ -336,28 +378,29 @@ $GLOBALS['options'][ESP_Config::OPTION_KEY] = ['path' => [], 'media' => ['enable
 ESP_Protection_State::register_runtime_hooks($setup);
 check(isset($GLOBALS['filters']['upgrader_pre_install']), 'upgrade-preflight hook registered');
 $pre = $GLOBALS['filters']['upgrader_pre_install'][0][0];
-$GLOBALS['options']['esp_runtime_state'] = 'READY';
+$GLOBALS['options']['esp_runtime_state'] = runtime_value('READY');
 check($pre(true, ['action'=>'update', 'type'=>'plugin', 'plugin'=>'some-plugin/main.php']) === true &&
-    get_option('esp_runtime_state') === 'READY', 'other plugins do not trigger ESP pending');
+    saved_runtime_state() === 'READY', 'other plugins do not trigger ESP pending');
 check($pre(true, ['action'=>'update', 'type'=>'plugin',
     'plugin'=>'easy-slug-protect/easy-slug-protect.php']) === true &&
-    get_option('esp_runtime_state') === 'UPDATING', 'ESP upgrade is marked UPDATING before installation');
+    get_option('esp_runtime_state') === runtime_value('UPDATING'),
+    'ESP upgrade is marked UPDATING without losing verified version');
 $setup->checks = 0;
 check(ESP_Protection_State::boot($setup) === false && $setup->checks === 0,
     'in-progress update never triggers premature validation');
 $post = $GLOBALS['filters']['upgrader_post_install'][0][0];
 check($post(true, ['action'=>'update', 'type'=>'plugin',
     'plugin'=>'easy-slug-protect/easy-slug-protect.php'], []) === true &&
-    get_option('esp_runtime_state') === 'UPDATING',
+    saved_runtime_state() === 'UPDATING',
     'successful updater stage waits until request shutdown to mark verification');
 foreach ($GLOBALS['actions']['shutdown'] as $entry) {
     if ($entry[1] === 200) { call_user_func($entry[0]); }
 }
-check(get_option('esp_runtime_state') === 'VERIFY_REQUIRED' &&
+check(saved_runtime_state() === 'VERIFY_REQUIRED' &&
     !empty($GLOBALS['scheduled']['esp_verify_runtime_once']),
     'one-off Cron is scheduled after update lifecycle has finished');
 check(ESP_Protection_State::boot($setup) === true &&
-    get_option('esp_runtime_state') === 'READY' && $setup->checks === 1,
+    saved_runtime_state() === 'READY' && $setup->checks === 1,
     'first anonymous request verifies and recovers unattended update');
 // WordPress CoreのPlugin_Upgrader::bulk_upgrade()は個別インストールに
 // type/actionを渡さない。AJAX更新もこの形式を使う。
@@ -365,24 +408,24 @@ $bulk_extra = [
     'plugin' => 'easy-slug-protect/easy-slug-protect.php',
     'temp_backup' => ['slug' => 'easy-slug-protect'],
 ];
-$GLOBALS['options']['esp_runtime_state'] = 'READY';
+$GLOBALS['options']['esp_runtime_state'] = runtime_value('READY');
 check($pre(true, ['plugin' => 'other-plugin/main.php']) === true &&
-    get_option('esp_runtime_state') === 'READY',
+    saved_runtime_state() === 'READY',
     'other plugin in bulk update never changes ESP state');
 check($pre(true, ['type'=>'plugin','action'=>'install',
     'plugin'=>'easy-slug-protect/easy-slug-protect.php']) === true &&
-    get_option('esp_runtime_state') === 'READY',
+    saved_runtime_state() === 'READY',
     'ESP installation is not mistaken for a plugin upgrade');
 check($pre(true, $bulk_extra) === true &&
-    get_option('esp_runtime_state') === 'UPDATING',
+    saved_runtime_state() === 'UPDATING',
     'bulk/AJAX update marks ESP UPDATING without type or action');
 check($post(true, $bulk_extra, []) === true &&
-    get_option('esp_runtime_state') === 'UPDATING',
+    saved_runtime_state() === 'UPDATING',
     'bulk/AJAX post-install waits for shutdown before completion');
 foreach ($GLOBALS['actions']['shutdown'] as $entry) {
     if ($entry[1] === 200) { call_user_func($entry[0]); }
 }
-check(get_option('esp_runtime_state') === 'VERIFY_REQUIRED',
+check(saved_runtime_state() === 'VERIFY_REQUIRED',
     'bulk/AJAX update schedules one-time validation at shutdown');
 check(ESP_Protection_State::boot($setup) === true,
     'anonymous traffic after successful bulk upgrade verifies once');
@@ -393,12 +436,12 @@ $complete = $GLOBALS['actions']['upgrader_process_complete'][0][0];
 $GLOBALS['options']['esp_runtime_state'] = 'UPDATING';
 $complete(null, ['action'=>'update', 'type'=>'plugin',
     'plugins'=>['easy-slug-protect/easy-slug-protect.php']]);
-check(get_option('esp_runtime_state') === 'UPDATING',
+check(saved_runtime_state() === 'UPDATING',
     'bulk process completion waits for shutdown rollback before verification');
 foreach ($GLOBALS['actions']['shutdown'] as $entry) {
     if ($entry[1] === 200) { call_user_func($entry[0]); }
 }
-check(get_option('esp_runtime_state') === 'VERIFY_REQUIRED',
+check(saved_runtime_state() === 'VERIFY_REQUIRED',
     'bulk completion at shutdown enables one-shot verification');
 check(ESP_Protection_State::boot($setup) === true,
     'bulk failure recovery verifies before reopening site');
@@ -407,35 +450,40 @@ $GLOBALS['options']['esp_runtime_state'] = 'UPDATING';
 $failed_result = $GLOBALS['filters']['upgrader_install_package_result'][0][0];
 $failure = new WP_Error('filesystem_failure', 'Install failed');
 check($failed_result($failure, $bulk_extra) === $failure &&
-    get_option('esp_runtime_state') === 'UPDATING',
+    saved_runtime_state() === 'UPDATING',
     'failed individual install stays UPDATING until rollback finishes');
 foreach ($GLOBALS['actions']['shutdown'] as $entry) {
     if ($entry[1] === 200) { call_user_func($entry[0]); }
 }
-check(get_option('esp_runtime_state') === 'VERIFY_REQUIRED',
+check(saved_runtime_state() === 'VERIFY_REQUIRED',
     'failed upgrade schedules verification after WordPress rollback');
 check(ESP_Protection_State::boot($setup) === true,
     'rolled-back update resumes only after strict validation');
 
-$GLOBALS['options']['esp_runtime_state'] = 'READY';
+$GLOBALS['options']['esp_runtime_state'] = runtime_value('READY');
 $GLOBALS['reject_update'] = true;
 $err = $pre(true, $bulk_extra);
 check($err instanceof WP_Error && $err->get_error_code() === 'esp_upgrade_pending_unavailable',
     'bulk/AJAX update blocked if UPDATING cannot be durably recorded');
 unset($GLOBALS['reject_update']);
 
+$GLOBALS['options']['esp_runtime_state'] = runtime_value('VERIFY_REQUIRED', '0.7.37');
 $setup->ok = false;
 check(ESP_Protection_State::verify_and_commit($setup) === false &&
-    get_option('esp_runtime_state') === 'FAILED', 'failed update validation persists FAILED');
+    saved_runtime_state() === 'FAILED' &&
+    get_option('esp_runtime_state') === runtime_value('FAILED', '0.7.37'),
+    'failed update validation preserves last verified version');
 $setup->ok = true;
-check(ESP_Protection_State::verify_and_commit($setup) === true, 'explicit validation recovers failed update');
+check(ESP_Protection_State::verify_and_commit($setup) === true &&
+    get_option('esp_runtime_state') === runtime_value('READY'),
+    'explicit validation recovers and stamps the current version');
 
 ESP_Media_Protection::$audit_ok = false;
 $wpdb->queries = 0;
 check(ESP_Protection_State::audit() === false, 'Cron audit reports Rewrite mismatch');
 check(in_array('rewrite_mismatch', get_option('esp_integrity_last_audit')['errors'], true),
     'Cron persists an actionable non-secret error code');
-check(get_option('esp_runtime_state') === 'READY' && ESP_Media_Protection::$checks > 0,
+check(saved_runtime_state() === 'READY' && ESP_Media_Protection::$checks > 0,
     'read-only Cron does not auto-repair Rewrite or overwrite READY');
 ESP_Media_Protection::$audit_ok = true;
 check(ESP_Protection_State::audit() === true, 'successful Cron audit persists no errors');
@@ -457,30 +505,30 @@ unset($_SERVER['SERVER_SOFTWARE']);
 $GLOBALS['options']['esp_runtime_state'] = 'VERIFY_REQUIRED';
 $before_cli_checks = $setup->checks;
 check(ESP_Protection_State::boot($setup) === false &&
-    get_option('esp_runtime_state') === 'VERIFY_REQUIRED' &&
+    saved_runtime_state() === 'VERIFY_REQUIRED' &&
     $setup->checks === $before_cli_checks,
     'WP-CLI without server identity defers verification without persisting FAILED');
 $cli_cron = $GLOBALS['actions']['esp_verify_runtime_once'][0][0];
 $cli_cron();
-check(get_option('esp_runtime_state') === 'VERIFY_REQUIRED' &&
+check(saved_runtime_state() === 'VERIFY_REQUIRED' &&
     $setup->checks === $before_cli_checks,
     'CLI-triggered verification Cron does not strand a valid site in FAILED');
 $_SERVER['SERVER_SOFTWARE'] = 'Apache/2.4';
 check(ESP_Protection_State::boot($setup) === true &&
-    get_option('esp_runtime_state') === 'READY' &&
+    saved_runtime_state() === 'READY' &&
     $setup->checks === $before_cli_checks + 1,
     'next HTTP server context can complete deferred strict verification');
 // CLI有効化時は保護メディアが無いことを確定できる時だけHTTP検証を延期する。
 unset($_SERVER['SERVER_SOFTWARE']);
-$GLOBALS['options']['esp_runtime_state'] = 'READY';
+$GLOBALS['options']['esp_runtime_state'] = runtime_value('READY');
 $GLOBALS['options'][ESP_Config::OPTION_KEY] = ['path' => [], 'media' => ['enabled' => true]];
 ESP_Media_Protection::$protected_records = false;
 check(ESP_Protection_State::defer_cli_activation_verification() === true &&
-    get_option('esp_runtime_state') === 'VERIFY_REQUIRED',
+    saved_runtime_state() === 'VERIFY_REQUIRED',
     'R03: CLI activation with zero protected media defers to verified HTTP startup');
 ESP_Media_Protection::$protected_records = true;
 check(ESP_Protection_State::defer_cli_activation_verification() === false &&
-    get_option('esp_runtime_state') === 'VERIFY_REQUIRED',
+    saved_runtime_state() === 'VERIFY_REQUIRED',
     'R03: CLI activation must not leave already-protected media without verified Rewrite');
 ESP_Media_Protection::$protected_records = null;
 check(ESP_Protection_State::defer_cli_activation_verification() === false,
