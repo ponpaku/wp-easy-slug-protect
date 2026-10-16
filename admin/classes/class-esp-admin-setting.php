@@ -80,6 +80,13 @@ class ESP_Settings {
      * 
      */
     public function sanitize_settings($input) {
+        // LiteSpeedの内部キー更新は設定フォーム送信ではない。WordPressの
+        // sanitize_option フックを経由しても、保護パス・パスワード・セッション
+        // 世代を再処理しない。元データはcommit_litespeed_key()が取得した設定全体。
+        if (ESP_Media_Protection::is_committing_litespeed_key()) {
+            return $input;
+        }
+
         $sanitized = array();
 
         // error_log('esp: '. json_encode($input));
