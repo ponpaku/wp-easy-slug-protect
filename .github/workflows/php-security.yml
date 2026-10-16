@@ -34,6 +34,8 @@ jobs:
         run: php tests/security-protection-state-test.php
       - name: Test first activation dependency bootstrap
         run: php tests/security-activation-bootstrap-test.php
+      - name: Test failed activation media Rewrite cleanup
+        run: php tests/security-activation-failure-test.php
       - name: Test safe media ON/OFF settings transitions
         run: php tests/security-media-settings-transition-test.php
       - name: Test LiteSpeed key rotation preserves protected-path passwords
