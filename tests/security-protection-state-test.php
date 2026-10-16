@@ -546,4 +546,21 @@ check(ESP_Protection_State::boot($setup) === false && $setup->checks === 0,
     'malformed runtime option remains UNKNOWN without automatic promotion');
 $GLOBALS['options']['esp_runtime_state'] = runtime_value('READY');
 
+// #44の正式な互換判定まで、古いコードへの置換を無条件にREADYへ戻さない。
+$GLOBALS['options']['esp_runtime_state'] = runtime_value('READY', '0.7.39');
+$setup->checks = 0;
+check(ESP_Protection_State::boot($setup) === false &&
+    $setup->checks === 0 &&
+    get_option('esp_runtime_state') === runtime_value('FAILED', '0.7.39'),
+    'downgrade from a newer verified code version is not silently certified READY');
+
+$GLOBALS['options']['esp_runtime_state'] = runtime_value('READY');
+$GLOBALS['options'][ESP_Config::VERSION_OPTION_KEY] = '0.7.39';
+$setup->checks = 0;
+check(ESP_Protection_State::verify_and_commit($setup) === false &&
+    $setup->checks === 0 &&
+    get_option('esp_runtime_state') === runtime_value('FAILED'),
+    'newer installed-version marker blocks implicit rollback certification');
+$GLOBALS['options'][ESP_Config::VERSION_OPTION_KEY] = ESP_VERSION;
+
 echo "All protection runtime tests passed.\n";
