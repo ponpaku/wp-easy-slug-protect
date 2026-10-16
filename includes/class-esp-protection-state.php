@@ -330,7 +330,19 @@ final class ESP_Protection_State {
         }
         $ready = false;
         try {
-            $ready = $setup->check_plugin_version() === true;
+            // #44の互換判定がない間、検証済み版や更新版印より古いコードを
+            // 単に「移行不要」と扱ってREADYにしない（手動ロールバックを含む）。
+            $last_verified = self::get_runtime_state()['version'];
+            $installed_version = get_option(ESP_Config::VERSION_OPTION_KEY, null);
+            $downgrade = ($last_verified !== null &&
+                    version_compare($last_verified, ESP_VERSION, '>')) ||
+                (is_string($installed_version) &&
+                    version_compare($installed_version, ESP_VERSION, '>'));
+            if ($downgrade) {
+                error_log('ESP: plugin downgrade requires explicit compatibility review');
+            } else {
+                $ready = $setup->check_plugin_version() === true;
+            }
             // バージョン移行の途中でDBが再接続されていれば以後は触らない。
             if (!self::owns_verification_lock($lock)) {
                 return false;
