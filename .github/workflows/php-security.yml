@@ -36,6 +36,8 @@ jobs:
         run: php tests/security-activation-bootstrap-test.php
       - name: Test safe media ON/OFF settings transitions
         run: php tests/security-media-settings-transition-test.php
+      - name: Test LiteSpeed key rotation preserves protected-path passwords
+        run: php tests/security-litespeed-password-test.php
       - name: Test safe uninstall Rewrite cleanup
         run: php tests/security-uninstall-rewrite-test.php
       - name: Test failure of authorization cache rebuilds
