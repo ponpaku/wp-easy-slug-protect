@@ -1,6 +1,7 @@
 <?php
 /** LiteSpeed key-only writes must never rehash saved protected-path passwords. */
 define('ABSPATH', __DIR__ . '/../');
+define('WEEK_IN_SECONDS', 604800);
 require __DIR__ . '/../includes/class-esp-config.php';
 require __DIR__ . '/../includes/class-esp-option.php';
 
