@@ -30,8 +30,10 @@ class ESP_Option {
 }
 class WP_Error {
     private $code;
-    public function __construct($code, $message) { $this->code = $code; }
+    private $message;
+    public function __construct($code, $message) { $this->code = $code; $this->message = $message; }
     public function get_error_code() { return $this->code; }
+    public function get_error_message() { return $this->message; }
 }
 class RewriteTestDB {
     public $postmeta = 'wp_postmeta';
@@ -67,7 +69,14 @@ function home_url($path = '') { return 'https://example.test' . $path; }
 function wp_upload_dir() { return ['basedir' => $GLOBALS['test_dir'], 'baseurl' => 'https://example.test/wp-content/uploads', 'error' => '']; }
 function get_query_var($key) { return $GLOBALS['test_media_query'] ?? ''; }
 function is_admin() { return false; }
-function current_user_can($capability) { return false; }
+function current_user_can($capability) { return !empty($GLOBALS['ajax_admin']); }
+function check_ajax_referer($action, $query_arg = false, $stop = true) { return true; }
+function wp_send_json_success($data) {
+    throw new RuntimeException('ajax:success:' . ($data['message'] ?? ''));
+}
+function wp_send_json_error($data, $status_code = null) {
+    throw new RuntimeException('ajax:error:' . (string) ($status_code ?? '') . ':' . ($data['message'] ?? ''));
+}
 function wp_die($message, $title = '', $args = []) {
     throw new RuntimeException('intercepted media ' . (is_array($args) ? ($args['response'] ?? 0) : $title));
 }
@@ -728,6 +737,54 @@ flock($cli_lock, LOCK_UN);
 fclose($cli_lock);
 check($media->update_htaccess(false, true) === true && file_get_contents($file) === $foreign,
     'R02: CLI can finish removal when writer lock is released');
+// AJAXのOFF・非Apache系: 削除失敗時に成功応答を返さない。
+$_SERVER['SERVER_SOFTWARE'] = 'nginx/1.27';
+$GLOBALS['enabled'] = false;
+$GLOBALS['ajax_admin'] = true;
+$enabledProp->setValue($media, false);
+file_put_contents($file, $foreign);
+try {
+    $media->ajax_reset_htaccess_rules();
+    check(false, 'AJAX should terminate after successful response');
+} catch (RuntimeException $error) {
+    check(strpos($error->getMessage(), 'ajax:success:') === 0,
+        'OFF on non-Apache with no ESP block reports success');
+}
+$esp_block = "# BEGIN ESP Media Protection\nRewriteEngine On\n# END ESP Media Protection\n";
+file_put_contents($file, $foreign . $esp_block);
+$ajax_lock = fopen($file . '.esp.lock', 'c');
+flock($ajax_lock, LOCK_EX);
+try {
+    $media->ajax_reset_htaccess_rules();
+    check(false, 'AJAX must not return normally after failed cleanup');
+} catch (RuntimeException $error) {
+    check(strpos($error->getMessage(), 'ajax:error::') === 0 &&
+        strpos($error->getMessage(), '別の保護ルール更新が進行中です') !== false,
+        'OFF on non-Apache reports Rewrite cleanup lock failure as error');
+}
+check(file_get_contents($file) === $foreign . $esp_block,
+    'failed AJAX cleanup preserves existing ESP and third-party Rewrite bytes');
+flock($ajax_lock, LOCK_UN);
+fclose($ajax_lock);
+try {
+    $media->ajax_reset_htaccess_rules();
+    check(false, 'AJAX should terminate after successful cleanup');
+} catch (RuntimeException $error) {
+    check(strpos($error->getMessage(), 'ajax:success:') === 0,
+        'OFF on non-Apache reports success only after removing the ESP block');
+}
+check(file_get_contents($file) === $foreign,
+    'successful AJAX cleanup preserves third-party Rewrite bytes');
+$enabledProp->setValue($media, true);
+$GLOBALS['enabled'] = true;
+try {
+    $media->ajax_reset_htaccess_rules();
+    check(false, 'AJAX should terminate after unsupported ON response');
+} catch (RuntimeException $error) {
+    check(strpos($error->getMessage(), 'ajax:error:400:') === 0,
+        'ON on non-Apache still returns the existing unsupported-server error');
+}
+unset($GLOBALS['ajax_admin']);
 $_SERVER['SERVER_SOFTWARE'] = 'Apache/2.4';
 
 @unlink($file);
