@@ -84,6 +84,9 @@ class Easy_Slug_Protect {
         // Coreのby-mid APIは通常のpostmeta事前フィルターを呼ばない。
         add_filter('update_post_metadata_by_mid', ['ESP_Authorization_Cache', 'guard_postmeta_update_by_mid'], 1, 4);
         add_filter('delete_post_metadata_by_mid', ['ESP_Authorization_Cache', 'guard_postmeta_delete_by_mid'], 1, 2);
+        // by-midで保護メタのキー自体が変わった場合、Coreの事後フックに
+        // 旧キーが含まれないため、事前に記録した旧スコープも失効させる。
+        add_action('updated_post_meta', ['ESP_Authorization_Cache', 'invalidate_after_meta_key_change'], 5, 4);
         // 管理画面・公開側の両方で、投稿メタ更新時の認可キャッシュ無効化を登録する。
         // ESP_Filter::init()は公開側のみで、一部の更新処理には間に合わない。
         foreach (['added_post_meta', 'updated_post_meta', 'deleted_post_meta'] as $hook) {
