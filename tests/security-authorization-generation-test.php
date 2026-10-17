@@ -140,6 +140,42 @@ check_auth(ESP_Authorization_Cache::guard_postmeta_update_by_mid(null, 9, 'plain
     ESP_Authorization_Cache::read('media', 'media-cache') === null,
     'removing the protected key by meta ID invalidates stale media authorization');
 
+// by-midは旧メタキーを更新後フックに渡さない。DB更新前に別リクエストが
+// 旧DB状態でキャッシュを再構築しても、更新後に旧スコープを再失効させる。
+$GLOBALS['by_mid_meta'][9]->meta_key = ESP_Media_Protection::META_KEY_PROTECTED_PATH;
+$before_rekey = ESP_Authorization_Cache::signature('media');
+check_auth(ESP_Authorization_Cache::publish('media', 'media-cache', $before_rekey,
+    ['one' => [42]], 60), 'by-mid media rekey starts with protected snapshot');
+check_auth(ESP_Authorization_Cache::guard_postmeta_update_by_mid(null, 9, 'plain',
+    '_unrelated') === null, 'by-mid media rekey guard permits invalidated old key');
+$race_signature = ESP_Authorization_Cache::signature('media');
+check_auth(ESP_Authorization_Cache::publish('media', 'media-cache', $race_signature,
+    ['one' => [42]], 60), 'concurrent request can build old DB state after pre-write invalidation');
+$GLOBALS['by_mid_meta'][9]->meta_key = '_unrelated';
+ESP_Authorization_Cache::invalidate_after_meta_key_change(9, 42, '_unrelated', 'plain');
+check_auth(ESP_Authorization_Cache::read('media', 'media-cache') === null,
+    'post-write by-mid rekey invalidates cache rebuilt from old protected media key');
+
+$GLOBALS['by_mid_meta'][11]->meta_key = ESP_Config::PERMALINK_PATH_META_KEY;
+check_auth(ESP_Authorization_Cache::guard_postmeta_update_by_mid(null, 11, 'other',
+    '_other_meta') === null, 'by-mid permalink rekey begins with old post scope');
+$post_race = ESP_Authorization_Cache::signature('post');
+check_auth(ESP_Authorization_Cache::publish('post', 'post-cache', $post_race,
+    ['one' => [42]], 60), 'post cache can rebuild during by-mid DB write');
+$GLOBALS['by_mid_meta'][11]->meta_key = '_other_meta';
+ESP_Authorization_Cache::invalidate_after_meta_key_change(11, 42, '_other_meta', 'other');
+check_auth(ESP_Authorization_Cache::read('post', 'post-cache') === null,
+    'post-write by-mid permalink rekey invalidates rebuilt old protected-post snapshot');
+
+$unrelated_signature = ESP_Authorization_Cache::signature('media');
+check_auth(ESP_Authorization_Cache::publish('media', 'media-cache', $unrelated_signature,
+    [], 60), 'fresh media cache can be published after old-key rekey');
+check_auth(ESP_Authorization_Cache::guard_postmeta_update_by_mid(null, 10, 'another',
+    '_other_meta') === null, 'unrelated by-mid rekey remains permitted');
+ESP_Authorization_Cache::invalidate_after_meta_key_change(10, 42, '_other_meta', 'another');
+check_auth(ESP_Authorization_Cache::read('media', 'media-cache') === [],
+    'unrelated by-mid rekey leaves media authorization cache untouched');
+
 // WP-CLIはSERVER_SOFTWAREがないので、Nginxと誤認して書込みを通してはならない。
 unset($_SERVER['SERVER_SOFTWARE']);
 check_auth(ESP_Authorization_Cache::guard_postmeta_write(null, 42,
