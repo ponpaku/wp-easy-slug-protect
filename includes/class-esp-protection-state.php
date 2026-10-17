@@ -353,7 +353,13 @@ final class ESP_Protection_State {
                 $stored = get_option('esp_db_version', null);
                 $required = (int) ESP_Config::OPTION_DEFAULTS['db_version'];
                 $known = is_int($stored) || (is_string($stored) && ctype_digit($stored));
-                $ready = (!$known || (int) $stored <= $required) &&
+                // 既存サイトではDB版印だけが欠落している場合がある。欠損を
+                // 未移行状態と決めつけず、保存済みpath IDと実スキーマの双方で
+                // 読み取り専用の互換性確認をする。不正な版印はREADYにしない。
+                $missing_marker = $stored === null || $stored === false || $stored === '';
+                $ready = ($known
+                    ? (int) $stored <= $required
+                    : ($missing_marker && self::has_stable_path_ids($settings['path']))) &&
                     self::verify_legacy_security_schema();
             }
             if (!self::owns_verification_lock($lock)) {
@@ -443,6 +449,26 @@ final class ESP_Protection_State {
             if (!is_array($path) || !isset($path['path']) ||
                 !is_string($path['path']) || !$path['path'] ||
                 trim($path['path'], " /\t\n\r\0\x0B") === '') {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * DB版印が欠落した既存サイトでは、旧V1移行が途中で止まって
+     * 保護path IDの参照関係が壊れていないことを確認する。
+     * 修復・ID再採番はここでは行わない（#44）。
+     */
+    private static function has_stable_path_ids($paths) {
+        if (!is_array($paths)) {
+            return false;
+        }
+        foreach ($paths as $key => $path) {
+            if (!is_string($key) || $key === '' ||
+                !is_array($path) || !isset($path['id'], $path['path']) ||
+                !is_string($path['id']) || $path['id'] !== $key ||
+                !is_string($path['path']) || trim($path['path'], " /\\t\\n\\r") === '') {
                 return false;
             }
         }
