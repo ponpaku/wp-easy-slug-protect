@@ -16,8 +16,22 @@ class UninstallTestDB {
     public $prefix = 'wp_';
     public $postmeta = 'wp_postmeta';
     public $queries = [];
+    public $meta_rows = [
+        ['meta_key' => '_esp_media_protected_path_id', 'post_id' => 123],
+        ['meta_key' => '_another_plugin_meta', 'post_id' => 123],
+    ];
     public function query($query) { $this->queries[] = $query; return 1; }
-    public function delete($table, $args) { return 1; }
+    public function delete($table, $args) {
+        if ($table !== $this->postmeta || !isset($args['meta_key'])) {
+            return 0;
+        }
+        $before = count($this->meta_rows);
+        $this->meta_rows = array_values(array_filter(
+            $this->meta_rows,
+            static function ($row) use ($args) { return $row['meta_key'] !== $args['meta_key']; }
+        ));
+        return $before - count($this->meta_rows);
+    }
 }
 $wpdb = new UninstallTestDB();
 function plugin_dir_path($file) { return dirname($file) . '/'; }
@@ -29,8 +43,15 @@ function check_uninstall($value, $message) {
     if (!$value) { fwrite(STDERR, "FAIL: $message\n"); exit(1); }
     echo "PASS: $message\n";
 }
+// 標準アンインストールは無効化済みプラグインの保護クラスをロードしない。
+check_uninstall(!class_exists('ESP_Media_Protection', false),
+    'uninstall starts without loading ESP_Media_Protection');
 // WordPressから削除を指示されたら、Rewrite保全に失敗しても削除処理は止めない。
 require __DIR__ . '/../uninstall.php';
+check_uninstall(!class_exists('ESP_Media_Protection', false),
+    'uninstall cleanup does not depend on the media class being loaded');
+check_uninstall($wpdb->meta_rows === [['meta_key' => '_another_plugin_meta', 'post_id' => 123]],
+    'uninstall removes protected-media postmeta and preserves unrelated postmeta');
 check_uninstall(file_get_contents($htaccess) === $initial_invalid,
     'uninstall leaves ambiguous third-party/ESP markers untouched');
 check_uninstall(count($wpdb->queries) === 4,
