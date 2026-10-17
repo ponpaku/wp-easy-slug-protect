@@ -229,6 +229,10 @@ check(ESP_Protection_State::boot($setup) === false &&
 $GLOBALS['options'][ESP_Config::OPTION_KEY] = $runtime_saved_settings;
 $GLOBALS['options']['esp_db_version'] = $runtime_saved_marker;
 $GLOBALS['options']['esp_runtime_state'] = runtime_value('READY');
+// このスタブは単一PHPプロセスで複数リクエストを模擬するため、先ほどの
+// FAILEDテストで登録された拒否フックを次の独立ケースへ持ち越さない。
+$GLOBALS['filters']['rest_pre_dispatch'] = [];
+$GLOBALS['actions']['template_redirect'] = [];
 
 // 旧文字列READYには検証済み版の証拠がない。現在版を勝手に付けず再検証する。
 $GLOBALS['options']['esp_runtime_state'] = 'READY';
