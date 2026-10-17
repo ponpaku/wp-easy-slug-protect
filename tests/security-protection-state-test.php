@@ -184,6 +184,52 @@ check(saved_runtime_state() === 'READY', 'valid state is saved');
 check($wpdb->queries > 0 && $setup->checks === 2 && ESP_Media_Protection::$checks === 2,
     'explicit verification performs migration, schema and Rewrite checks');
 
+// DB版印が欠損しても、移行済みpath IDとスキーマが安定していれば既存サイトを維持。
+// 不正・途中移行のpath IDを「正常なバージョン欠損」と誤認しない。
+$runtime_saved_settings = $GLOBALS['options'][ESP_Config::OPTION_KEY];
+$runtime_saved_marker = $GLOBALS['options']['esp_db_version'];
+$stable_path = 'path_original_123';
+$GLOBALS['options'][ESP_Config::OPTION_KEY]['path'] = [
+    $stable_path => ['id' => $stable_path, 'path' => '/members/'],
+];
+unset($GLOBALS['options']['esp_db_version']);
+$GLOBALS['options']['esp_runtime_state'] = runtime_value('VERIFY_REQUIRED');
+check(ESP_Protection_State::boot($setup) === true &&
+    saved_runtime_state() === 'READY' &&
+    !array_key_exists('esp_db_version', $GLOBALS['options']) &&
+    $GLOBALS['options'][ESP_Config::OPTION_KEY]['path'][$stable_path]['id'] === $stable_path,
+    'missing db marker accepts verified, stable legacy path IDs without rewriting them');
+
+foreach ([
+    ['path' => [$stable_path => ['id' => 'path_mismatch', 'path' => '/members/']],
+        'label' => 'mismatched path ID'],
+    ['path' => [$stable_path => ['path' => '/members/']],
+        'label' => 'missing path ID'],
+    ['path' => [['id' => 'path_numeric', 'path' => '/members/']],
+        'label' => 'numeric-key legacy path'],
+] as $case) {
+    $GLOBALS['options'][ESP_Config::OPTION_KEY]['path'] = $case['path'];
+    $GLOBALS['options']['esp_runtime_state'] = runtime_value('VERIFY_REQUIRED');
+    check(ESP_Protection_State::boot($setup) === false &&
+        saved_runtime_state() === 'FAILED' &&
+        !array_key_exists('esp_db_version', $GLOBALS['options']),
+        'missing db marker rejects ' . $case['label'] . ' without migration');
+}
+$GLOBALS['options'][ESP_Config::OPTION_KEY]['path'] = [];
+$GLOBALS['options']['esp_runtime_state'] = runtime_value('VERIFY_REQUIRED');
+check(ESP_Protection_State::boot($setup) === true &&
+    saved_runtime_state() === 'READY',
+    'fresh site with zero protected paths still validates without a DB marker');
+
+$GLOBALS['options']['esp_db_version'] = 'corrupt-version-marker';
+$GLOBALS['options']['esp_runtime_state'] = runtime_value('VERIFY_REQUIRED');
+check(ESP_Protection_State::boot($setup) === false &&
+    saved_runtime_state() === 'FAILED',
+    'unrecognized DB marker does not pass READY even with valid settings and schema');
+$GLOBALS['options'][ESP_Config::OPTION_KEY] = $runtime_saved_settings;
+$GLOBALS['options']['esp_db_version'] = $runtime_saved_marker;
+$GLOBALS['options']['esp_runtime_state'] = runtime_value('READY');
+
 // 旧文字列READYには検証済み版の証拠がない。現在版を勝手に付けず再検証する。
 $GLOBALS['options']['esp_runtime_state'] = 'READY';
 $setup->checks = 0;
