@@ -282,26 +282,25 @@ class ESP_Media_Protection {
         }
 
         if (!$this->enabled && !$this->is_apache()) {
-            $this->update_htaccess();
-            wp_send_json_success([
-                'message' => __('.htaccessのルールを再設定しました。', ESP_Config::TEXT_DOMAIN)
-            ]);
+            // OFF時はNginx/CLIでも残存するESPブロックだけを撤去できる。
+            // 失敗した場合も下の共通エラー処理へ渡し、成功を偽装しない。
+            $result = $this->update_htaccess();
+        } else {
+            if (!$this->is_apache()) {
+                wp_send_json_error([
+                    'message' => __('この機能はApacheまたはLiteSpeed環境でのみ利用できます。', ESP_Config::TEXT_DOMAIN)
+                ], 400);
+            }
+
+            $media_settings = ESP_Option::get_current_setting('media');
+            $delivery_method = is_array($media_settings) && isset($media_settings['delivery_method'])
+                ? $media_settings['delivery_method']
+                : 'auto';
+            $force_litespeed_key_regeneration = ($delivery_method === 'litespeed');
+            $result = $this->update_htaccess($force_litespeed_key_regeneration);
         }
 
-        if (!$this->is_apache()) {
-            wp_send_json_error([
-                'message' => __('この機能はApacheまたはLiteSpeed環境でのみ利用できます。', ESP_Config::TEXT_DOMAIN)
-            ], 400);
-        }
-
-        $media_settings = ESP_Option::get_current_setting('media');
-        $delivery_method = is_array($media_settings) && isset($media_settings['delivery_method'])
-            ? $media_settings['delivery_method']
-            : 'auto';
-        $force_litespeed_key_regeneration = ($delivery_method === 'litespeed');
-
-        // 実際の書き込み結果を取得（WP_Errorの可能性あり）
-        $result = $this->update_htaccess($force_litespeed_key_regeneration);
+        // すべてのサーバー種別で書込み結果を確認する（WP_Errorの可能性あり）。
 
         if ($result === true) {
             wp_send_json_success([
