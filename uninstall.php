@@ -180,10 +180,8 @@ delete_option('esp_integrity_check_progress');
 // 投稿メタデータの削除
 $wpdb->delete($wpdb->postmeta, array('meta_key' => ESP_Config::PERMALINK_PATH_META_KEY));
 
-// メディア保護メタデータの削除
-if (defined('ESP_Media_Protection::META_KEY_PROTECTED_PATH')) {
-    $wpdb->delete($wpdb->postmeta, array('meta_key' => '_esp_media_protected_path_id'));
-}
+// アンインストール時は保護クラスがロードされないため、保存済みの固定メタキーを直接削除。
+$wpdb->delete($wpdb->postmeta, array('meta_key' => '_esp_media_protected_path_id'));
 
 // トランジェントの削除
 delete_transient('esp_protected_posts');
