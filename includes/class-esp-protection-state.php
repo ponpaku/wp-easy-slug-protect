@@ -468,7 +468,7 @@ final class ESP_Protection_State {
             if (!is_string($key) || $key === '' ||
                 !is_array($path) || !isset($path['id'], $path['path']) ||
                 !is_string($path['id']) || $path['id'] !== $key ||
-                !is_string($path['path']) || trim($path['path'], " /\\t\\n\\r") === '') {
+                !is_string($path['path']) || trim($path['path'], " /\t\n\r") === '') {
                 return false;
             }
         }
