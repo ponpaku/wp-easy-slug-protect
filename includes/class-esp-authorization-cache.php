@@ -13,6 +13,12 @@ if (!defined('ABSPATH')) {
 final class ESP_Authorization_Cache {
     /** @var array<string,bool> Persistに失敗した認可情報を同リクエスト中に利用しない */
     private static $unsafe_scopes = [];
+    /**
+     * by-mid APIで保護メタのキーを別名に変える場合、Coreの更新後フックは
+     * 新しいキーしか渡さない。失効対象の旧キーを同一リクエスト内で保持する。
+     * WordPress Coreの変更前ガードと更新後フックの両方が通る場合だけ使用。
+     */
+    private static $pending_by_mid_rekeys = [];
 
     /**
      * WordPress postmetaの変更前に、対象の認可キャッシュを失効させる。
@@ -82,7 +88,39 @@ final class ESP_Authorization_Cache {
             !self::invalidate('media', ESP_Media_Protection::MEDIA_CACHE_KEY)) {
             return false;
         }
+        // 更新前失効とDB書込みの隙間に古い状態で再構築されても、
+        // 更新後に「旧キー」の世代をもう一度進める。通常のpostmeta
+        // 更新後フックには新キーしか渡らないため、ここで記録する。
+        if ($old_key !== $new_key &&
+            ($old_key === ESP_Config::PERMALINK_PATH_META_KEY ||
+             $old_key === ESP_Media_Protection::META_KEY_PROTECTED_PATH)) {
+            self::$pending_by_mid_rekeys[(int) $meta_id] = [
+                'old_key' => $old_key,
+                'new_key' => $new_key,
+            ];
+        } else {
+            unset(self::$pending_by_mid_rekeys[(int) $meta_id]);
+        }
         return null;
+    }
+
+    /**
+     * WordPress Coreのupdated_post_metaから呼ぶ。キー変更成功後に旧スコープ
+     * の失効を完了する（通常のメタ値更新は既存のpost-updateフックが処理）。
+     */
+    public static function invalidate_after_meta_key_change($meta_id, $post_id, $meta_key, $meta_value) {
+        $id = (int) $meta_id;
+        $pending = self::$pending_by_mid_rekeys[$id] ?? null;
+        if ($pending === null || $pending['new_key'] !== $meta_key) {
+            return;
+        }
+        unset(self::$pending_by_mid_rekeys[$id]);
+        if ($pending['old_key'] === ESP_Config::PERMALINK_PATH_META_KEY) {
+            self::invalidate('post', ESP_Filter::CACHE_KEY);
+        }
+        if ($pending['old_key'] === ESP_Media_Protection::META_KEY_PROTECTED_PATH) {
+            self::invalidate('media', ESP_Media_Protection::MEDIA_CACHE_KEY);
+        }
     }
 
     /** delete_metadata_by_mid() も通常の delete_post_metadata を通らない。 */
