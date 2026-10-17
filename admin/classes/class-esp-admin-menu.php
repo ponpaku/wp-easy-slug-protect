@@ -118,6 +118,11 @@ class ESP_Admin_Menu {
         ?>
         <div class="wrap">
             <h1><?php _e('Easy Slug Protect 設定', $text_domain); ?></h1>
+            <?php
+            // options.php が保存した設定エラーをリダイレクト後の画面にも表示する。
+            // 保存拒否（確認不足／Rewrite適用不可）を成功と誤認させない。
+            settings_errors(ESP_Config::OPTION_KEY);
+            ?>
 
             <!-- 使い方説明 -->
             <div class="esp-section">
@@ -459,7 +464,15 @@ class ESP_Admin_Menu {
                                     <?php _e('メディア保護を有効にする', $text_domain); ?>
                                 </label>
                                 <p class="description">
-                                    <?php _e('チェックを外すとメディア保護機能が無効化され、添付ファイルは通常通り配信されます。', $text_domain); ?>
+                                    <?php _e('OFFにすると保護指定済みの画像も公開されます。保護指定の情報は残るため、ONに戻すと保護を再開できます。ただしOFF中に取得・キャッシュされた画像は回収できません。', $text_domain); ?>
+                                </p>
+                                <p>
+                                    <label>
+                                        <input type="checkbox"
+                                            name="<?php echo $option_key; ?>[media][confirm_disable]"
+                                            value="1">
+                                        <strong><?php _e('保護メディアが公開される可能性を理解しました（保護指定あり・件数を確認できない場合は必須）', $text_domain); ?></strong>
+                                    </label>
                                 </p>
                             </td>
                         </tr>

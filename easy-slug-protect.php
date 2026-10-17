@@ -34,7 +34,7 @@ class Easy_Slug_Protect {
      */
     public function __construct() {
         // 必要なファイルを読み込む
-        $this->load_dependencies();
+        self::load_dependencies();
 
         // セットアップクラスのインスタンス化
         $this->setup = new ESP_Setup();
@@ -46,10 +46,12 @@ class Easy_Slug_Protect {
     /**
      * 依存ファイルの読み込み
      */
-    private function load_dependencies() {
+    public static function load_dependencies() {
         // コアクラスの読み込み
         require_once ESP_PATH . 'includes/class-esp-core.php';
         require_once ESP_PATH . 'includes/class-esp-setup.php';
+        require_once ESP_PATH . 'includes/class-esp-protection-state.php';
+        require_once ESP_PATH . 'includes/class-esp-authorization-cache.php';
         require_once ESP_PATH . 'includes/class-esp-auth.php';
         require_once ESP_PATH . 'includes/class-esp-cookie.php';
         require_once ESP_PATH . 'includes/class-esp-logout.php';
@@ -73,8 +75,55 @@ class Easy_Slug_Protect {
      * プラグインの初期化
      */
     private function init() {
-        // バージョンチェックと更新は常に実行
-        $this->setup->check_plugin_version();
+        // WordPressの通常のメタデータ更新は、まず失効できるか確認する。
+        // 失効できないときに更新してしまうと次リクエストに旧認可が残り得る。
+        foreach (['add_post_metadata', 'update_post_metadata'] as $hook) {
+            add_filter($hook, ['ESP_Authorization_Cache', 'guard_postmeta_write'], 1, 5);
+        }
+        add_filter('delete_post_metadata', ['ESP_Authorization_Cache', 'guard_postmeta_delete'], 1, 5);
+        // Coreのby-mid APIは通常のpostmeta事前フィルターを呼ばない。
+        add_filter('update_post_metadata_by_mid', ['ESP_Authorization_Cache', 'guard_postmeta_update_by_mid'], 1, 4);
+        add_filter('delete_post_metadata_by_mid', ['ESP_Authorization_Cache', 'guard_postmeta_delete_by_mid'], 1, 2);
+        // by-midで保護メタのキー自体が変わった場合、Coreの事後フックに
+        // 旧キーが含まれないため、事前に記録した旧スコープも失効させる。
+        add_action('updated_post_meta', ['ESP_Authorization_Cache', 'invalidate_after_meta_key_change'], 5, 4);
+        // 管理画面・公開側の両方で、投稿メタ更新時の認可キャッシュ無効化を登録する。
+        // ESP_Filter::init()は公開側のみで、一部の更新処理には間に合わない。
+        foreach (['added_post_meta', 'updated_post_meta', 'deleted_post_meta'] as $hook) {
+            add_action($hook, ['ESP_Filter', 'on_permalink_meta_mutation'], 10, 4);
+            // 管理画面や他プラグインによる保護メタ変更も必ず失効させる。
+            add_action($hook, ['ESP_Media_Protection', 'on_protection_meta_mutation'], 10, 4);
+        }
+        if (is_admin()) {
+            add_action('admin_notices', ['ESP_Media_Protection', 'render_rewrite_admin_notice']);
+        }
+        // 更新イベントと明示的な復旧経路は、PENDING状態でも登録する。
+        // 通常のページ表示では、バージョン／DB／Rewriteの厳密検査をしない。
+        ESP_Protection_State::register_runtime_hooks($this->setup);
+        $ready = ESP_Protection_State::boot($this->setup);
+
+        // 保守フックの登録は保護ゲートとは独立に行う。失敗時でも
+        // セッション期限切れの削除等、公開権限を拡げないクリーンアップは継続する。
+        add_action(ESP_Config::DAILY_CLEANUP_HOOK, ['ESP_Setup', 'run_cleanup_tasks']);
+        // 保護情報の再生成・整合性修復はREADY時だけ実行する。
+        add_action('esp_media_cache_refresh', static function () use ($ready) {
+            if ($ready) { ESP_Setup::run_media_cache_refresh(); }
+        });
+        add_action('esp_all_cache_refresh', static function () use ($ready) {
+            if ($ready) { ESP_Setup::run_all_cache_refresh(); }
+        });
+        add_action(ESP_Config::INTEGRITY_CHECK_HOOK, static function () use ($ready) {
+            if ($ready) { ESP_Filter::cron_check_and_fix_permalink_paths(); }
+        });
+
+        if (!$ready) {
+            // 壊れた設定を上書きしかねない通常フォームは表示しない。
+            // 管理者の診断ページは登録して復旧経路を維持する。
+            if (is_admin()) {
+                ESP_Protection_State::register_recovery_admin();
+            }
+            return;
+        }
 
         if (is_admin()) {
             // 管理画面の初期化
@@ -96,13 +145,6 @@ class Easy_Slug_Protect {
             }
         }, 5); // 優先度を高めに設定
         
-        // クリーンアップタスクの実行（Setupで登録したcronから呼び出される）
-        add_action(ESP_Config::DAILY_CLEANUP_HOOK, ['ESP_Setup', 'run_cleanup_tasks']);
-        // メディアキャッシュ更新
-        add_action('esp_media_cache_refresh', ['ESP_Setup', 'run_media_cache_refresh']);
-        // 全キャッシュ更新
-        add_action('esp_all_cache_refresh', ['ESP_Setup', 'run_all_cache_refresh']);
-
         // AJAXアクションのフック
         add_action('wp_loaded', function() {
             if (is_admin()) { // 管理画面からのリクエストのみ
@@ -111,10 +153,6 @@ class Easy_Slug_Protect {
                 add_action('wp_ajax_esp_clear_protection_cache', [$esp_filter, 'ajax_clear_protection_cache']);
             }
         });
-
-        if (class_exists('ESP_Filter')) { // ESP_Filter がロードされていることを確認
-            add_action(ESP_Config::INTEGRITY_CHECK_HOOK, ['ESP_Filter', 'cron_check_and_fix_permalink_paths']);
-        }
 
     }
 
@@ -134,9 +172,17 @@ class Easy_Slug_Protect {
  * プラグインの有効化時の処理
  */
 function esp_activate() {
-    require_once ESP_PATH . 'includes/class-esp-setup.php';
+    // WordPressの初回有効化ではplugins_loadedが再実行されない。
+    // 通常起動と同じ依存クラスを明示的にロードしてから厳密検証する。
+    Easy_Slug_Protect::load_dependencies();
     $setup = new ESP_Setup();
-    $setup->activate();
+    if (!$setup->activate()) {
+        wp_die(
+            __('Easy Slug Protect: 保護状態の初期検証に失敗しました。有効化を中止し、DBとuploads/.htaccessを確認してください。', ESP_Config::TEXT_DOMAIN),
+            '',
+            ['response' => 500]
+        );
+    }
 }
 register_activation_hook(__FILE__, 'esp_activate');
 

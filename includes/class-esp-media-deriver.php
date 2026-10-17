@@ -55,7 +55,10 @@ class ESP_Media_Deriver {
             $file_type = wp_check_filetype($file_path);
             $mime_type = $file_type['type'] ?: 'application/octet-stream';
 
-            $range = isset($_SERVER['HTTP_RANGE']) ? $_SERVER['HTTP_RANGE'] : '';
+            // RangeはGETのみ有効。HEADはGETと同じ認可・ヘッダー判定を行い、
+            // 本文を読み込まず終了する（Webサーバー委譲は上で処理済み）。
+            $is_head = strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET')) === 'HEAD';
+            $range = !$is_head && isset($_SERVER['HTTP_RANGE']) ? $_SERVER['HTTP_RANGE'] : '';
             if ($range) {
                 // Rangeヘッダーがある場合は分割配信
                 if (!$this->deliver_with_range($file_path, $file_size, $mime_type, $range)) {
@@ -73,6 +76,9 @@ class ESP_Media_Deriver {
 
             $this->set_cache_headers($mime_type);
 
+            if ($is_head) {
+                exit;
+            }
             if (!$this->readfile_chunked($file_path)) {
                 return false;
             }
