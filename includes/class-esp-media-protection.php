@@ -1678,6 +1678,7 @@ class ESP_Media_Protection {
         $has_pass = false;
         $has_deny = false;
         $pending_condition = false;
+        $has_plain_inherit = false;
         foreach (preg_split('/\\r\\n|\\n|\\r/', $foreign_rules) as $line) {
             $line = trim($line);
             if (preg_match('/^RewriteEngine(?:\\s|$)/i', $line)) {
@@ -1689,8 +1690,14 @@ class ESP_Media_Protection {
                 continue;
             }
             if (preg_match('/^RewriteOptions(?:\\s|$)/i', $line)) {
-                // InheritBefore等は親のルールとの実行順序を変更する。
-                return null;
+                // Apacheのplain Inheritは親ルールを現在のルールの「後」に
+                // 追加する。ESPが先頭になる場合だけ許容する。
+                // InheritBefore / InheritDown / 複数指定等は解析せず拒否する。
+                if (!preg_match('/^RewriteOptions[ \\t]+Inherit(?:[ \\t]*#.*)?$/iD', $line)) {
+                    return null;
+                }
+                $has_plain_inherit = true;
+                continue;
             }
             if (preg_match('/^RewriteCond(?:\\s|$)/i', $line)) {
                 $pending_condition = true;
@@ -1738,6 +1745,11 @@ class ESP_Media_Protection {
             $has_pass = true;
         }
         if ($has_pass && $has_deny) {
+            return null;
+        }
+        // plain Inheritを伴う構成はESP先頭時だけ安全性を判断できる。
+        // 他者DENYを先に置く必要があれば、親ルールとの順序は未証明として拒否。
+        if ($has_plain_inherit && $has_deny) {
             return null;
         }
         // 明示DENYの後にESPを配置すると、末尾の孤立RewriteCondが
