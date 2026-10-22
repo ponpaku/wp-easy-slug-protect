@@ -285,6 +285,8 @@ final class ESP_Protection_State {
             $current = self::get_runtime_state();
             if (($expected_state !== null && $current['state'] !== $expected_state) ||
                 self::is_stale_worker($current) ||
+                ($state === 'UPDATING' && $current['state'] === 'UPDATING') ||
+                ($state === 'PENDING' && $current['state'] === 'UPDATING') ||
                 !self::owns_verification_lock($lock)) {
                 return false;
             }
@@ -359,11 +361,14 @@ final class ESP_Protection_State {
         try {
             // GET_LOCK取得待ちの間に別プロセスがREADYへ遷移したなら、
             // 初回アクセスの自動検証をもう一度実行しない。
-            if ($only_if_pending) {
-                $runtime = self::get_runtime_state();
-                if (!self::needs_verification($runtime)) {
-                    return self::is_verified_ready($runtime);
-                }
+            $runtime = self::get_runtime_state();
+            // updaterが置換・復元中なら手動の再検証でもREADYへ進めない。
+            // UPDATINGはshutdownの復旧判定まで維持する。
+            if ($runtime['state'] === 'UPDATING') {
+                return false;
+            }
+            if ($only_if_pending && !self::needs_verification($runtime)) {
+                return self::is_verified_ready($runtime);
             }
             return self::verify_and_commit_unlocked($setup, $lock);
         } finally {
