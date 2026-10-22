@@ -132,7 +132,11 @@ function wp_schedule_single_event($when, $name) {
     return true;
 }
 function update_option($name, $value, $autoload = null) {
-    if (!empty($GLOBALS['reject_update'])) { return false; }
+    if (!empty($GLOBALS['reject_update']) ||
+        ($name === 'esp_rewrite_last_error' &&
+            !empty($GLOBALS['reject_rewrite_error_update']))) {
+        return false;
+    }
     $GLOBALS['options'][$name] = $value;
     return true;
 }
@@ -222,6 +226,21 @@ check(ESP_Protection_State::boot($setup) === true &&
     saved_runtime_state() === 'READY' &&
     get_option('esp_rewrite_last_error', '') === '',
     'explicit successful Rewrite reverification clears previous degraded warning');
+
+// メディア保護未保証の通知すら保存できないなら、READYとは確定しない。
+ESP_Media_Protection::$apply_ok = false;
+$GLOBALS['reject_rewrite_error_update'] = true;
+$GLOBALS['options']['esp_runtime_state'] = runtime_value('VERIFY_REQUIRED');
+check(ESP_Protection_State::boot($setup) === false &&
+    saved_runtime_state() === 'FAILED' &&
+    get_option('esp_rewrite_last_error', '') === '',
+    'unreportable degraded media state must not be silently certified READY');
+unset($GLOBALS['reject_rewrite_error_update']);
+ESP_Media_Protection::$apply_ok = true;
+$GLOBALS['options']['esp_runtime_state'] = runtime_value('VERIFY_REQUIRED');
+check(ESP_Protection_State::boot($setup) === true &&
+    saved_runtime_state() === 'READY',
+    'explicit administrator re-verification can recover after diagnostic storage failure');
 ESP_Media_Protection::$protected_records = false;
 
 // DB版印が欠損しても、移行済みpath IDとスキーマが安定していれば既存サイトを維持。
