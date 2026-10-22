@@ -166,7 +166,7 @@ final class ESP_Protection_State {
             check_admin_referer('esp_recover_stuck_upgrade');
             $confirmed = isset($_POST['confirm_upgrade_stopped']) &&
                 $_POST['confirm_upgrade_stopped'] === '1';
-            if (!$confirmed || !self::recover_stuck_upgrade($setup)) {
+            if (!$confirmed || !self::recover_stuck_upgrade($setup, true)) {
                 wp_die(__('更新の停止確認、経過時間、または排他ロックを確認できないため、復旧できません。', ESP_Config::TEXT_DOMAIN),
                     '', ['response' => 409]);
             }
@@ -355,8 +355,8 @@ final class ESP_Protection_State {
      * 管理者が更新ジョブ停止を確認したときだけUPDATINGの行き止まりを解除。
      * 無操作では解除しない。レガシーのsince無しは明示確認の下でのみ許容。
      */
-    public static function recover_stuck_upgrade($setup) {
-        if (!current_user_can('manage_options')) {
+    public static function recover_stuck_upgrade($setup, $confirmed = false) {
+        if ($confirmed !== true || !current_user_can('manage_options')) {
             return false;
         }
         $lock = self::acquire_verification_lock(2);
