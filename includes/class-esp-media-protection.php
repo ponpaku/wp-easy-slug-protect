@@ -1433,7 +1433,8 @@ class ESP_Media_Protection {
                     !preg_match('/(?:\\r\\n|\\n|\\r)\\z/', $without_esp) ? "\n" : '';
                 $new_rules = $without_esp . $separator . $esp_rules;
             } else {
-                $new_rules = $esp_rules . ($without_esp !== '' ? "\n" : '') . $without_esp;
+                // ESPブロックは改行で終わる。余分な改行を加えず第三者のバイトを保持。
+                $new_rules = $esp_rules . $without_esp;
             }
             // 一組だけ、選択された配置にあることを確認する。
             if ($route_media && (substr_count($new_rules, '# BEGIN ESP Media Protection') !== 1 ||
