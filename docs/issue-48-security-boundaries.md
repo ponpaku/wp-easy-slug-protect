@@ -148,3 +148,12 @@ PR #49の認可キャッシュは、WordPressの標準postmeta APIによる保�
 - ロックは協調するESPコード間でのみ有効。別プラグイン・外部デプロイによる無協調の.htaccess書換え、DBとファイルの同時トランザクション、PHP OPcacheや旧ワーカーの完全排除までは保証しない。#44のUpdaterはUPDATING中の制限・置換後再検証・失敗時の再開／ロールバックを責務として扱う。
 - 本PRの単体CIは、排他取得失敗・新版状態への割込み・Writer将来版・更新中のRewrite拒否・旧版からのブロック移行を検証する。**実PHP並列プロセス、実MySQLとWordPress object cache、LiteSpeedでの更新中HTTP/静的本文検証はマージ前の追加ゲート**とする。
 
+## 2026-10-22 Opusレビュー H1/H2/M1/M2/L1 の修正
+
+- **H1（UPDATINGで停止）**：更新開始時に`esp_runtime_state.since`を保存。更新開始・shutdownだけ短時間（MySQL GET_LOCK最大2秒）待機し、通常の匿名検証は非ブロッキングを維持。更新中は自動解除せず、**管理権限＋nonce＋停止確認チェックボックス**を備えた復旧画面からのみ、開始30分経過後（旧データのsince無しは明示確認のみ）に復旧できる。ロック内でUPDATINGを再確認しPENDINGへ遷移したあと、通常の厳密検証をやり直す。30分経過は更新終了の証明ではないため、管理者は実ジョブ/ロールバックの終了確認が必須。
+- **H2（Rewriteが無効でも正常判定）**：第三者の`RewriteEngine Off`、認識不能なRewriteEngine値、`RewriteOptions`を競合扱いにする。ESPルールの既存配置照合とWriterの両方で同じ分類器を使う。LiteSpeed実HTTPを代替する静的構文チェックではない。
+- **L1（孤立RewriteCond）**：明示的な第三者DENYを優先してESPを末尾へ配置する場合、末尾に紐付かない`RewriteCond`があるファイルを拒否する。
+- **M1（alloptions競合）**：`esp_runtime_state`を`autoload=false`で保存し、WordPressでAPIが利用可能ならautoloadを明示的にOFFへ移行。ロック取得後に状態・保存バージョンのoptionsキャッシュを失効して読み直す。WordPress永続キャッシュ下の他プラグインによるキャッシュ競合の全条件を再現した試験は未実施。
+- **M2（旧版有効化時のDDL）**：`ESP_Setup::activate()`の一行目で旧PHPコード・将来DB版の事前判定を行い、拒否時はdbDelta・Rewrite・設定変更前に終了する。更新・有効化の完全な同時実行制御は#44と実機運用で扱う。
+- 実Rewriteの特殊文字フラグ`[B=...]`、CFM派生画像の外部静的経路、永続オブジェクトキャッシュと旧ZIPの並走は、本レビューによる修正だけでは検証できていない。PRをDraftに保ち、実HTTPと更新経路の検証を受入条件とする。
+
