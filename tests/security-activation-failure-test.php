@@ -72,12 +72,16 @@ class ESP_Filter {
 class ESP_Protection_State {
     public static $verified = false;
     public static $checks = 0;
+    public static $activation_compatible = true;
+    public static function can_run_activation_migration() {
+        return self::$activation_compatible;
+    }
     public static function verify_and_commit($setup) {
         self::$checks++;
         return self::$verified;
     }
 }
-function dbDelta($sql) { return []; }
+function dbDelta($sql) { $GLOBALS['ddl_count'] = ($GLOBALS['ddl_count'] ?? 0) + 1; return []; }
 function get_option($key, $default = false) {
     return array_key_exists($key, $GLOBALS['options']) ? $GLOBALS['options'][$key] : $default;
 }
@@ -101,7 +105,19 @@ function reset_activation_test($records, $verifies, $cleanup_ok = true) {
     ESP_Media_Protection::$records = $records;
     ESP_Media_Protection::$cleanup_ok = $cleanup_ok;
     ESP_Protection_State::$verified = $verifies;
+    ESP_Protection_State::$activation_compatible = true;
+    $GLOBALS['ddl_count'] = 0;
 }
+
+// M2: 新版のDB版印がある時は、旧ZIPの有効化でDDL等を実行しない。
+reset_activation_test(true, false);
+ESP_Protection_State::$activation_compatible = false;
+$checks_before = ESP_Protection_State::$checks;
+check_activation_failure($setup->activate() === false &&
+    $GLOBALS['ddl_count'] === 0 &&
+    ESP_Media_Protection::$calls === [] &&
+    ESP_Protection_State::$checks === $checks_before,
+    'M2: stale plugin activation refuses before dbDelta, Rewrite and verifier');
 
 // Initial install: no protected metadata, verifier fails after Rewrite installation.
 // An inactive plugin cannot serve PHP-routed public media, so remove only ESP rules.
