@@ -303,8 +303,21 @@ class ESP_Media_Protection {
         // すべてのサーバー種別で書込み結果を確認する（WP_Errorの可能性あり）。
 
         if ($result === true) {
+            // 書込み成功と、現在のメディア設定に一致する現物のRewriteは別。
+            // 実ファイルの読取照合に成功した後だけ古いエラーを消す。
+            if ($this->is_apache() &&
+                !self::rewrite_file_matches_policy(self::is_media_protection_enabled())) {
+                update_option('esp_rewrite_last_error', 'esp_htaccess_verify_failed', false);
+                wp_send_json_error([
+                    'message' => __('Rewriteの再設定後の照合に失敗しました。.htaccessを確認してください。', ESP_Config::TEXT_DOMAIN)
+                ]);
+                return;
+            }
+            delete_option('esp_rewrite_last_error');
+            update_option('esp_rewrite_policy_version',
+                'always-route-v2:' . (self::is_media_protection_enabled() ? 'on' : 'off'), false);
             wp_send_json_success([
-                'message' => __('.htaccessのルールを再設定しました。', ESP_Config::TEXT_DOMAIN)
+                'message' => __('.htaccessのルールを再設定し、保護ルールの構文一致を確認しました。', ESP_Config::TEXT_DOMAIN)
             ]);
         }
 
@@ -1238,13 +1251,28 @@ class ESP_Media_Protection {
      * 管理者向けの警告を継続して表示する。
      */
     public static function render_rewrite_admin_notice() {
-        $error = get_option('esp_rewrite_last_error', '');
-        if (!$error || !current_user_can('manage_options')) {
+        if (!current_user_can('manage_options')) {
             return;
         }
+        $error = get_option('esp_rewrite_last_error', '');
+        if (!$error) {
+            return;
+        }
+        // 管理者がCFM競合等を解消してルールを再設置したあとでも、
+        // 過去のエラーが残る場合がある。実ファイルが現行設定と完全一致
+        // するときだけ古い通知を消す。Nginxの外部設定はここでは証明できない。
+        if (preg_match('/apache|litespeed/i', $_SERVER['SERVER_SOFTWARE'] ?? '') &&
+            self::rewrite_file_matches_policy(self::is_media_protection_enabled())) {
+            delete_option('esp_rewrite_last_error');
+            return;
+        }
+        $settings_url = admin_url('admin.php?page=esp-settings#esp-reset-htaccess-rules');
         echo '<div class="notice notice-error"><p>' .
-            esc_html__('Easy Slug Protect: メディア保護Rewriteの適用に失敗しました。uploads/.htaccess の状態と書込権限を確認してください。管理者が再検証するまで新規保護メディアの登録を拒否します。', ESP_Config::TEXT_DOMAIN) .
-            ' (' . esc_html((string) $error) . ')</p></div>';
+            esc_html__('Easy Slug Protect: メディア保護Rewriteの適用または照合に失敗しました。uploads/.htaccessと第三者Rewriteを確認してください。', ESP_Config::TEXT_DOMAIN) .
+            ' (' . esc_html((string) $error) . ')</p><p><a href="' .
+            esc_url($settings_url) . '">' .
+            esc_html__('ESP設定の「.htaccessのルールを再設定する」を開く', ESP_Config::TEXT_DOMAIN) .
+            '</a></p></div>';
     }
 
     /**
