@@ -67,6 +67,10 @@ class RewriteTestDB {
     }
 }
 function __($value, $domain = null) { return $value; }
+function esc_html__($value, $domain = null) { return $value; }
+function esc_html($value) { return htmlspecialchars((string) $value, ENT_QUOTES); }
+function esc_url($value) { return (string) $value; }
+function admin_url($path = '') { return 'https://example.test/wp-admin/' . $path; }
 function sanitize_text_field($value) { return trim((string) $value); }
 function is_wp_error($value) { return $value instanceof WP_Error; }
 function home_url($path = '') { return 'https://example.test' . $path; }
@@ -1043,6 +1047,44 @@ try {
     check(strpos($error->getMessage(), 'ajax:error:400:') === 0,
         'ON on non-Apache still returns the existing unsupported-server error');
 }
+unset($GLOBALS['ajax_admin']);
+$_SERVER['SERVER_SOFTWARE'] = 'Apache/2.4';
+
+// B08: 管理画面の「ルール再設定」成功時に、過去のエラーを確実に解除。
+// 実ファイルを照合できない場合は成功表示とエラー解除を行わない。
+$GLOBALS['ajax_admin'] = true;
+$GLOBALS['enabled'] = true;
+$enabledProp->setValue($media, true);
+file_put_contents($file, $foreign);
+$GLOBALS['options']['esp_rewrite_last_error'] = 'esp_htaccess_foreign_rewrite_conflict';
+try {
+    $media->ajax_reset_htaccess_rules();
+    check(false, 'successful AJAX Rewrite reset must terminate with a response');
+} catch (RuntimeException $error) {
+    check(strpos($error->getMessage(), 'ajax:success:') === 0,
+        'B08: verified manual Rewrite reset returns success');
+}
+check(!isset($GLOBALS['options']['esp_rewrite_last_error']) &&
+    $GLOBALS['options']['esp_rewrite_policy_version'] === 'always-route-v2:on' &&
+    ESP_Media_Protection::audit_rewrite_policy() === true,
+    'B08: only verified Rewrite reset clears a prior conflict and stamps current policy');
+// 管理者通知の表示時にも「構文一致」が確認できれば古いエラーを消す。
+$GLOBALS['options']['esp_rewrite_last_error'] = 'esp_htaccess_foreign_rewrite_conflict';
+ob_start();
+ESP_Media_Protection::render_rewrite_admin_notice();
+$notice = ob_get_clean();
+check($notice === '' && !isset($GLOBALS['options']['esp_rewrite_last_error']),
+    'B08: stale error is cleared when current Rewrite already matches policy');
+// 依然として競合している場合は、通知を保留して復旧操作へのリンクを示す。
+$unsafe = "RewriteEngine On\nRewriteOptions InheritBefore\n";
+file_put_contents($file, $unsafe);
+$GLOBALS['options']['esp_rewrite_last_error'] = 'esp_htaccess_foreign_rewrite_conflict';
+ob_start();
+ESP_Media_Protection::render_rewrite_admin_notice();
+$notice = ob_get_clean();
+check(isset($GLOBALS['options']['esp_rewrite_last_error']) &&
+    strpos($notice, 'esp-reset-htaccess-rules') !== false,
+    'B08: unresolved Rewrite conflict displays recovery link without clearing error');
 unset($GLOBALS['ajax_admin']);
 $_SERVER['SERVER_SOFTWARE'] = 'Apache/2.4';
 
