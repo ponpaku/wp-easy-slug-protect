@@ -212,13 +212,13 @@ check(ESP_Protection_State::boot($setup) === true &&
     ESP_Media_Protection::$checks === $rewrite_attempts,
     'READY authorization startup never rechecks Rewrite on every request');
 
-// Rewrite検証の例外でも内部DB/認可を公開扱いに落とさず、診断を残す。
+// 想定された配置競合と違い、予期しない例外はDB・設定不整合も疑い拒否する。
 ESP_Media_Protection::$apply_exception = true;
 $GLOBALS['options']['esp_runtime_state'] = runtime_value('VERIFY_REQUIRED');
-check(ESP_Protection_State::boot($setup) === true &&
-    saved_runtime_state() === 'READY' &&
+check(ESP_Protection_State::boot($setup) === false &&
+    saved_runtime_state() === 'FAILED' &&
     get_option('esp_rewrite_last_error') === 'esp_rewrite_verify_exception',
-    'Rewrite verification exception is not mistaken for internal authorization corruption');
+    'unexpected Rewrite verification exception still fails closed');
 ESP_Media_Protection::$apply_exception = false;
 ESP_Media_Protection::$apply_ok = true;
 $GLOBALS['options']['esp_runtime_state'] = runtime_value('VERIFY_REQUIRED');
