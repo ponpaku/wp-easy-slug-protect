@@ -7,7 +7,8 @@ require __DIR__ . '/../includes/class-esp-config.php';
 class ESP_Option {
     public static function get_current_setting($name) {
         return ['enabled' => $GLOBALS['enabled'] ?? true,
-            'litespeed_key' => $GLOBALS['litespeed_key'] ?? 'key123'];
+            'litespeed_key' => $GLOBALS['litespeed_key'] ?? 'key123',
+            'metadata_check_mode' => $GLOBALS['metadata_check_mode'] ?? 'strict'];
     }
     public static function get_all_settings() {
         return ['media' => self::get_current_setting('media')];
@@ -41,6 +42,7 @@ class RewriteTestDB {
     public $last_error = '';
     public $count = 1;
     public $live_path = null;
+    public $live_reads = 0;
     public $live_error = false;
     public $attached_id = null;
     public $attached_query_error = false;
@@ -49,6 +51,7 @@ class RewriteTestDB {
     public function prepare($sql, ...$args) { return $sql; }
     public function get_var($query) {
         if (strpos($query, 'SELECT meta_value FROM') !== false) {
+            $this->live_reads++;
             $this->last_error = $this->live_error ? 'DB unavailable' : '';
             return $this->live_error ? null : $this->live_path;
         }
@@ -87,6 +90,13 @@ function nocache_headers() {}
 function get_404_template() { return $GLOBALS['test_dir'] . '/esp-test-404.php'; }
 function trailingslashit($path) { return rtrim($path, '/') . '/'; }
 function get_option($key, $default = null) { return $GLOBALS['options'][$key] ?? $default; }
+function get_post_meta($post_id, $meta_key, $single = false) {
+    $GLOBALS['cached_meta_reads'] = ($GLOBALS['cached_meta_reads'] ?? 0) + 1;
+    if (!empty($GLOBALS['cached_meta_throw'])) {
+        throw new RuntimeException('Simulated object cache failure');
+    }
+    return $GLOBALS['cached_media_path'] ?? '';
+}
 function update_option($key, $value, $autoload = null) { $GLOBALS['options'][$key] = $value; return true; }
 function delete_option($key) { unset($GLOBALS['options'][$key]); return true; }
 function check($ok, $description) {
@@ -179,6 +189,41 @@ $wpdb->live_error = true;
 check($restLive->invoke(null, 42) === null,
     'REST boundary refuses to classify a DB failure as public metadata');
 $wpdb->live_error = false;
+$wpdb->live_path = null;
+$wpdb->last_error = '';
+
+// 厳密・高速モードのデータ鮮度と不明時の拒否を個別に確認する。
+$selectMeta = $reflection->getMethod('read_protected_media_path');
+$wpdb->live_path = 'db_protected';
+$GLOBALS['cached_media_path'] = '';
+$GLOBALS['metadata_check_mode'] = 'strict';
+$before_db_reads = $wpdb->live_reads;
+check($selectMeta->invoke(null, 42) === ['path_id' => 'db_protected'] &&
+    $wpdb->live_reads === $before_db_reads + 1 &&
+    ($GLOBALS['cached_meta_reads'] ?? 0) === 0,
+    'metadata strict mode ignores stale public cache and directly confirms protected DB value');
+$GLOBALS['metadata_check_mode'] = 'cached';
+$before_db_reads = $wpdb->live_reads;
+check($selectMeta->invoke(null, 42) === ['path_id' => ''] &&
+    $wpdb->live_reads === $before_db_reads &&
+    $GLOBALS['cached_meta_reads'] === 1,
+    'explicit cached mode accepts WordPress postmeta cache without live metadata SQL');
+$GLOBALS['cached_media_path'] = 'cache_protected';
+check($selectMeta->invoke(null, 42) === ['path_id' => 'cache_protected'],
+    'cached mode reads populated WordPress metadata');
+$GLOBALS['cached_media_path'] = ['malformed'];
+check($selectMeta->invoke(null, 42) === null,
+    'cached metadata with unexpected array shape is not treated as public');
+$GLOBALS['cached_meta_throw'] = true;
+check($selectMeta->invoke(null, 42) === null,
+    'cached metadata exception does not silently permit public delivery');
+unset($GLOBALS['cached_meta_throw']);
+$GLOBALS['metadata_check_mode'] = 'unknown';
+$before_db_reads = $wpdb->live_reads;
+check($selectMeta->invoke(null, 42) === ['path_id' => 'db_protected'] &&
+    $wpdb->live_reads === $before_db_reads + 1,
+    'invalid metadata check mode falls back to strict DB lookup');
+unset($GLOBALS['metadata_check_mode'], $GLOBALS['cached_media_path']);
 $wpdb->live_path = null;
 $wpdb->last_error = '';
 
