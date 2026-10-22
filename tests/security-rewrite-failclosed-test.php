@@ -250,56 +250,87 @@ check($media->update_htaccess() === true, 'known protected media updates rewrite
 $new = file_get_contents($file);
 check(strpos($new, 'esp-media') !== false && strpos($new, '# Other plugin rule') !== false, 'generated rewrite keeps unrelated rules');
 
-check(strpos($new, $foreign) === 0 &&
-    strpos($new, '# BEGIN ESP Media Protection') >= strlen($foreign),
-    'R01: existing foreign rules execute before ESP rewrite');
+check(strpos($new, '# BEGIN ESP Media Protection') === 0 &&
+    strpos($new, $foreign) > 0 && $matchesPolicy->invoke(null, true) === true,
+    'R01: normal foreign Rewrite is placed after the ESP capture block');
+
+// 明示的な他プラグイン拒否はESPより優先しなければならない。
 $foreign_deny = "RewriteEngine On\nRewriteRule ^private/ - [F,L]\n";
 file_put_contents($file, $foreign_deny);
 check($media->update_htaccess() === true,
-    'R01: foreign [F,L] denial is compatible with safe ESP rewrite installation');
+    'R01: foreign [F,L] denial remains compatible with ESP installation');
 $with_deny = file_get_contents($file);
 check(strpos($with_deny, $foreign_deny) === 0 &&
     $matchesPolicy->invoke(null, true) === true,
-    'R01: third-party denial precedes ESP rewrite and passes policy check');
+    'R01: explicit third-party denial executes before ESP');
+$foreign_redirect_deny = "RewriteEngine On\nRewriteRule ^blocked/ - [R=403,L]\n";
+file_put_contents($file, $foreign_redirect_deny);
+check($media->update_htaccess() === true &&
+    strpos(file_get_contents($file), $foreign_redirect_deny) === 0,
+    'R01: explicit 403 redirect denial is not bypassed by ESP');
+
+// 単純な[L]やWebP/AVIF変換はESP側の認可処理を先行させる。
 $foreign_bypass = "RewriteEngine On\nRewriteRule ^private/ - [L]\n";
 file_put_contents($file, $foreign_bypass);
-$conflict = $media->update_htaccess();
-check($conflict instanceof WP_Error &&
-    $conflict->get_error_code() === 'esp_htaccess_foreign_rewrite_conflict' &&
-    file_get_contents($file) === $foreign_bypass &&
-    $matchesPolicy->invoke(null, true) === false,
-    'R01: foreign early-exit Rewrite is not silently accepted as protected');
-file_put_contents($file, $new);
-check($matchesPolicy->invoke(null, true) === true,
-    'R01: safe rewrite order restores verified policy');
-
-// R02: Rewrite対象拡張子と明確に非重複な「完全一致・非置換」ルールのみ共存。
-$foreign_unrelated = "RewriteEngine On\nRewriteRule ^healthcheck\\.php$ - [L]\n";
-file_put_contents($file, $foreign_unrelated);
 check($media->update_htaccess() === true &&
-    $matchesPolicy->invoke(null, true) === true &&
-    strpos(file_get_contents($file), $foreign_unrelated) === 0,
-    'R02: literal healthcheck.php rule is provably outside ESP protected extensions');
-$foreign_protected_txt = "RewriteEngine On\nRewriteRule ^healthcheck\\.txt$ - [L]\n";
-file_put_contents($file, $foreign_protected_txt);
-$txt_conflict = $media->update_htaccess();
-check($txt_conflict instanceof WP_Error &&
-    $txt_conflict->get_error_code() === 'esp_htaccess_foreign_rewrite_conflict' &&
-    file_get_contents($file) === $foreign_protected_txt,
-    'R02: literal .txt is still protected and cannot bypass ESP');
+    strpos(file_get_contents($file), '# BEGIN ESP Media Protection') === 0 &&
+    $matchesPolicy->invoke(null, true) === true,
+    'R01: early exit Rewrite runs only after ESP protection');
 $foreign_image = "RewriteEngine On\nRewriteRule ^public\\.jpg$ - [L]\n";
 file_put_contents($file, $foreign_image);
+check($media->update_htaccess() === true &&
+    strpos(file_get_contents($file), '# BEGIN ESP Media Protection') === 0,
+    'R02: exact image early-exit is subordinate to ESP');
+
+$cfm_style = "RewriteEngine On\nRewriteRule . - [L]\n" .
+    "RewriteRule ^(.+)\\.(jpg|png|webp)$ /wp-content/uploads-webpc/uploads/$1.$2.avif [NC,T=image/avif,L]\n";
+file_put_contents($file, $cfm_style);
+check($media->update_htaccess() === true &&
+    strpos(file_get_contents($file), '# BEGIN ESP Media Protection') === 0 &&
+    $matchesPolicy->invoke(null, true) === true,
+    'R02: static image optimization pass-through does not block ESP-first rewrite');
+
+// 判定できない認可ゲートは上書きしない。
+$foreign_gate = "RewriteEngine On\nRewriteRule ^protected/ /authorize.php?path=$1 [L]\n";
+file_put_contents($file, $foreign_gate);
+$gate_conflict = $media->update_htaccess();
+check($gate_conflict instanceof WP_Error &&
+    $gate_conflict->get_error_code() === 'esp_htaccess_foreign_rewrite_conflict' &&
+    file_get_contents($file) === $foreign_gate,
+    'R02: foreign PHP authorization gate cannot be superseded by ESP');
+$foreign_proxy = "RewriteEngine On\nRewriteRule ^assets/ https://cdn.example.test/$1 [P,L]\n";
+file_put_contents($file, $foreign_proxy);
 check($media->update_htaccess() instanceof WP_Error &&
-    file_get_contents($file) === $foreign_image,
-    'R02: exact image early-exit rule remains rejected');
+    file_get_contents($file) === $foreign_proxy,
+    'R02: proxy gate is not presumed safe to bypass');
+
+// 拒否・最適化が混在するとどちらの配置でも安全を証明できない。
+$mixed = $foreign_deny . $foreign_bypass;
+file_put_contents($file, $mixed);
+check($media->update_htaccess() instanceof WP_Error &&
+    file_get_contents($file) === $mixed,
+    'R02: mixed deny and pass Rewrite retains original file without guessing');
+
+// 明らかに非重複のリテラルRewriteは拒否ルールとの同居を許す。
+$foreign_unrelated = "RewriteEngine On\nRewriteRule ^healthcheck\\.php$ - [L]\n";
+file_put_contents($file, $foreign_deny . $foreign_unrelated);
+check($media->update_htaccess() === true &&
+    strpos(file_get_contents($file), $foreign_deny . $foreign_unrelated) === 0 &&
+    $matchesPolicy->invoke(null, true) === true,
+    'R02: provably unrelated non-media rewrite can precede ESP with deny');
+$foreign_protected_txt = "RewriteEngine On\nRewriteRule ^healthcheck\\.txt$ - [L]\n";
+file_put_contents($file, $foreign_protected_txt);
+check($media->update_htaccess() === true &&
+    strpos(file_get_contents($file), '# BEGIN ESP Media Protection') === 0,
+    'R02: protected txt early exit is captured by ESP before foreign Rewrite');
 $foreign_wildcard = "RewriteEngine On\nRewriteRule ^anything.* - [L]\n";
 file_put_contents($file, $foreign_wildcard);
-check($media->update_htaccess() instanceof WP_Error,
-    'R02: unbounded Rewrite pattern is not accepted by narrow exception');
+check($media->update_htaccess() === true &&
+    strpos(file_get_contents($file), '# BEGIN ESP Media Protection') === 0,
+    'R02: wildcard early exit is subordinate to ESP');
 file_put_contents($file, $new);
 check($matchesPolicy->invoke(null, true) === true,
-    'R02: restoring verified existing policy remains possible');
-
+    'R02: restoring verified ESP-first policy remains possible');
 
 check(strpos($new, 'avif') !== false, 'AVIF is covered in replacement');
 // LiteSpeedキー未設定の読取専用監査は、設定・Rewriteを一切変更しない。
