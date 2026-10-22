@@ -44,6 +44,8 @@ class ESP_Config {
         'media' => array(
             'enabled' => true,
             'delivery_method' => 'auto',
+            // 既存サイトも直接DB照会を既定として維持する。
+            'metadata_check_mode' => 'strict',
             'litespeed_key' => ''
         ),
         'db_version' => 6 // DBバージョン
