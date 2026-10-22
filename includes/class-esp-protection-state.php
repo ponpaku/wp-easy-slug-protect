@@ -411,13 +411,12 @@ final class ESP_Protection_State {
                         }
                     }
                 } catch (\Throwable $rewrite_error) {
+                    // 想定されたRewrite競合と、予期しない実行時例外を混同しない。
+                    // DB/設定障害の可能性が残る例外はPHP側もfail-closed。
                     error_log('ESP: media Rewrite verification raised an exception');
                     update_option('esp_rewrite_last_error',
                         'esp_rewrite_verify_exception', false);
-                    if (get_option('esp_rewrite_last_error', '') !==
-                        'esp_rewrite_verify_exception') {
-                        $ready = false;
-                    }
+                    $ready = false;
                 }
                 // esp_runtime_stateのREADYは内部認可の検証だけを表す。
                 // #44の更新後処理完了は、Rewrite等の別検証を必須とする。
