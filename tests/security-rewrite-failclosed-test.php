@@ -339,6 +339,38 @@ check($media->update_htaccess() === true &&
     $matchesPolicy->invoke(null, true) === true,
     'R02: static image optimization pass-through does not block ESP-first rewrite');
 
+// RewriteRuleがなくても後方のRewriteEngine OffはESP自体を無効化する。
+$engine_off = "RewriteEngine Off\n";
+file_put_contents($file, $engine_off);
+$off_error = $media->update_htaccess();
+check($off_error instanceof WP_Error &&
+    $off_error->get_error_code() === 'esp_htaccess_foreign_rewrite_conflict' &&
+    file_get_contents($file) === $engine_off,
+    'H2: RewriteEngine Off forbids installing apparently valid but inactive ESP rules');
+file_put_contents($file, $new . "<IfModule mod_rewrite.c>\nRewriteEngine Off\n</IfModule>\n");
+check($matchesPolicy->invoke(null, true) === false &&
+    ESP_Media_Protection::audit_rewrite_policy() === false,
+    'H2: read-only audit rejects existing ESP rules disabled by trailing RewriteEngine Off');
+$rewrite_options = "RewriteEngine On\nRewriteOptions InheritBefore\n";
+file_put_contents($file, $rewrite_options);
+check($media->update_htaccess() instanceof WP_Error &&
+    file_get_contents($file) === $rewrite_options,
+    'H2: RewriteOptions affecting inherited order is not presumed safe');
+file_put_contents($file, $new . $rewrite_options);
+check($matchesPolicy->invoke(null, true) === false,
+    'H2: audit rejects RewriteOptions appended after previously valid ESP rules');
+
+// 明示DENYの後に末尾RewriteCondだけがあると、ESPの後置ルールに掛かり得る。
+$dangling_condition = $foreign_deny .
+    "RewriteCond %{REQUEST_URI} ^/unrelated-only$\n";
+file_put_contents($file, $dangling_condition);
+check($media->update_htaccess() instanceof WP_Error &&
+    file_get_contents($file) === $dangling_condition,
+    'L1: dangling RewriteCond after foreign DENY cannot silently gate ESP rewrite');
+file_put_contents($file, $foreign_deny);
+check($media->update_htaccess() === true,
+    'L1: preceding complete DENY rules still work when no dangling condition exists');
+
 // 判定できない認可ゲートは上書きしない。
 $foreign_gate = "RewriteEngine On\nRewriteRule ^protected/ /authorize.php?path=$1 [L]\n";
 file_put_contents($file, $foreign_gate);
