@@ -250,8 +250,7 @@ final class ESP_Protection_State {
     }
 
     public static function mark_verification_required() {
-        if (self::get_runtime_state()['state'] === 'UPDATING' &&
-            self::set_runtime_state('VERIFY_REQUIRED') &&
+        if (self::set_runtime_state('VERIFY_REQUIRED', null, 'UPDATING') &&
             !wp_next_scheduled('esp_verify_runtime_once')) {
             wp_schedule_single_event(time(), 'esp_verify_runtime_once');
         }
@@ -262,21 +261,45 @@ final class ESP_Protection_State {
      * READYの確定時だけESP_VERSIONを刻み、それ以外は最後の検証済み版を保持。
      * 版印は更新・移行の完了ではなく、保護前提の検証成功を意味する。
      */
-    private static function set_runtime_state($state) {
+    private static function set_runtime_state($state, $held_lock = null, $expected_state = null) {
         if (!in_array($state, self::VALID_STATES, true)) {
             return false;
         }
-        $current = self::get_runtime_state();
-        // 旧版PHPワーカーは新版のREADY/UPDATING等を上書きしない。
-        if (self::is_stale_worker($current)) {
+        // 検証・更新開始・shutdown復旧を同じDBロックで直列化する。
+        // 検証中の呼出しは所有中のロックを渡し、自己デッドロックを避ける。
+        $lock = $held_lock ?? self::acquire_verification_lock();
+        if ($lock === null) {
             return false;
         }
-        $runtime = [
-            'state' => $state,
-            'version' => $state === 'READY' ? ESP_VERSION : $current['version'],
-        ];
-        update_option(self::RUNTIME_STATE_OPTION, $runtime, true);
-        return get_option(self::RUNTIME_STATE_OPTION, null) === $runtime;
+        try {
+            if (!self::owns_verification_lock($lock)) {
+                return false;
+            }
+            // 永続オブジェクトキャッシュでロック取得前に読んだ古い値を
+            // 誤って利用しない。共有DBを変更する処理に限定して失効する。
+            if (function_exists('wp_cache_delete')) {
+                wp_cache_delete('alloptions', 'options');
+                wp_cache_delete(self::RUNTIME_STATE_OPTION, 'options');
+                wp_cache_delete(ESP_Config::VERSION_OPTION_KEY, 'options');
+            }
+            $current = self::get_runtime_state();
+            if (($expected_state !== null && $current['state'] !== $expected_state) ||
+                self::is_stale_worker($current) ||
+                !self::owns_verification_lock($lock)) {
+                return false;
+            }
+            $runtime = [
+                'state' => $state,
+                'version' => $state === 'READY' ? ESP_VERSION : $current['version'],
+            ];
+            update_option(self::RUNTIME_STATE_OPTION, $runtime, true);
+            return self::owns_verification_lock($lock) &&
+                get_option(self::RUNTIME_STATE_OPTION, null) === $runtime;
+        } finally {
+            if ($held_lock === null) {
+                self::release_verification_lock($lock);
+            }
+        }
     }
 
     /** 管理者による検証、プラグイン有効化、更新後の復旧でのみ実行する。 */
@@ -352,7 +375,7 @@ final class ESP_Protection_State {
     private static function verify_and_commit_unlocked($setup, $lock) {
         if (!self::owns_verification_lock($lock) ||
             self::is_stale_worker() ||
-            !self::set_runtime_state('PENDING')) {
+            !self::set_runtime_state('PENDING', $lock)) {
             return false;
         }
         $ready = false;
@@ -431,10 +454,10 @@ final class ESP_Protection_State {
         }
         if (!$ready) {
             error_log('ESP: runtime verification failed; ESP protection requires administrator review');
-            self::set_runtime_state('FAILED');
+            self::set_runtime_state('FAILED', $lock);
             return false;
         }
-        return self::set_runtime_state('READY');
+        return self::set_runtime_state('READY', $lock);
     }
 
     /**
