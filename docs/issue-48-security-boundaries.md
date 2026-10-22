@@ -171,3 +171,12 @@ PR #49の認可キャッシュは、WordPressの標準postmeta APIによる保�
 - `RewriteOptions InheritBefore`・`InheritDown`・`InheritDownBefore`・`MergeBase`・複合指定は引き続き競合扱い。独立DENYとの混在も現時点では自動配置しない。ESP外のRewriteルールは削除・書換えしない。
 - CFMの画像最適化RewriteはESPの保護Rewriteの**後**に置く。旧ESPブロックから版印付きの#49ブロックへ更新し、CFMブロックの完全一致保持・冪等性・読取専用監査を単体テストで検証する。
 - **重要な境界**：この変更は同一`uploads/.htaccess`の構文上の共存を許すだけで、LiteSpeedの設定統合の実挙動、親`.htaccess`の特殊ルール、CFMが作る別ディレクトリ`wp-content/uploads-webpc/uploads/`内の派生画像の匿名直URLを保護した証明ではない。ステージング実HTTPの本文検証が引き続き必須。
+
+## Rewrite競合解消後の管理者通知と再検証導線
+
+- `esp_rewrite_last_error` は直近の**書込みエラー記録**であり、実ファイルが現在も不一致であるという判定そのものではない。従来は設定画面の「.htaccessのルールを再設定する」AJAXで書換えに成功してもこの記録が残り、B07がPASSなのに過去の競合通知だけ残り続けるケースがあった。
+- AJAXの手動再設定では、`update_htaccess()`成功後、Apache/LiteSpeedの場合に**現在の設定と実ファイルが構文一致することを再照合**してからエラーを消し、ポリシー版印を更新する。照合できなければ成功と報告せず、エラーを維持する。
+- 管理者向けRewrite通知の描画時も、Apache/LiteSpeedで現在の`uploads/.htaccess`が最新ポリシーと一致していれば、過去の通知を除去する。**Nginxは外部Rewriteを読み取れない**ため、同じ根拠での自動解除はしない。
+- 不一致時の通知はESP設定内の「.htaccessのルールを再設定する」へのリンクを示す。「管理者による再検証まで新規保護メディア登録を拒否する」という曖昧な文言を廃止。再設定ボタンと内部認可の`READY`再検証は別処理。
+- この解除は**ファイルの構文一致**だけであり、LiteSpeed/Apache実HTTPの直URL保護を証明しない。HTTPテストゲートは残す。
+
