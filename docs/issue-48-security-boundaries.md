@@ -138,3 +138,13 @@ PR #49の認可キャッシュは、WordPressの標準postmeta APIによる保�
 - `FAILED`を記録済みの既存環境は、管理者の明示的な再検証等を経て復旧する。READYの通常リクエストで重い全量検証やRewrite自動修復は行わない。日次監査の不一致は警告し、新規保護直前には実ファイルを確認する。
 
 **未実施**：実WordPress・Apache/LiteSpeedのHTTP本文による保護検証、CFM等の再生成後の配信評価、認証済み配信の共有キャッシュ、旧/新コードの実並走、更新中の実ファイル切替。CI成功だけでは受入完了にならない。
+
+## 2026-10-22 新旧ESPの並走とRewrite Writer版（#44導入前提）
+
+- **初回の現行main→#49導入は自動並走保証の対象外**。現行mainは#49のロック／Rewrite Writer版印を認識しない。手動ZIP更新時はアクセスをメンテナンス下に制限し、更新前のPHP実行・Cron・ジョブを停止／終了確認してからファイルを置換する。WordPress標準のメンテナンス画面表示だけで実行中PHPや静的URLを止めたとは扱わない。
+- #49以降の`esp_runtime_state`更新は、検証・更新開始・shutdown復旧を同じMySQL接続単位のGET_LOCKで直列化する。取得後はWordPressのoptionsキャッシュを無効化して状態・保存版を読み直し、旧コードは新版の状態を書かない。更新中のUPDATINGには明示検証を介入させず、遅延shutdownはUPDATINGからだけVERIFY_REQUIREDへ遷移できる。
+- ESPが書く`uploads/.htaccess`には`# ESP Rewrite Writer: <ESP_VERSION>`を記録する。**この行を将来リリースでも保持し、新版がRewriteを変更するときはWriter版も更新すること**。旧プロセスはファイルロックを取得した後でその版・DB版印・UPDATINGを確認し、自分より新しいWriterや更新中の状態ならON更新・OFF削除・無効化時削除も拒否する。
+- Writer版印の無い旧mainブロックは初回の管理下更新で置換できる。判定不能／複数のWriter印／将来版では、他者のRewriteを消さずに管理者確認へ回す。OFFやアンインストールで後継版ブロックが残る可能性があるため、運用画面で残存を確認する。
+- ロックは協調するESPコード間でのみ有効。別プラグイン・外部デプロイによる無協調の.htaccess書換え、DBとファイルの同時トランザクション、PHP OPcacheや旧ワーカーの完全排除までは保証しない。#44のUpdaterはUPDATING中の制限・置換後再検証・失敗時の再開／ロールバックを責務として扱う。
+- 本PRの単体CIは、排他取得失敗・新版状態への割込み・Writer将来版・更新中のRewrite拒否・旧版からのブロック移行を検証する。**実PHP並列プロセス、実MySQLとWordPress object cache、LiteSpeedでの更新中HTTP/静的本文検証はマージ前の追加ゲート**とする。
+
