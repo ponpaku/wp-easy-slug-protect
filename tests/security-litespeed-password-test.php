@@ -132,4 +132,25 @@ check_password($method->invoke($sanitize, '$wp$2y$10$abc') === true &&
     $method->invoke($sanitize, '$2y$10$abc') === true &&
     $method->invoke($sanitize, '$argon2id$v=19$m=65536,t=4,p=1$abc') === true,
     'modern bcrypt and Argon2 prefixes are recognized');
+// 管理画面のメディア確認方式は許可値だけ保存し、未送信時は既存値を維持。
+check_password(ESP_Config::OPTION_DEFAULTS['media']['metadata_check_mode'] === 'strict',
+    'legacy installations default to strict media metadata verification');
+$media_input = ['enabled' => true, 'delivery_method' => 'auto',
+    'metadata_check_mode' => 'cached'];
+$sanitized_media = $sanitize->sanitize_media_settings($media_input);
+check_password($sanitized_media['metadata_check_mode'] === 'cached',
+    'administrator may explicitly save cached media metadata verification');
+$media_input['metadata_check_mode'] = 'unrecognized';
+$sanitized_media = $sanitize->sanitize_media_settings($media_input);
+check_password($sanitized_media['metadata_check_mode'] === 'strict',
+    'invalid media verification setting sanitizes to strict mode');
+$media_input['metadata_check_mode'] = ['cached'];
+$sanitized_media = $sanitize->sanitize_media_settings($media_input);
+check_password($sanitized_media['metadata_check_mode'] === 'strict',
+    'non-string media verification setting cannot enable cache mode');
+$GLOBALS['stored_settings']['media']['metadata_check_mode'] = 'cached';
+unset($media_input['metadata_check_mode']);
+$sanitized_media = $sanitize->sanitize_media_settings($media_input);
+check_password($sanitized_media['metadata_check_mode'] === 'cached',
+    'unrelated settings form omissions preserve an existing cached-mode selection');
 echo "All LiteSpeed password preservation tests passed.\n";
