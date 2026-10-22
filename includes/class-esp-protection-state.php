@@ -315,7 +315,8 @@ final class ESP_Protection_State {
             if (($expected_state !== null && $current['state'] !== $expected_state) ||
                 self::is_stale_worker($current) ||
                 ($state === 'UPDATING' && $current['state'] === 'UPDATING') ||
-                ($state === 'PENDING' && $current['state'] === 'UPDATING') ||
+                ($state === 'PENDING' && $current['state'] === 'UPDATING' &&
+                    $expected_state !== 'UPDATING') ||
                 !self::owns_verification_lock($lock)) {
                 return false;
             }
