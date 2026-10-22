@@ -401,11 +401,10 @@ class ESP_Media_Protection {
             return new WP_REST_Response(['code' => 'esp_media_state_unknown'], 503);
         }
 
-        // WP_Queryが事前ロードしたpostmetaのキャッシュを「最新DB値」と扱わない。
-        // 非管理者のメディアREST要素だけ、応答直前に直接DBから確認する。
-        // これは最終チェック地点の鮮度を上げる限定策で、他リクエストとの
-        // 完全な原子性（チェック後の競合までの防止）は保証しない。
-        $live_path = self::read_live_protected_media_path($post->ID);
+        // 厳密モードではWP_Queryのpostmetaキャッシュを再利用せず直接DB確認。
+        // 高速モードだけ、管理者の明示選択でWordPressメタキャッシュを使う。
+        // どちらもチェック後のDB変更との完全な原子性は保証しない。
+        $live_path = self::read_protected_media_path($post->ID);
         if ($live_path === null) {
             return new WP_REST_Response(['code' => 'esp_media_state_unknown'], 503);
         }
@@ -433,8 +432,41 @@ class ESP_Media_Protection {
     }
 
     /**
-     * REST応答直前の保護メタをWPオブジェクトキャッシュ抜きで取得する。
-     * DBエラーと保護なしを混同しない。通常の画像URL配信には追加SQLしない。
+     * メディアの保護メタ取得方式。既定は毎回直接DB照会する厳密モード。
+     * 管理者が高速モードを明示選択した場合だけWordPressのメタキャッシュを使う。
+     * 設定自体は既存esp_settingsのget_optionキャッシュから取得できる。
+     */
+    private static function get_metadata_check_mode() {
+        $media = ESP_Option::get_current_setting('media');
+        return is_array($media) &&
+            ($media['metadata_check_mode'] ?? null) === 'cached' ? 'cached' : 'strict';
+    }
+
+    /**
+     * PHP経由のメディア配信とREST最終検証で共通の選択方式を使う。
+     * キャッシュ値の形が不正なら「保護なし」ではなく不明として拒否する。
+     * 高速モードで古い値が読まれる可能性は管理者が明示的に選択する。
+     *
+     * @return array{path_id:string}|null null=照会結果不明
+     */
+    private static function read_protected_media_path($post_id) {
+        if (self::get_metadata_check_mode() !== 'cached') {
+            return self::read_live_protected_media_path($post_id);
+        }
+        try {
+            $path_id = get_post_meta((int) $post_id, self::META_KEY_PROTECTED_PATH, true);
+            if (!is_scalar($path_id) && $path_id !== null) {
+                return null;
+            }
+            return ['path_id' => $path_id === null ? '' : (string) $path_id];
+        } catch (\Throwable $error) {
+            return null;
+        }
+    }
+
+    /**
+     * 厳密モードのDB直接照会。DBエラーと正常な保護メタ未設定を区別する。
+     * 通常のPHP配信とREST応答のいずれも既定ではこの方式を利用する。
      *
      * @return array{path_id:string}|null null=DB状態不明
      */
@@ -717,9 +749,9 @@ class ESP_Media_Protection {
             return;
         }
 
-        // 認可に必要な保護メタも、キャッシュの空値やDB失敗を公開と誤認しない。
-        // 既存のREST用の直接DB照会を再利用する。
-        $live_path = self::read_live_protected_media_path($attachment_id);
+        // 管理者が選んだ確認方式で保護メタを確認する。既定はDB直接照会。
+        // 高速モードでも読取エラーや不正な値を「公開」として扱わない。
+        $live_path = self::read_protected_media_path($attachment_id);
         if ($live_path === null) {
             $this->send_503();
             return;
