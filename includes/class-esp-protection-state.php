@@ -56,6 +56,22 @@ final class ESP_Protection_State {
         return $runtime['state'] === 'READY' && $runtime['version'] === ESP_VERSION;
     }
 
+    /**
+     * 新しいコードによる状態・版印を見た旧PHPワーカーは共有状態を書かない。
+     * リクエスト自身は非READYで拒否する。正式なロールバックは#44で扱う。
+     */
+    private static function is_stale_worker($runtime = null) {
+        if ($runtime === null) {
+            $runtime = self::get_runtime_state();
+        }
+        $verified_version = $runtime['version'] ?? null;
+        $installed_version = get_option(ESP_Config::VERSION_OPTION_KEY, null);
+        return (is_string($verified_version) &&
+                version_compare($verified_version, ESP_VERSION, '>')) ||
+            (is_string($installed_version) &&
+                version_compare($installed_version, ESP_VERSION, '>'));
+    }
+
     /** 旧READYやコードの手動差し替えも、一度限りの検証へ誘導する。 */
     private static function needs_verification($runtime) {
         return in_array($runtime['state'], [null, 'PENDING', 'VERIFY_REQUIRED'], true) ||
@@ -64,6 +80,12 @@ final class ESP_Protection_State {
 
     public static function boot($setup) {
         $runtime = self::get_runtime_state();
+        // 新版がすでに検証済みなら、残存する旧PHPプロセスは状態に触れず
+        // 自リクエストのみ拒否する（READY@新版をFAILEDで上書きしない）。
+        if (self::is_stale_worker($runtime)) {
+            self::register_failure_hooks(get_option(ESP_Config::OPTION_KEY, null));
+            return false;
+        }
         // READYの通常アクセスでは軽量な版照合だけ。DB版・Rewriteの検査はしない。
         if (self::needs_verification($runtime)) {
             self::verify_once($setup);
@@ -245,6 +267,10 @@ final class ESP_Protection_State {
             return false;
         }
         $current = self::get_runtime_state();
+        // 旧版PHPワーカーは新版のREADY/UPDATING等を上書きしない。
+        if (self::is_stale_worker($current)) {
+            return false;
+        }
         $runtime = [
             'state' => $state,
             'version' => $state === 'READY' ? ESP_VERSION : $current['version'],
@@ -325,6 +351,7 @@ final class ESP_Protection_State {
 
     private static function verify_and_commit_unlocked($setup, $lock) {
         if (!self::owns_verification_lock($lock) ||
+            self::is_stale_worker() ||
             !self::set_runtime_state('PENDING')) {
             return false;
         }
@@ -372,8 +399,8 @@ final class ESP_Protection_State {
             error_log('ESP: explicit runtime verification failed');
             $ready = false;
         }
-        // ロックを失った場合はREADYにもFAILEDにも変更しない。
-        if (!self::owns_verification_lock($lock)) {
+        // ロック喪失や新版への切替後は旧プロセスから共有状態を変更しない。
+        if (!self::owns_verification_lock($lock) || self::is_stale_worker()) {
             return false;
         }
         if (!$ready) {
