@@ -404,11 +404,20 @@ final class ESP_Protection_State {
                         !get_option('esp_rewrite_last_error', '')) {
                         update_option('esp_rewrite_last_error',
                             'esp_rewrite_unverified', false);
+                        if (get_option('esp_rewrite_last_error', '') !==
+                            'esp_rewrite_unverified') {
+                            // 配信の異常を通知できない状態でREADYにしない。
+                            $ready = false;
+                        }
                     }
                 } catch (\Throwable $rewrite_error) {
                     error_log('ESP: media Rewrite verification raised an exception');
                     update_option('esp_rewrite_last_error',
                         'esp_rewrite_verify_exception', false);
+                    if (get_option('esp_rewrite_last_error', '') !==
+                        'esp_rewrite_verify_exception') {
+                        $ready = false;
+                    }
                 }
                 // esp_runtime_stateのREADYは内部認可の検証だけを表す。
                 // #44の更新後処理完了は、Rewrite等の別検証を必須とする。
