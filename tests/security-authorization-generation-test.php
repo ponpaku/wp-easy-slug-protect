@@ -64,12 +64,25 @@ $media = (new ReflectionClass('ESP_Media_Protection'))->newInstanceWithoutConstr
 $mediaSnapshot = ESP_Authorization_Cache::signature('media');
 check_auth(ESP_Authorization_Cache::publish('media', 'media-cache', $mediaSnapshot, ['one' => [42]], 60),
     'Media authorization snapshot is published');
+// モード切替で設定署名が変わり、変更前のESP認可一覧を再採用しない。
+$GLOBALS['options'][ESP_Config::OPTION_KEY]['media']['metadata_check_mode'] = 'cached';
+check_auth(ESP_Authorization_Cache::read('media', 'media-cache') === null,
+    'switch to cached lookup invalidates previous ESP media authorization signature');
+check_auth(!ESP_Authorization_Cache::publish('media', 'media-cache', $mediaSnapshot, ['one' => []], 60),
+    'in-flight pre-switch cache generation cannot publish over new mode');
+check_auth(ESP_Authorization_Cache::invalidate('media', 'media-cache'),
+    'mode switch can explicitly invalidate media authorization generation');
+$cachedMediaSignature = ESP_Authorization_Cache::signature('media');
+check_auth(ESP_Authorization_Cache::publish('media', 'media-cache',
+    $cachedMediaSignature, ['one' => [42]], 60),
+    'new cached mode creates a fresh authorization cache generation');
 ESP_Media_Protection::on_protection_meta_mutation(9, 42, '_unrelated_meta', 'x');
 check_auth(ESP_Authorization_Cache::read('media', 'media-cache') === ['one' => [42]],
     'Unrelated metadata preserves authorization cache');
 ESP_Media_Protection::on_protection_meta_mutation(9, 42, ESP_Media_Protection::META_KEY_PROTECTED_PATH, 'one');
 check_auth(ESP_Authorization_Cache::read('media', 'media-cache') === null,
     'External protected-media meta mutation invalidates cached authorization');
+unset($GLOBALS['options'][ESP_Config::OPTION_KEY]['media']['metadata_check_mode']);
 
 $filter = (new ReflectionClass('ESP_Filter'))->newInstanceWithoutConstructor();
 $postSignature = ESP_Authorization_Cache::signature('post');
