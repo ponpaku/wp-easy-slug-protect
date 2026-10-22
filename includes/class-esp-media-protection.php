@@ -1298,13 +1298,18 @@ class ESP_Media_Protection {
             return false;
         }
         $block = substr($contents, $start, $end - $start + strlen('# END ESP Media Protection'));
-        // ルール本文が合致していても先頭配置なら第三者の拒否を迂回する。
-        // 既存ルール末尾に配置されていること、第三者に保護迂回の危険が
-        // あるRewriteRuleが無いことを、保護成立の必要条件にする。
+        // ESP優先が基本。第三者の明示的拒否がある場合だけ、その後ろに配置。
         $after_esp = substr($contents, $end + strlen('# END ESP Media Protection'));
         $before_esp = substr($contents, 0, $start);
-        if (trim($after_esp) !== '' ||
-            self::foreign_rewrite_can_bypass_protection($before_esp)) {
+        if (trim($before_esp) === '') {
+            if (self::foreign_rewrite_priority($after_esp) !== 'before') {
+                return false;
+            }
+        } elseif (trim($after_esp) === '') {
+            if (self::foreign_rewrite_priority($before_esp) !== 'after') {
+                return false;
+            }
+        } else {
             return false;
         }
         // リクエストごとのルール照合では、キャッシュや各種フックを初期化しない。
@@ -1414,19 +1419,28 @@ class ESP_Media_Protection {
             if (is_wp_error($esp_rules)) {
                 return $esp_rules;
             }
-            // 他者の拒否をESPのPHP配信で飛ばさないため、ESPは既存ルールの後。
-            // ただし他者の[L]などがESP保護を回避し得る場合は設置を拒否。
-            if ($route_media && self::foreign_rewrite_can_bypass_protection($without_esp)) {
+            // 第三者の拒否はESPより先、それ以外の配信RewriteはESPより後。
+            // 認可ゲートや両方が混在する場合は推測せず、既存ファイルを残す。
+            $priority = $route_media ? self::foreign_rewrite_priority($without_esp) : 'off';
+            if ($route_media && $priority === null) {
                 return new WP_Error('esp_htaccess_foreign_rewrite_conflict',
-                    __('他のRewriteルールがESPの保護を迂回する可能性があるため、自動設置しません。管理者がルールの優先順位を確認してください。', ESP_Config::TEXT_DOMAIN));
+                    __('第三者のアクセス制限または不明なRewriteと安全に共存できないため、自動設置しません。管理者が優先順位を確認してください。', ESP_Config::TEXT_DOMAIN));
             }
-            $separator = $route_media && $without_esp !== '' &&
-                !preg_match('/(?:\\r\\n|\\n|\\r)\\z/', $without_esp) ? "\n" : '';
-            $new_rules = $route_media ? $without_esp . $separator . $esp_rules : $without_esp;
-            // 書込み前に、新しいESPブロックが一組だけ存在することを確認する。
+            if (!$route_media) {
+                $new_rules = $without_esp;
+            } elseif ($priority === 'after') {
+                $separator = $without_esp !== '' &&
+                    !preg_match('/(?:\\r\\n|\\n|\\r)\\z/', $without_esp) ? "\n" : '';
+                $new_rules = $without_esp . $separator . $esp_rules;
+            } else {
+                $new_rules = $esp_rules . ($without_esp !== '' ? "\n" : '') . $without_esp;
+            }
+            // 一組だけ、選択された配置にあることを確認する。
             if ($route_media && (substr_count($new_rules, '# BEGIN ESP Media Protection') !== 1 ||
                 substr_count($new_rules, '# END ESP Media Protection') !== 1 ||
-                substr($new_rules, -strlen($esp_rules)) !== $esp_rules)) {
+                ($priority === 'after'
+                    ? substr($new_rules, -strlen($esp_rules)) !== $esp_rules
+                    : strpos($new_rules, $esp_rules) !== 0))) {
                 return new WP_Error('esp_htaccess_invalid_result',
                     __('生成したRewrite保護ルールの構造が不正です。', ESP_Config::TEXT_DOMAIN));
             }
@@ -1553,11 +1567,13 @@ class ESP_Media_Protection {
     }
 
     /**
-     * RewriteがESPより先に評価される際に、保護対象を迂回させる可能性のある
-     * 第三者Rewriteを「安全」と推測しない。明示的な[F]/[G]拒否だけ受理。
-     * 条件式の成立をPHPで完全解析するのは不可能なので、曖昧な場合は拒否。
+     * 第三者Rewriteとの優先順位を限定した構文から判定する。
+     * before: ESP先頭、after: 第三者の拒否優先、null: 未証明で書込み不可。
+     * RewriteCondや外部Webサーバー設定の意味的安全性までは保証しない。
      */
-    private static function foreign_rewrite_can_bypass_protection($foreign_rules) {
+    private static function foreign_rewrite_priority($foreign_rules) {
+        $has_pass = false;
+        $has_deny = false;
         foreach (preg_split('/\\r\\n|\\n|\\r/', $foreign_rules) as $line) {
             $line = trim($line);
             if (preg_match('/^RewriteRule\\s/i', $line) !== 1) {
@@ -1565,20 +1581,45 @@ class ESP_Media_Protection {
             }
             if (!preg_match('/^RewriteRule\\s+(\\S+)\\s+(\\S+)(?:\\s+\\[([^\\]]*)\\])?(?:\\s*(?:#.*)?)?$/i',
                 $line, $matches)) {
-                return true;
+                return null;
             }
+            $target = $matches[2];
             $flags = isset($matches[3]) ? explode(',', $matches[3]) : [];
-            $denies = false;
+            if (self::is_non_media_literal_rewrite($matches[1], $target, $flags)) {
+                continue;
+            }
+            $deny = false;
             foreach ($flags as $flag) {
-                if (in_array(strtoupper(trim($flag)), ['F', 'FORBIDDEN', 'G', 'GONE'], true)) {
-                    $denies = true;
+                $flag = strtoupper(trim($flag));
+                if (in_array($flag, ['F', 'FORBIDDEN', 'G', 'GONE'], true) ||
+                    preg_match('/^(?:R|REDIRECT)=4[0-9]{2}$/', $flag)) {
+                    $deny = true;
+                    continue;
+                }
+                // プロキシ、handler、環境変数・未知の制御フラグは認可ゲートかもしれない。
+                if (!in_array($flag, ['L', 'END', 'NC', 'QSA', 'QSD', 'NE',
+                    'T=IMAGE/AVIF', 'T=IMAGE/WEBP', 'T=IMAGE/JPEG', 'T=IMAGE/PNG'], true)) {
+                    return null;
                 }
             }
-            if (!$denies && !self::is_non_media_literal_rewrite($matches[1], $matches[2], $flags)) {
-                return true;
+            if ($deny) {
+                $has_deny = true;
+                continue;
             }
+            if (preg_match('/\\.php(?:$|\\?)/i', $target)) {
+                return null;
+            }
+            // CFM等の元画像PASSと静的WebP/AVIFへの書換えをESPより後にする。
+            if ($target !== '-' &&
+                !preg_match('/\\.(?:avif|webp|jpe?g|png|gif|bmp|tiff?)$/i', $target)) {
+                return null;
+            }
+            $has_pass = true;
         }
-        return false;
+        if ($has_pass && $has_deny) {
+            return null;
+        }
+        return $has_deny ? 'after' : 'before';
     }
 
     /**
