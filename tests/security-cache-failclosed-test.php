@@ -7,7 +7,8 @@ define('REST_REQUEST', true);
 require __DIR__ . '/../includes/class-esp-config.php';
 class ESP_Option {
     public static function get_current_setting($key) {
-        return $key === 'path' ? ['path_test' => ['path' => '/members']] : ['enabled' => true];
+        return $key === 'path' ? ['path_test' => ['path' => '/members']] :
+            ['enabled' => true, 'metadata_check_mode' => $GLOBALS['metadata_check_mode'] ?? 'strict'];
     }
 }
 class WP_REST_Response {
@@ -24,7 +25,8 @@ function get_transient($key) { return $GLOBALS['transients'][$key] ?? null; /* I
 function delete_transient($key) { return true; }
 function current_user_can($capability) { return !empty($GLOBALS['can_upload']) && $capability === 'upload_files'; }
 function get_post_meta($post_id, $key, $single = false) {
-    return $GLOBALS['live_media_meta'][$post_id] ?? '';
+    $GLOBALS['cached_meta_reads'] = ($GLOBALS['cached_meta_reads'] ?? 0) + 1;
+    return $GLOBALS['cached_media_meta'][$post_id] ?? ($GLOBALS['live_media_meta'][$post_id] ?? '');
 }
 function is_wp_error($value) { return false; }
 function get_option($name, $default = null) {
@@ -118,4 +120,28 @@ $wpdb->live_online = false;
 $response = $media->check_rest_media_access(new WP_REST_Response(), (object) ['ID' => 99], $request);
 check($response->get_status() === 503,
     'REST revalidation refuses publication when the live metadata query fails');
+
+// 新しい管理者選択の高速モードのみ、RESTのメタ読みもWPキャッシュへ切替。
+// 古い公開値を使う可能性を検証可能な仕様として固定する。
+$GLOBALS['metadata_check_mode'] = 'cached';
+$GLOBALS['cached_media_meta'][99] = '';
+$GLOBALS['live_media_meta'][99] = 'path_test';
+$GLOBALS['transients'][ESP_Media_Protection::MEDIA_CACHE_KEY] = [
+    'signature' => ESP_Authorization_Cache::signature('media'),
+    'value' => [],
+];
+$GLOBALS['cached_meta_reads'] = 0;
+$response = $media->check_rest_media_access(new WP_REST_Response(), (object) ['ID' => 99], $request);
+check($response->get_status() === 200 && $GLOBALS['cached_meta_reads'] === 1,
+    'explicit cached mode uses WordPress postmeta cache for REST final media check');
+$GLOBALS['metadata_check_mode'] = 'strict';
+$wpdb->live_online = true;
+$response = $media->check_rest_media_access(new WP_REST_Response(), (object) ['ID' => 99], $request);
+check($response->get_status() === 403,
+    'strict REST mode sees updated protection DB value despite stale public meta cache');
+$wpdb->live_online = false;
+$GLOBALS['metadata_check_mode'] = 'invalid';
+$response = $media->check_rest_media_access(new WP_REST_Response(), (object) ['ID' => 99], $request);
+check($response->get_status() === 503,
+    'invalid mode uses strict live DB lookup and refuses unavailable DB');
 echo "All cache fail-closed tests passed.\n";
