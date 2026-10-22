@@ -86,6 +86,8 @@ class ESP_Admin_Menu {
         $media_settings = ESP_Option::get_current_setting('media');
         $media_enabled = isset($media_settings['enabled']) ? (bool) $media_settings['enabled'] : true;
         $delivery_method = isset($media_settings['delivery_method']) ? $media_settings['delivery_method'] : 'auto';
+        $metadata_check_mode = isset($media_settings['metadata_check_mode']) &&
+            $media_settings['metadata_check_mode'] === 'cached' ? 'cached' : 'strict';
 
         $nginx_rules = '';
         $nginx_rules_error = '';
@@ -501,6 +503,25 @@ class ESP_Admin_Menu {
                                 </select>
                                 <p class="description">
                                     <?php _e('設定保存後は正しくメディアファイルが配信されるかを確認してください。', $text_domain); ?>
+                                </p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><?php _e('保護メタの確認方式', $text_domain); ?></th>
+                            <td>
+                                <select name="<?php echo esc_attr($option_key); ?>[media][metadata_check_mode]" class="regular-text">
+                                    <option value="strict" <?php selected($metadata_check_mode, 'strict'); ?>>
+                                        <?php _e('厳密確認（アクセスごとにDBへ直接照会・既定）', $text_domain); ?>
+                                    </option>
+                                    <option value="cached" <?php selected($metadata_check_mode, 'cached'); ?>>
+                                        <?php _e('高速確認（WordPressのメタキャッシュを利用）', $text_domain); ?>
+                                    </option>
+                                </select>
+                                <p class="description">
+                                    <?php _e('画像のPHP配信とメディアREST応答の保護メタ確認に適用します。高速確認はDB照会を削減できる一方、永続キャッシュや並行更新の古い「保護なし」判定が採用される可能性があります。機密性の高いメディアには厳密確認を推奨します。', $text_domain); ?>
+                                </p>
+                                <p class="description">
+                                    <?php _e('高速確認でもファイルのPHP経由配信そのものは変わりません。切替後は、必要に応じて外部オブジェクトキャッシュも更新してください。', $text_domain); ?>
                                 </p>
                             </td>
                         </tr>
