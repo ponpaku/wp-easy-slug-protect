@@ -17,6 +17,8 @@ final class ESP_Protection_State {
      */
     const RUNTIME_STATE_OPTION = 'esp_runtime_state';
     const AUDIT_OPTION = 'esp_integrity_last_audit';
+    /** 更新ジョブの終了を確認した管理者にのみ復旧を許可する下限。 */
+    private const STUCK_UPGRADE_SECONDS = 1800;
 
     /** 同じPHPリクエストでの再入検証も防ぐ。 */
     private static $verification_in_progress = false;
@@ -43,10 +45,15 @@ final class ESP_Protection_State {
             isset($stored['state']) && is_string($stored['state']) &&
             in_array($stored['state'], self::VALID_STATES, true)) {
             $version = $stored['version'] ?? null;
-            return [
+            $result = [
                 'state' => $stored['state'],
                 'version' => is_string($version) && $version !== '' ? $version : null,
             ];
+            if ($stored['state'] === 'UPDATING') {
+                $since = $stored['since'] ?? null;
+                $result['since'] = is_int($since) && $since > 0 ? $since : null;
+            }
+            return $result;
         }
         return ['state' => 'UNKNOWN', 'version' => null];
     }
@@ -152,6 +159,20 @@ final class ESP_Protection_State {
             self::verify_once($setup);
         });
         add_action('admin_notices', [self::class, 'render_audit_notice']);
+        add_action('admin_post_esp_recover_stuck_upgrade', static function () use ($setup) {
+            if (!current_user_can('manage_options')) {
+                wp_die(__('操作権限がありません。', ESP_Config::TEXT_DOMAIN), '', ['response' => 403]);
+            }
+            check_admin_referer('esp_recover_stuck_upgrade');
+            $confirmed = isset($_POST['confirm_upgrade_stopped']) &&
+                $_POST['confirm_upgrade_stopped'] === '1';
+            if (!$confirmed || !self::recover_stuck_upgrade($setup)) {
+                wp_die(__('更新の停止確認、経過時間、または排他ロックを確認できないため、復旧できません。', ESP_Config::TEXT_DOMAIN),
+                    '', ['response' => 409]);
+            }
+            wp_safe_redirect(admin_url('admin.php?page=esp-settings'));
+            exit;
+        });
         add_action('admin_post_esp_verify_runtime', static function () use ($setup) {
             if (!current_user_can('manage_options')) {
                 wp_die(__('操作権限がありません。', ESP_Config::TEXT_DOMAIN), '', ['response' => 403]);
@@ -214,7 +235,7 @@ final class ESP_Protection_State {
         if (is_wp_error($response) || !self::is_esp_install($hook_extra)) {
             return $response;
         }
-        if (!self::set_runtime_state('UPDATING')) {
+        if (!self::set_runtime_state('UPDATING', null, null, 2)) {
             return new WP_Error('esp_upgrade_pending_unavailable',
                 __('保護状態を更新中として記録できないため、ESPの更新を中止しました。', ESP_Config::TEXT_DOMAIN));
         }
@@ -264,7 +285,7 @@ final class ESP_Protection_State {
     }
 
     public static function mark_verification_required() {
-        if (self::set_runtime_state('VERIFY_REQUIRED', null, 'UPDATING') &&
+        if (self::set_runtime_state('VERIFY_REQUIRED', null, 'UPDATING', 2) &&
             !wp_next_scheduled('esp_verify_runtime_once')) {
             wp_schedule_single_event(time(), 'esp_verify_runtime_once');
         }
@@ -275,13 +296,13 @@ final class ESP_Protection_State {
      * READYの確定時だけESP_VERSIONを刻み、それ以外は最後の検証済み版を保持。
      * 版印は更新・移行の完了ではなく、保護前提の検証成功を意味する。
      */
-    private static function set_runtime_state($state, $held_lock = null, $expected_state = null) {
+    private static function set_runtime_state($state, $held_lock = null, $expected_state = null, $lock_timeout = 0) {
         if (!in_array($state, self::VALID_STATES, true)) {
             return false;
         }
         // 検証・更新開始・shutdown復旧を同じDBロックで直列化する。
         // 検証中の呼出しは所有中のロックを渡し、自己デッドロックを避ける。
-        $lock = $held_lock ?? self::acquire_verification_lock();
+        $lock = $held_lock ?? self::acquire_verification_lock($lock_timeout);
         if ($lock === null) {
             return false;
         }
@@ -289,13 +310,7 @@ final class ESP_Protection_State {
             if (!self::owns_verification_lock($lock)) {
                 return false;
             }
-            // 永続オブジェクトキャッシュでロック取得前に読んだ古い値を
-            // 誤って利用しない。共有DBを変更する処理に限定して失効する。
-            if (function_exists('wp_cache_delete')) {
-                wp_cache_delete('alloptions', 'options');
-                wp_cache_delete(self::RUNTIME_STATE_OPTION, 'options');
-                wp_cache_delete(ESP_Config::VERSION_OPTION_KEY, 'options');
-            }
+            self::refresh_runtime_state_cache();
             $current = self::get_runtime_state();
             if (($expected_state !== null && $current['state'] !== $expected_state) ||
                 self::is_stale_worker($current) ||
@@ -308,7 +323,15 @@ final class ESP_Protection_State {
                 'state' => $state,
                 'version' => $state === 'READY' ? ESP_VERSION : $current['version'],
             ];
-            update_option(self::RUNTIME_STATE_OPTION, $runtime, true);
+            if ($state === 'UPDATING') {
+                $runtime['since'] = time();
+            }
+            // 共有状態をautoloadさせない。alloptionsの旧スナップショットを
+            // 別リクエストが書き戻すことで状態が巻き戻るのを防ぐ。
+            update_option(self::RUNTIME_STATE_OPTION, $runtime, false);
+            if (function_exists('wp_set_option_autoload_values')) {
+                wp_set_option_autoload_values([self::RUNTIME_STATE_OPTION => false]);
+            }
             return self::owns_verification_lock($lock) &&
                 get_option(self::RUNTIME_STATE_OPTION, null) === $runtime;
         } finally {
@@ -318,19 +341,63 @@ final class ESP_Protection_State {
         }
     }
 
+    /** 状態はautoload対象から外し、ロック取得後に最新値を読み直す。 */
+    private static function refresh_runtime_state_cache() {
+        if (function_exists('wp_cache_delete')) {
+            wp_cache_delete('alloptions', 'options');
+            wp_cache_delete(self::RUNTIME_STATE_OPTION, 'options');
+            wp_cache_delete(ESP_Config::VERSION_OPTION_KEY, 'options');
+            wp_cache_delete('notoptions', 'options');
+        }
+    }
+
+    /**
+     * 管理者が更新ジョブ停止を確認したときだけUPDATINGの行き止まりを解除。
+     * 無操作では解除しない。レガシーのsince無しは明示確認の下でのみ許容。
+     */
+    public static function recover_stuck_upgrade($setup) {
+        if (!current_user_can('manage_options')) {
+            return false;
+        }
+        $lock = self::acquire_verification_lock(2);
+        if ($lock === null) {
+            return false;
+        }
+        try {
+            self::refresh_runtime_state_cache();
+            $runtime = self::get_runtime_state();
+            if ($runtime['state'] !== 'UPDATING' || self::is_stale_worker($runtime)) {
+                return false;
+            }
+            $since = $runtime['since'] ?? null;
+            if ($since !== null && time() - $since < self::STUCK_UPGRADE_SECONDS) {
+                return false;
+            }
+            if (!self::set_runtime_state('PENDING', $lock, 'UPDATING')) {
+                return false;
+            }
+        } finally {
+            self::release_verification_lock($lock);
+        }
+        // ロックを一度解放し、通常の検証ロックでスキーマ・Rewriteを確認。
+        // 再検証に失敗しても未検証状態から勝手にREADYへは進めない。
+        return self::verify_and_commit($setup);
+    }
+
     /** 管理者による検証、プラグイン有効化、更新後の復旧でのみ実行する。 */
     /**
      * MySQL/MariaDB の接続単位ロックを WordPress の $wpdb 経由で取得する。
      * タイムアウトで「所有中のロックを削除」する実装はしない。
      * DB接続終了時にはサーバーが自動解放する。
      */
-    private static function acquire_verification_lock() {
+    private static function acquire_verification_lock($timeout = 0) {
         global $wpdb;
         if (!is_object($wpdb) || !isset($wpdb->prefix)) {
             return null;
         }
         $name = 'esp_verify_' . md5((defined('DB_NAME') ? DB_NAME : '') . ':' . $wpdb->prefix);
-        $result = $wpdb->get_var($wpdb->prepare('SELECT GET_LOCK(%s, 0)', $name));
+        $result = $wpdb->get_var($wpdb->prepare(
+            'SELECT GET_LOCK(%s, %d)', $name, $timeout));
         if ((string) $result !== '1') {
             return null;
         }
@@ -375,6 +442,7 @@ final class ESP_Protection_State {
         try {
             // GET_LOCK取得待ちの間に別プロセスがREADYへ遷移したなら、
             // 初回アクセスの自動検証をもう一度実行しない。
+            self::refresh_runtime_state_cache();
             $runtime = self::get_runtime_state();
             // updaterが置換・復元中なら手動の再検証でもREADYへ進めない。
             // UPDATINGはshutdownの復旧判定まで維持する。
@@ -659,7 +727,34 @@ final class ESP_Protection_State {
         echo '<input type="hidden" name="action" value="esp_verify_runtime" />'
             . '<p><button type="submit" class="button button-primary">'
             . esc_html__('保護状態を再検証する', ESP_Config::TEXT_DOMAIN)
-            . '</button></p></form></div>';
+            . '</button></p></form>';
+        $runtime = self::get_runtime_state();
+        if ($runtime['state'] === 'UPDATING') {
+            $since = $runtime['since'] ?? null;
+            echo '<h2>' .
+                esc_html__('ESPの更新が完了していません', ESP_Config::TEXT_DOMAIN) .
+                '</h2><p>' .
+                esc_html__('更新処理が途中停止した可能性があります。実行中の更新・Cron・バックアップ復元が完全に終了したことを確認してください。開始から30分未満の更新は復旧できません。', ESP_Config::TEXT_DOMAIN) .
+                '</p>';
+            if ($since !== null) {
+                echo '<p>' .
+                    esc_html(sprintf(__('更新開始（Unix時刻）: %d', ESP_Config::TEXT_DOMAIN), $since)) .
+                    '</p>';
+            } else {
+                echo '<p>' .
+                    esc_html__('古い更新状態には開始時刻がありません。更新ジョブ停止の確認が必要です。', ESP_Config::TEXT_DOMAIN) .
+                    '</p>';
+            }
+            echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
+            wp_nonce_field('esp_recover_stuck_upgrade');
+            echo '<input type="hidden" name="action" value="esp_recover_stuck_upgrade" />'
+                . '<label><input type="checkbox" name="confirm_upgrade_stopped" value="1" required /> '
+                . esc_html__('更新ジョブ・ロールバックの完全停止を確認しました', ESP_Config::TEXT_DOMAIN)
+                . '</label><p><button type="submit" class="button">'
+                . esc_html__('停止した更新を再検証して復旧する', ESP_Config::TEXT_DOMAIN)
+                . '</button></p></form>';
+        }
+        echo '</div>';
     }
 
     /** 起動失敗中は通常の認可フックを登録しないため、公開経路を限定して守る。 */
