@@ -655,6 +655,33 @@ check(ESP_Protection_State::boot($setup) === false && $setup->checks === 0,
     'malformed runtime option remains UNKNOWN without automatic promotion');
 $GLOBALS['options']['esp_runtime_state'] = runtime_value('READY');
 
+// DB状態の単独遷移も検証と同じMySQLロックを取得する。
+$GLOBALS['options']['esp_runtime_state'] = runtime_value('READY');
+$wpdb->lock_busy = true;
+$lock_state_before = $GLOBALS['options']['esp_runtime_state'];
+$updating_denied = $pre(true, $bulk_extra);
+check($updating_denied instanceof WP_Error &&
+    $updating_denied->get_error_code() === 'esp_upgrade_pending_unavailable' &&
+    get_option('esp_runtime_state') === $lock_state_before,
+    'upgrade preflight cannot publish UPDATING while the verifier lock is held');
+$wpdb->lock_busy = false;
+check($pre(true, $bulk_extra) === true &&
+    saved_runtime_state() === 'UPDATING',
+    'upgrade preflight commits UPDATING with exclusive DB lock');
+$wpdb->lock_busy = true;
+ESP_Protection_State::mark_verification_required();
+check(saved_runtime_state() === 'UPDATING',
+    'shutdown cannot change UPDATING while another verification holds lock');
+$wpdb->lock_busy = false;
+ESP_Protection_State::mark_verification_required();
+check(saved_runtime_state() === 'VERIFY_REQUIRED',
+    'shutdown marks VERIFY_REQUIRED only after acquiring shared DB lock');
+// 古いshutdownの遅延コールバックが新コードのREADYを後戻りさせない。
+$GLOBALS['options']['esp_runtime_state'] = runtime_value('READY');
+ESP_Protection_State::mark_verification_required();
+check(saved_runtime_state() === 'READY',
+    'late old shutdown cannot rewind a new READY to VERIFY_REQUIRED');
+
 // 新版READY後に残っている旧PHPワーカーは共有状態を書き換えない。
 $GLOBALS['options']['esp_runtime_state'] = runtime_value('READY', '0.7.39');
 $setup->checks = 0;
