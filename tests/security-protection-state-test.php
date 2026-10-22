@@ -29,6 +29,7 @@ class BootTestDB {
     public $lock_connection = 17;
     public $lock_owner = null;
     public $complete_on_acquire = false;
+    public $state_on_acquire = null;
     public function prepare($query, ...$args) {
         return str_replace('%s', "'" . ($args[0] ?? '') . "'", $query);
     }
@@ -56,6 +57,10 @@ class BootTestDB {
         if (strpos($query, 'SELECT GET_LOCK(') !== false) {
             if ($this->lock_busy || $this->lock_owner !== null) { return 0; }
             $this->lock_owner = $this->lock_connection;
+            if ($this->state_on_acquire !== null) {
+                $GLOBALS['options']['esp_runtime_state'] = $this->state_on_acquire;
+                $this->state_on_acquire = null;
+            }
             if ($this->complete_on_acquire) {
                 $GLOBALS['options']['esp_runtime_state'] = runtime_value('READY');
                 $this->complete_on_acquire = false;
@@ -681,6 +686,32 @@ $GLOBALS['options']['esp_runtime_state'] = runtime_value('READY');
 ESP_Protection_State::mark_verification_required();
 check(saved_runtime_state() === 'READY',
     'late old shutdown cannot rewind a new READY to VERIFY_REQUIRED');
+
+// 明示検証も更新中の状態を越えてREADYに進めない。
+$GLOBALS['options']['esp_runtime_state'] = runtime_value('UPDATING');
+$checks_before = $setup->checks;
+check(ESP_Protection_State::verify_and_commit($setup) === false &&
+    saved_runtime_state() === 'UPDATING' &&
+    $setup->checks === $checks_before,
+    'explicit verifier does not overtake an in-progress plugin upgrade');
+$duplicate_upgrade = $pre(true, $bulk_extra);
+check($duplicate_upgrade instanceof WP_Error &&
+    $duplicate_upgrade->get_error_code() === 'esp_upgrade_pending_unavailable' &&
+    saved_runtime_state() === 'UPDATING',
+    'second upgrade cannot claim another already-UPDATING generation');
+ESP_Protection_State::mark_verification_required();
+check(saved_runtime_state() === 'VERIFY_REQUIRED',
+    'completed upgrade proceeds to one-time verification state');
+
+// ロック待ち中に別ワーカーが新版READYへ進めた場合は取得後に再判定。
+$GLOBALS['options']['esp_runtime_state'] = runtime_value('READY');
+$wpdb->state_on_acquire = runtime_value('READY', '0.7.39');
+$stale_start = $pre(true, $bulk_extra);
+check($stale_start instanceof WP_Error &&
+    $stale_start->get_error_code() === 'esp_upgrade_pending_unavailable' &&
+    get_option('esp_runtime_state') === runtime_value('READY', '0.7.39'),
+    'locked writer re-reads state and cannot replace a newer READY');
+$GLOBALS['options']['esp_runtime_state'] = runtime_value('READY');
 
 // 新版READY後に残っている旧PHPワーカーは共有状態を書き換えない。
 $GLOBALS['options']['esp_runtime_state'] = runtime_value('READY', '0.7.39');
