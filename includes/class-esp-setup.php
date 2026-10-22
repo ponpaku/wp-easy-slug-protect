@@ -15,6 +15,13 @@ class ESP_Setup {
     }
 
     public function activate() {
+        // DDLやRewriteを変更する前にダウングレードを拒否する。
+        // 新しいESPが検証済みの環境へ旧ZIPを有効化しても、古いdbDeltaを適用しない。
+        if (!class_exists('ESP_Protection_State') ||
+            !ESP_Protection_State::can_run_activation_migration()) {
+            error_log('ESP: activation refused before schema changes due to future version');
+            return false;
+        }
         $this->create_tables();
         $this->create_options();
         $this->schedule_cron_jobs();
