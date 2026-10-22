@@ -1643,11 +1643,29 @@ class ESP_Media_Protection {
     private static function foreign_rewrite_priority($foreign_rules) {
         $has_pass = false;
         $has_deny = false;
+        $pending_condition = false;
         foreach (preg_split('/\\r\\n|\\n|\\r/', $foreign_rules) as $line) {
             $line = trim($line);
+            if (preg_match('/^RewriteEngine(?:\\s|$)/i', $line)) {
+                // .htaccess後段のOffは先頭に置いたESPルールも無効化する。
+                // 不明な値・余分な引数も「安全なOn」と推測しない。
+                if (!preg_match('/^RewriteEngine\\s+On(?:\\s*(?:#.*)?)?$/i', $line)) {
+                    return null;
+                }
+                continue;
+            }
+            if (preg_match('/^RewriteOptions(?:\\s|$)/i', $line)) {
+                // InheritBefore等は親のルールとの実行順序を変更する。
+                return null;
+            }
+            if (preg_match('/^RewriteCond(?:\\s|$)/i', $line)) {
+                $pending_condition = true;
+                continue;
+            }
             if (preg_match('/^RewriteRule\\s/i', $line) !== 1) {
                 continue;
             }
+            $pending_condition = false;
             if (!preg_match('/^RewriteRule\\s+(\\S+)\\s+(\\S+)(?:\\s+\\[([^\\]]*)\\])?(?:\\s*(?:#.*)?)?$/i',
                 $line, $matches)) {
                 return null;
@@ -1686,6 +1704,11 @@ class ESP_Media_Protection {
             $has_pass = true;
         }
         if ($has_pass && $has_deny) {
+            return null;
+        }
+        // 明示DENYの後にESPを配置すると、末尾の孤立RewriteCondが
+        // ESPの最初のRewriteRuleへ結合し、保護を迂回する可能性がある。
+        if ($has_deny && $pending_condition) {
             return null;
         }
         return $has_deny ? 'after' : 'before';
