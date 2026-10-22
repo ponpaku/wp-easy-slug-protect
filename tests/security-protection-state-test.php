@@ -137,6 +137,9 @@ function wp_schedule_single_event($when, $name) {
     return true;
 }
 function update_option($name, $value, $autoload = null) {
+    if ($name === 'esp_runtime_state') {
+        $GLOBALS['last_runtime_autoload'] = $autoload;
+    }
     if (!empty($GLOBALS['reject_update']) ||
         ($name === 'esp_rewrite_last_error' &&
             !empty($GLOBALS['reject_rewrite_error_update']))) {
@@ -175,7 +178,11 @@ function check($ok, $msg) {
     echo "PASS: $msg\n";
 }
 function runtime_value($state, $version = ESP_VERSION) {
-    return ['state' => $state, 'version' => $version];
+    $result = ['state' => $state, 'version' => $version];
+    if ($state === 'UPDATING') {
+        $result['since'] = time();
+    }
+    return $result;
 }
 function saved_runtime_state() {
     $value = get_option('esp_runtime_state', null);
@@ -197,6 +204,8 @@ check(ESP_Protection_State::verify_and_commit($setup) === true,
     'administrator can also explicitly validate and commit READY');
 check(get_option('esp_runtime_state') === runtime_value('READY'),
     'successful verification atomically stores READY with verified code version');
+check($GLOBALS['last_runtime_autoload'] === false,
+    'M1: runtime state is stored as non-autoload to avoid alloptions rollback races');
 check(saved_runtime_state() === 'READY', 'valid state is saved');
 check($wpdb->queries > 0 && $setup->checks === 2 && ESP_Media_Protection::$checks === 2,
     'explicit verification performs migration, schema and Rewrite checks');
@@ -652,6 +661,34 @@ $wpdb->lock_busy = false;
 check(ESP_Protection_State::boot($setup) === true &&
     get_option('esp_runtime_state') === runtime_value('READY'),
     'retry after lock contention completes verification');
+
+// H1: 起動中に異常終了したUPDATINGから管理者が安全に復旧できる。
+$GLOBALS['options']['esp_runtime_state'] = runtime_value('UPDATING');
+$recovery_checks_before = $setup->checks;
+check(ESP_Protection_State::recover_stuck_upgrade($setup) === false &&
+    saved_runtime_state() === 'UPDATING' &&
+    $setup->checks === $recovery_checks_before,
+    'H1: recovery never runs without explicit administrator confirmation');
+check(ESP_Protection_State::recover_stuck_upgrade($setup, true) === false &&
+    saved_runtime_state() === 'UPDATING',
+    'H1: ongoing update younger than 30 minutes cannot be recovered');
+$GLOBALS['options']['esp_runtime_state']['since'] = time() - 1900;
+check(ESP_Protection_State::recover_stuck_upgrade($setup, true) === true &&
+    saved_runtime_state() === 'READY',
+    'H1: manager may recover stale update only through locked full verification');
+// レガシーの更新フラグはsinceを持たない。確認なしで自動解除しない。
+$GLOBALS['options']['esp_runtime_state'] = 'UPDATING';
+check(ESP_Protection_State::recover_stuck_upgrade($setup, true) === true &&
+    saved_runtime_state() === 'READY',
+    'H1: confirmed administrator can recover legacy UPDATING without timestamp');
+$GLOBALS['options']['esp_runtime_state'] = runtime_value('UPDATING');
+$GLOBALS['options']['esp_runtime_state']['since'] = time() - 1900;
+$GLOBALS['test_manage_options'] = false;
+check(ESP_Protection_State::recover_stuck_upgrade($setup, true) === false &&
+    saved_runtime_state() === 'UPDATING',
+    'H1: unprivileged user cannot reset an in-progress upgrade');
+$GLOBALS['test_manage_options'] = true;
+$GLOBALS['options']['esp_runtime_state'] = runtime_value('READY');
 
 // 壊れた配列を正常READYとして解釈しない。
 $GLOBALS['options']['esp_runtime_state'] = ['not_state' => 'READY'];
