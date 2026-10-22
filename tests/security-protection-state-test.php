@@ -82,12 +82,20 @@ class ESP_Media_Protection {
     public static $protected_records = false;
     public static function protected_media_records_exist() { return self::$protected_records; }
     public static $apply_ok = true;
+    public static $apply_exception = false;
     public static $audit_ok = true;
     public static $checks = 0;
     public static $audits = 0;
     public static function ensure_rewrite_policy() {
         self::$checks++;
-        return self::$apply_ok;
+        if (self::$apply_exception) {
+            throw new RuntimeException('simulated Rewrite exception');
+        }
+        if (self::$apply_ok) {
+            delete_option('esp_rewrite_last_error');
+            return true;
+        }
+        return false;
     }
     public static function audit_rewrite_policy() {
         self::$audits++;
@@ -183,6 +191,38 @@ check(get_option('esp_runtime_state') === runtime_value('READY'),
 check(saved_runtime_state() === 'READY', 'valid state is saved');
 check($wpdb->queries > 0 && $setup->checks === 2 && ESP_Media_Protection::$checks === 2,
     'explicit verification performs migration, schema and Rewrite checks');
+
+// メディア配信のサーバー側Rewrite失敗はPHP認可の起動失敗ではない。
+// 既存保護は「安全」と保証せず、原因を持続表示する。新規保護のガードは別。
+ESP_Media_Protection::$protected_records = true;
+ESP_Media_Protection::$apply_ok = false;
+$GLOBALS['options']['esp_runtime_state'] = runtime_value('VERIFY_REQUIRED');
+$rewrite_attempts = ESP_Media_Protection::$checks;
+check(ESP_Protection_State::boot($setup) === true &&
+    saved_runtime_state() === 'READY' &&
+    ESP_Media_Protection::$checks === $rewrite_attempts + 1 &&
+    get_option('esp_rewrite_last_error') === 'esp_rewrite_unverified',
+    'media Rewrite conflict is diagnosed without disabling PHP authorization');
+$rewrite_attempts = ESP_Media_Protection::$checks;
+check(ESP_Protection_State::boot($setup) === true &&
+    ESP_Media_Protection::$checks === $rewrite_attempts,
+    'READY authorization startup never rechecks Rewrite on every request');
+
+// Rewrite検証の例外でも内部DB/認可を公開扱いに落とさず、診断を残す。
+ESP_Media_Protection::$apply_exception = true;
+$GLOBALS['options']['esp_runtime_state'] = runtime_value('VERIFY_REQUIRED');
+check(ESP_Protection_State::boot($setup) === true &&
+    saved_runtime_state() === 'READY' &&
+    get_option('esp_rewrite_last_error') === 'esp_rewrite_verify_exception',
+    'Rewrite verification exception is not mistaken for internal authorization corruption');
+ESP_Media_Protection::$apply_exception = false;
+ESP_Media_Protection::$apply_ok = true;
+$GLOBALS['options']['esp_runtime_state'] = runtime_value('VERIFY_REQUIRED');
+check(ESP_Protection_State::boot($setup) === true &&
+    saved_runtime_state() === 'READY' &&
+    get_option('esp_rewrite_last_error', '') === '',
+    'explicit successful Rewrite reverification clears previous degraded warning');
+ESP_Media_Protection::$protected_records = false;
 
 // DB版印が欠損しても、移行済みpath IDとスキーマが安定していれば既存サイトを維持。
 // 不正・途中移行のpath IDを「正常なバージョン欠損」と誤認しない。
