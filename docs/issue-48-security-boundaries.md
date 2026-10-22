@@ -165,3 +165,9 @@ PR #49の認可キャッシュは、WordPressの標準postmeta APIによる保�
 - 設定は既存の`esp_settings.media.metadata_check_mode`に保存される。メディア設定保存時は従来のESPメディア認可キャッシュ再生成・世代失効処理が動作し、設定署名の変化でも旧ESP認可スナップショットを拒否する。ただし**WordPress全体のpostmetaオブジェクトキャッシュを一括削除することはない**。高速モードを使用する管理者は、必要なら外部キャッシュの再生成も行う。
 - メディア配信がPHP経由になること、添付IDのDB検索、第三者のWebサーバーRewriteはこの設定では変わらない。高速モードを選んでも、すべてのDB問い合わせがなくなるわけではない。実HTTP/性能測定は別の受入ゲートとして残す。
 
+## Converter for Media（CFM）の plain Inherit 互換性
+
+- `uploads/.htaccess`内の第三者ルールに単独の`RewriteOptions Inherit`がある場合、Apacheの仕様では親ディレクトリのRewriteルールが**現在のルールの後**に継承される。ESP自身を先頭に置ける（外国ルールに明示DENYがない）構成に限って、CFMの`RewriteEngine On`＋`RewriteOptions Inherit`＋`RewriteCond/RewriteRule`群を許容する。
+- `RewriteOptions InheritBefore`・`InheritDown`・`InheritDownBefore`・`MergeBase`・複合指定は引き続き競合扱い。独立DENYとの混在も現時点では自動配置しない。ESP外のRewriteルールは削除・書換えしない。
+- CFMの画像最適化RewriteはESPの保護Rewriteの**後**に置く。旧ESPブロックから版印付きの#49ブロックへ更新し、CFMブロックの完全一致保持・冪等性・読取専用監査を単体テストで検証する。
+- **重要な境界**：この変更は同一`uploads/.htaccess`の構文上の共存を許すだけで、LiteSpeedの設定統合の実挙動、親`.htaccess`の特殊ルール、CFMが作る別ディレクトリ`wp-content/uploads-webpc/uploads/`内の派生画像の匿名直URLを保護した証明ではない。ステージング実HTTPの本文検証が引き続き必須。
