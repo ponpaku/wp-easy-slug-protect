@@ -393,7 +393,25 @@ final class ESP_Protection_State {
                 return false;
             }
             if ($ready && class_exists('ESP_Media_Protection')) {
-                $ready = ESP_Media_Protection::ensure_rewrite_policy() === true;
+                // PHPの認可を成立させるDB/設定検証と、Webサーバー側のメディア
+                // 配信経路の検証を混同しない。Rewriteが更新不能でも通常の
+                // ESP_Coreを登録し、投稿・REST・PHPメディアを既存認可で守る。
+                // ただし静的直URLの保護は保証せず、異常を管理者へ継続通知する。
+                // 新規メディア保護指定/OFF→ONでは、その都度現物のRewriteを
+                // 厳密に確認する（ESP_Media_Protection側の事前ガード）。
+                try {
+                    if (ESP_Media_Protection::ensure_rewrite_policy() !== true &&
+                        !get_option('esp_rewrite_last_error', '')) {
+                        update_option('esp_rewrite_last_error',
+                            'esp_rewrite_unverified', false);
+                    }
+                } catch (\Throwable $rewrite_error) {
+                    error_log('ESP: media Rewrite verification raised an exception');
+                    update_option('esp_rewrite_last_error',
+                        'esp_rewrite_verify_exception', false);
+                }
+                // esp_runtime_stateのREADYは内部認可の検証だけを表す。
+                // #44の更新後処理完了は、Rewrite等の別検証を必須とする。
             }
         } catch (\Throwable $error) {
             error_log('ESP: explicit runtime verification failed');
