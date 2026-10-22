@@ -72,6 +72,20 @@ final class ESP_Protection_State {
                 version_compare($installed_version, ESP_VERSION, '>'));
     }
 
+    /**
+     * 有効化のDDL・設定更新より前に確認する。新しいESPが作成したDBを
+     * 古いZIPのdbDeltaで変更してから拒否する順序は認めない。
+     */
+    public static function can_run_activation_migration() {
+        if (self::is_stale_worker()) {
+            return false;
+        }
+        $stored = get_option('esp_db_version', null);
+        $required = (int) ESP_Config::OPTION_DEFAULTS['db_version'];
+        return !((is_int($stored) || (is_string($stored) && ctype_digit($stored))) &&
+            (int) $stored > $required);
+    }
+
     /** 旧READYやコードの手動差し替えも、一度限りの検証へ誘導する。 */
     private static function needs_verification($runtime) {
         return in_array($runtime['state'], [null, 'PENDING', 'VERIFY_REQUIRED'], true) ||
