@@ -1397,6 +1397,12 @@ class ESP_Media_Protection {
                     $end_at <= $begin_at))) {
                 return new WP_Error('esp_htaccess_ambiguous', __('ESP保護ルールの境界が不正なため自動更新しません。', ESP_Config::TEXT_DOMAIN));
             }
+            // 他のESPワーカーの書込みもflock取得後に版を再確認する。
+            // 将来版のRewriteと更新中の状態は旧コードが変更してはならない。
+            $compatibility = self::check_rewrite_writer_compatibility($old, $begin_at, $end_at);
+            if (is_wp_error($compatibility)) {
+                return $compatibility;
+            }
             // WordPressの明示的なプラグイン無効化では、保護メタ件数にかかわらず
             // ESPのRewriteだけを取り除く。他者のルールは従来どおり保全する。
 
@@ -1568,6 +1574,61 @@ class ESP_Media_Protection {
     }
 
     /**
+     * 新旧PHPワーカーが同じ.htaccessを書き換える際、旧版による保護の後退を拒否。
+     * 旧mainのバージョン印が無いESPブロックは初回の管理下更新で移行可能。
+     * ただし#49以降は新しいRewriteのWriter版印を必ず保持すること。
+     *
+     * この検査は必ず.htaccess.esp.lock取得後に実行する。
+     */
+    private static function check_rewrite_writer_compatibility($contents, $begin_at, $end_at) {
+        if (!defined('ESP_VERSION')) {
+            return new WP_Error('esp_htaccess_writer_version_missing',
+                __('ESPの実行バージョンを確認できないため、保護ルールを変更しません。', ESP_Config::TEXT_DOMAIN));
+        }
+        // updater_pre_installでUPDATINGに入った後は、通常のRewrite設定変更を止める。
+        // 更新後の新PHP検証（VERIFY_REQUIRED/PENDING）は別途行う。
+        $runtime = get_option('esp_runtime_state', null);
+        $runtime_state = is_array($runtime) ? ($runtime['state'] ?? null) : $runtime;
+        if ($runtime_state === 'UPDATING') {
+            return new WP_Error('esp_htaccess_upgrade_in_progress',
+                __('ESP更新中のため保護ルールを変更しません。', ESP_Config::TEXT_DOMAIN));
+        }
+        $installed = get_option(ESP_Config::VERSION_OPTION_KEY, null);
+        $verified = is_array($runtime) ? ($runtime['version'] ?? null) : null;
+        foreach ([$installed, $verified] as $version) {
+            if (is_string($version) && $version !== '' &&
+                version_compare($version, ESP_VERSION, '>')) {
+                return new WP_Error('esp_htaccess_stale_writer',
+                    __('新しいESPによる更新状態を旧版から変更できません。', ESP_Config::TEXT_DOMAIN));
+            }
+        }
+        if ($begin_at === false || $end_at === false) {
+            return true;
+        }
+        $block = substr($contents, $begin_at, $end_at - $begin_at);
+        $count = preg_match_all('/^# ESP Rewrite Writer: ([^\\r\\n]+)\\r?$/m',
+            $block, $matches);
+        if ($count === false || $count > 1 ||
+            (str_contains($block, 'ESP Rewrite Writer:') && $count !== 1)) {
+            return new WP_Error('esp_htaccess_writer_ambiguous',
+                __('保護ルールの作成バージョンを確定できません。', ESP_Config::TEXT_DOMAIN));
+        }
+        // マーカーを持たない旧mainのブロックだけは初回更新で引き継ぐ。
+        if ($count === 1) {
+            $writer = trim($matches[1][0]);
+            if (!preg_match('/^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][A-Za-z0-9.+-]+)?$/D', $writer)) {
+                return new WP_Error('esp_htaccess_writer_ambiguous',
+                    __('保護ルールの作成バージョンが不正です。', ESP_Config::TEXT_DOMAIN));
+            }
+            if (version_compare($writer, ESP_VERSION, '>')) {
+                return new WP_Error('esp_htaccess_future_writer',
+                    __('新しいESPの保護ルールを旧版から書き換えることはできません。', ESP_Config::TEXT_DOMAIN));
+            }
+        }
+        return true;
+    }
+
+    /**
      * 第三者Rewriteとの優先順位を限定した構文から判定する。
      * before: ESP先頭、after: 第三者の拒否優先、null: 未証明で書込み不可。
      * RewriteCondや外部Webサーバー設定の意味的安全性までは保証しない。
@@ -1671,6 +1732,8 @@ class ESP_Media_Protection {
         $upload_path = str_replace('\\', '/', $upload_path); // Windows対応
         
         $rules = "# BEGIN ESP Media Protection\n";
+        // #49以降の全リリースで生成コードの版を刻み、旧PHPが新版を上書きしない。
+        $rules .= "# ESP Rewrite Writer: " . ESP_VERSION . "\n";
         $rules .= "# 保護されたメディアファイルへの直接アクセスをWordPress経由にリダイレクト\n";
         $indent = '    ';
         $rules .= "<IfModule mod_rewrite.c>\n";
