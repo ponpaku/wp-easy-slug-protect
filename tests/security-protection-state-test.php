@@ -119,6 +119,7 @@ class WP_Error {
 function is_wp_error($value) { return $value instanceof WP_Error; }
 function __($msg, $domain = null) { return $msg; }
 function esc_html__($msg, $domain = null) { return $msg; }
+function esc_html($value) { return (string) $value; }
 function esc_url($url) { return $url; }
 function admin_url($uri) { return '/wp-admin/' . $uri; }
 function wp_nonce_field($action) { echo '<input name="_wpnonce" value="test" />'; }
