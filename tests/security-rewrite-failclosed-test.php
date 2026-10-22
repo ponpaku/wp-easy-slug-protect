@@ -391,6 +391,101 @@ check($media->update_htaccess() === true &&
     $matchesPolicy->invoke(null, true) === true,
     'R02: static image optimization pass-through does not block ESP-first rewrite');
 
+// 実際のConverter for Media構成。RewriteOptions Inheritは親ルールを末尾へ
+// 追加する。ESPを先頭に置く限りCFMのAVIF/WebP変換は後段となる。
+$cfm_full = <<<'CFM'
+# BEGIN Converter for Media
+# ! --- DO NOT EDIT PREVIOUS LINE --- !
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  RewriteOptions Inherit
+
+  RewriteCond %{QUERY_STRING} original$
+  RewriteCond %{REQUEST_FILENAME} -f
+  RewriteRule . - [L]
+
+  RewriteCond %{HTTP_ACCEPT} image/avif
+  RewriteCond %{REQUEST_FILENAME} -f
+  RewriteCond %{DOCUMENT_ROOT}/wp-content/uploads-webpc/uploads/$1.jpg.avif -f
+  RewriteRule (.+)\.jpg$ /wp-content/uploads-webpc/uploads/$1.jpg.avif [NC,T=image/avif,L]
+  RewriteCond %{HTTP_ACCEPT} image/avif
+  RewriteCond %{REQUEST_FILENAME} -f
+  RewriteCond %{DOCUMENT_ROOT}/wp-content/uploads-webpc/uploads/$1.jpeg.avif -f
+  RewriteRule (.+)\.jpeg$ /wp-content/uploads-webpc/uploads/$1.jpeg.avif [NC,T=image/avif,L]
+  RewriteCond %{HTTP_ACCEPT} image/avif
+  RewriteCond %{REQUEST_FILENAME} -f
+  RewriteCond %{DOCUMENT_ROOT}/wp-content/uploads-webpc/uploads/$1.png.avif -f
+  RewriteRule (.+)\.png$ /wp-content/uploads-webpc/uploads/$1.png.avif [NC,T=image/avif,L]
+  RewriteCond %{HTTP_ACCEPT} image/avif
+  RewriteCond %{REQUEST_FILENAME} -f
+  RewriteCond %{DOCUMENT_ROOT}/wp-content/uploads-webpc/uploads/$1.webp.avif -f
+  RewriteRule (.+)\.webp$ /wp-content/uploads-webpc/uploads/$1.webp.avif [NC,T=image/avif,L]
+
+  RewriteCond %{HTTP_ACCEPT} image/webp
+  RewriteCond %{REQUEST_FILENAME} -f
+  RewriteCond %{DOCUMENT_ROOT}/wp-content/uploads-webpc/uploads/$1.jpg.webp -f
+  RewriteRule (.+)\.jpg$ /wp-content/uploads-webpc/uploads/$1.jpg.webp [NC,T=image/webp,L]
+  RewriteCond %{HTTP_ACCEPT} image/webp
+  RewriteCond %{REQUEST_FILENAME} -f
+  RewriteCond %{DOCUMENT_ROOT}/wp-content/uploads-webpc/uploads/$1.jpeg.webp -f
+  RewriteRule (.+)\.jpeg$ /wp-content/uploads-webpc/uploads/$1.jpeg.webp [NC,T=image/webp,L]
+  RewriteCond %{HTTP_ACCEPT} image/webp
+  RewriteCond %{REQUEST_FILENAME} -f
+  RewriteCond %{DOCUMENT_ROOT}/wp-content/uploads-webpc/uploads/$1.png.webp -f
+  RewriteRule (.+)\.png$ /wp-content/uploads-webpc/uploads/$1.png.webp [NC,T=image/webp,L]
+</IfModule>
+# ! --- DO NOT EDIT NEXT LINE --- !
+# END Converter for Media
+CFM;
+$cfm_full .= "\n";
+$legacy_esp = "# BEGIN ESP Media Protection\n" .
+    "<IfModule mod_rewrite.c>\nRewriteEngine On\n" .
+    'RewriteRule ^(.+)$ /index.php?esp-media=$1 [L,QSA]' . "\n" .
+    "</IfModule>\n# END ESP Media Protection\n";
+foreach (['Apache/2.4.62', 'LiteSpeed'] as $server) {
+    $_SERVER['SERVER_SOFTWARE'] = $server;
+    $GLOBALS['litespeed_key'] = 'test-key-123456';
+    file_put_contents($file, $legacy_esp . $cfm_full);
+    check($media->update_htaccess() === true,
+        'CFM Inherit: legacy ESP Rewrite is upgraded without rejecting full CFM on ' . $server);
+    $installed_cfm = file_get_contents($file);
+    check(str_starts_with($installed_cfm, '# BEGIN ESP Media Protection') &&
+        str_contains($installed_cfm, '# ESP Rewrite Writer: ' . ESP_VERSION) &&
+        str_ends_with($installed_cfm, $cfm_full) &&
+        $matchesPolicy->invoke(null, true) === true &&
+        ESP_Media_Protection::audit_rewrite_policy() === true,
+        'CFM Inherit: ESP stays ahead, CFM block is unchanged and policy audit passes on ' . $server);
+    check($media->update_htaccess() === true &&
+        file_get_contents($file) === $installed_cfm,
+        'CFM Inherit: repeated Rewrite installation is byte-for-byte idempotent on ' . $server);
+}
+$_SERVER['SERVER_SOFTWARE'] = 'Apache/2.4';
+$GLOBALS['litespeed_key'] = 'key123';
+
+// 不明なRewriteOptionsや親ルールの先行は引き続き安全性未証明として拒否。
+foreach (['InheritBefore', 'InheritDown', 'InheritDownBefore', 'MergeBase',
+    'Inherit IgnoreInherit', 'Inherit,InheritBefore'] as $unsafe_option) {
+    $foreign_option = "RewriteEngine On\nRewriteOptions {$unsafe_option}\n";
+    file_put_contents($file, $foreign_option);
+    $conflict = $media->update_htaccess();
+    check($conflict instanceof WP_Error &&
+        $conflict->get_error_code() === 'esp_htaccess_foreign_rewrite_conflict' &&
+        file_get_contents($file) === $foreign_option,
+        'CFM Inherit: unsafe/combined option remains blocked: ' . $unsafe_option);
+}
+$deny_with_inherit = "RewriteEngine On\nRewriteOptions Inherit\n" .
+    "RewriteRule ^private/ - [F,L]\n";
+file_put_contents($file, $deny_with_inherit);
+check($media->update_htaccess() instanceof WP_Error &&
+    file_get_contents($file) === $deny_with_inherit,
+    'CFM Inherit: inherited rules plus foreign deny cannot move ESP behind unknown policy');
+$commented_inherit = "RewriteEngine On\nRewriteOptions Inherit # parental rules last\n" .
+    "RewriteRule ^example\\.jpg$ - [L]\n";
+file_put_contents($file, $commented_inherit);
+check($media->update_htaccess() === true &&
+    $matchesPolicy->invoke(null, true) === true,
+    'CFM Inherit: standalone case-insensitive option with trailing comment is recognized');
+
 // RewriteRuleがなくても後方のRewriteEngine OffはESP自体を無効化する。
 $engine_off = "RewriteEngine Off\n";
 file_put_contents($file, $engine_off);
