@@ -2,6 +2,7 @@
 /** .htaccessの更新失敗時の拒否と、安全な置換処理を検証する単体テスト。 */
 define('ABSPATH', __DIR__ . '/');
 define('WEEK_IN_SECONDS', 604800);
+define('ESP_VERSION', '0.7.38');
 require __DIR__ . '/../includes/class-esp-config.php';
 class ESP_Option {
     public static function get_current_setting($name) {
@@ -249,6 +250,54 @@ fclose($lockHandle);
 check($media->update_htaccess() === true, 'known protected media updates rewrite');
 $new = file_get_contents($file);
 check(strpos($new, 'esp-media') !== false && strpos($new, '# Other plugin rule') !== false, 'generated rewrite keeps unrelated rules');
+check(strpos($new, "# ESP Rewrite Writer: " . ESP_VERSION . "\n") !== false,
+    'newly installed Rewrite records ESP writer version');
+
+// 古いPHPが新しいRewriteを復元・削除・書換えできないこと。
+$future_rules = str_replace('# ESP Rewrite Writer: ' . ESP_VERSION,
+    '# ESP Rewrite Writer: 0.7.39', $new);
+file_put_contents($file, $future_rules);
+$future_conflict = $media->update_htaccess();
+check($future_conflict instanceof WP_Error &&
+    $future_conflict->get_error_code() === 'esp_htaccess_future_writer' &&
+    file_get_contents($file) === $future_rules,
+    'older PHP writer cannot overwrite a newer-version ESP Rewrite block');
+$future_cleanup = $media->update_htaccess(false, true);
+check($future_cleanup instanceof WP_Error &&
+    $future_cleanup->get_error_code() === 'esp_htaccess_future_writer' &&
+    file_get_contents($file) === $future_rules,
+    'older PHP worker cannot delete future Rewrite during deactivation');
+$GLOBALS['enabled'] = false;
+$future_off = $media->update_htaccess();
+check($future_off instanceof WP_Error &&
+    file_get_contents($file) === $future_rules,
+    'older PHP worker cannot remove future Rewrite on media OFF');
+$GLOBALS['enabled'] = true;
+
+$malformed_writer = str_replace('# ESP Rewrite Writer: ' . ESP_VERSION,
+    '# ESP Rewrite Writer: bad-version', $new);
+file_put_contents($file, $malformed_writer);
+$invalid = $media->update_htaccess();
+check($invalid instanceof WP_Error &&
+    $invalid->get_error_code() === 'esp_htaccess_writer_ambiguous' &&
+    file_get_contents($file) === $malformed_writer,
+    'unknown writer-version header is preserved for administrator review');
+
+file_put_contents($file, $new);
+$GLOBALS['options']['esp_runtime_state'] = ['state' => 'UPDATING', 'version' => ESP_VERSION];
+$pending_error = $media->update_htaccess();
+check($pending_error instanceof WP_Error &&
+    $pending_error->get_error_code() === 'esp_htaccess_upgrade_in_progress' &&
+    file_get_contents($file) === $new,
+    'Rewrite writer respects persisted UPDATING state');
+unset($GLOBALS['options']['esp_runtime_state']);
+$GLOBALS['options'][ESP_Config::VERSION_OPTION_KEY] = '0.7.39';
+$installed_newer = $media->update_htaccess();
+check($installed_newer instanceof WP_Error &&
+    $installed_newer->get_error_code() === 'esp_htaccess_stale_writer' &&
+    file_get_contents($file) === $new,
+    'newer installed-code version blocks an old worker even before Rewrite changes');
+unset($GLOBALS['options'][ESP_Config::VERSION_OPTION_KEY]);
 
 check(strpos($new, '# BEGIN ESP Media Protection') === 0 &&
     strpos($new, $foreign) > 0 && $matchesPolicy->invoke(null, true) === true,
