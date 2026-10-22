@@ -455,10 +455,12 @@ class ESP_Media_Protection {
         }
         try {
             $path_id = get_post_meta((int) $post_id, self::META_KEY_PROTECTED_PATH, true);
-            if (!is_scalar($path_id) && $path_id !== null) {
+            // WordPressの正常な「メタなし」は空文字列。false/null/配列等の
+            // 異常な戻り値を「未保護」と解釈して公開しない。
+            if (!is_string($path_id) && !is_int($path_id)) {
                 return null;
             }
-            return ['path_id' => $path_id === null ? '' : (string) $path_id];
+            return ['path_id' => (string) $path_id];
         } catch (\Throwable $error) {
             return null;
         }
