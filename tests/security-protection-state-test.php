@@ -596,21 +596,25 @@ check(ESP_Protection_State::boot($setup) === false && $setup->checks === 0,
     'malformed runtime option remains UNKNOWN without automatic promotion');
 $GLOBALS['options']['esp_runtime_state'] = runtime_value('READY');
 
-// #44の正式な互換判定まで、古いコードへの置換を無条件にREADYへ戻さない。
+// 新版READY後に残っている旧PHPワーカーは共有状態を書き換えない。
 $GLOBALS['options']['esp_runtime_state'] = runtime_value('READY', '0.7.39');
 $setup->checks = 0;
 check(ESP_Protection_State::boot($setup) === false &&
     $setup->checks === 0 &&
-    get_option('esp_runtime_state') === runtime_value('FAILED', '0.7.39'),
-    'downgrade from a newer verified code version is not silently certified READY');
+    get_option('esp_runtime_state') === runtime_value('READY', '0.7.39'),
+    'stale worker refuses this request without overwriting newer READY');
 
 $GLOBALS['options']['esp_runtime_state'] = runtime_value('READY');
 $GLOBALS['options'][ESP_Config::VERSION_OPTION_KEY] = '0.7.39';
 $setup->checks = 0;
+check(ESP_Protection_State::boot($setup) === false &&
+    $setup->checks === 0 &&
+    get_option('esp_runtime_state') === runtime_value('READY'),
+    'stale worker does not trust its own READY when installed version is newer');
 check(ESP_Protection_State::verify_and_commit($setup) === false &&
     $setup->checks === 0 &&
-    get_option('esp_runtime_state') === runtime_value('FAILED'),
-    'newer installed-version marker blocks implicit rollback certification');
+    get_option('esp_runtime_state') === runtime_value('READY'),
+    'newer installed-version marker cannot be changed to FAILED by stale verifier');
 $GLOBALS['options'][ESP_Config::VERSION_OPTION_KEY] = ESP_VERSION;
 
 echo "All protection runtime tests passed.\n";
