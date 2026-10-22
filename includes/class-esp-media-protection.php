@@ -1585,6 +1585,13 @@ class ESP_Media_Protection {
             return new WP_Error('esp_htaccess_writer_version_missing',
                 __('ESPの実行バージョンを確認できないため、保護ルールを変更しません。', ESP_Config::TEXT_DOMAIN));
         }
+        // flockより前に別ワーカーが持っていたoptionsキャッシュを使わない。
+        // Writer呼出しは稀なので、更新判定の直前に必要な印だけ失効する。
+        if (function_exists('wp_cache_delete')) {
+            wp_cache_delete('alloptions', 'options');
+            wp_cache_delete('esp_runtime_state', 'options');
+            wp_cache_delete(ESP_Config::VERSION_OPTION_KEY, 'options');
+        }
         // updater_pre_installでUPDATINGに入った後は、通常のRewrite設定変更を止める。
         // 更新後の新PHP検証（VERIFY_REQUIRED/PENDING）は別途行う。
         $runtime = get_option('esp_runtime_state', null);
