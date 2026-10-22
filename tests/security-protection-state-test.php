@@ -673,12 +673,15 @@ check(ESP_Protection_State::recover_stuck_upgrade($setup, true) === false &&
     saved_runtime_state() === 'UPDATING',
     'H1: ongoing update younger than 30 minutes cannot be recovered');
 $GLOBALS['options']['esp_runtime_state']['since'] = time() - 1900;
-$recovery_result = ESP_Protection_State::recover_stuck_upgrade($setup, true);
-check($recovery_result === true && saved_runtime_state() === 'READY',
-    'H1: manager may recover stale update only through locked full verification ' .
-    json_encode(['result' => $recovery_result, 'state' => get_option('esp_runtime_state'),
-        'db_version' => get_option('esp_db_version'), 'db_lock' => $wpdb->lock_owner,
-        'setup_ok' => $setup->ok, 'checks' => $setup->checks]));
+ob_start();
+ESP_Protection_State::render_recovery_admin();
+$recovery_html = ob_get_clean();
+check(strpos($recovery_html, 'esp_recover_stuck_upgrade') !== false &&
+    strpos($recovery_html, 'confirm_upgrade_stopped') !== false,
+    'H1: recovery screen requires explicit administrator confirmation');
+check(ESP_Protection_State::recover_stuck_upgrade($setup, true) === true &&
+    saved_runtime_state() === 'READY',
+    'H1: manager may recover stale update only through locked full verification');
 // レガシーの更新フラグはsinceを持たない。確認なしで自動解除しない。
 $GLOBALS['options']['esp_runtime_state'] = 'UPDATING';
 check(ESP_Protection_State::recover_stuck_upgrade($setup, true) === true &&
@@ -773,5 +776,21 @@ check(ESP_Protection_State::verify_and_commit($setup) === false &&
     get_option('esp_runtime_state') === runtime_value('READY'),
     'newer installed-version marker cannot be changed to FAILED by stale verifier');
 $GLOBALS['options'][ESP_Config::VERSION_OPTION_KEY] = ESP_VERSION;
+
+// M2: 有効化前の無副作用な判定で旧コードのDDLと将来スキーマを拒否。
+check(ESP_Protection_State::can_run_activation_migration() === true,
+    'M2: current code can activate against a compatible database');
+$GLOBALS['options'][ESP_Config::VERSION_OPTION_KEY] = '0.7.39';
+check(ESP_Protection_State::can_run_activation_migration() === false,
+    'M2: prior installed version blocks stale activation before schema migration');
+$GLOBALS['options'][ESP_Config::VERSION_OPTION_KEY] = ESP_VERSION;
+$GLOBALS['options']['esp_runtime_state'] = runtime_value('READY', '0.7.39');
+check(ESP_Protection_State::can_run_activation_migration() === false,
+    'M2: newer verified READY also blocks stale activation');
+$GLOBALS['options']['esp_runtime_state'] = runtime_value('READY');
+$GLOBALS['options']['esp_db_version'] = (int) ESP_Config::OPTION_DEFAULTS['db_version'] + 1;
+check(ESP_Protection_State::can_run_activation_migration() === false,
+    'M2: future schema marker cannot be mutated by old activation DDL');
+$GLOBALS['options']['esp_db_version'] = ESP_Config::OPTION_DEFAULTS['db_version'];
 
 echo "All protection runtime tests passed.\n";
