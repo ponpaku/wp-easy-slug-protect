@@ -233,9 +233,16 @@ class ESP_Sanitize {
             }
         }
 
+        // 未送信なら既存の明示選択を維持。未知値は厳密モードへ戻す。
+        $mode = is_array($settings) && array_key_exists('metadata_check_mode', $settings)
+            ? $settings['metadata_check_mode']
+            : (is_array($current) ? ($current['metadata_check_mode'] ?? 'strict') : 'strict');
+        $metadata_check_mode = is_string($mode) && $mode === 'cached' ? 'cached' : 'strict';
+
         return array(
             'enabled' => is_array($settings) && !empty($settings['enabled']),
             'delivery_method' => $delivery_method,
+            'metadata_check_mode' => $metadata_check_mode,
             ESP_Media_Protection::OPTION_LITESPEED_KEY => $stored_key
         );
     }
