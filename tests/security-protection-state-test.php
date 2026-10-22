@@ -673,9 +673,12 @@ check(ESP_Protection_State::recover_stuck_upgrade($setup, true) === false &&
     saved_runtime_state() === 'UPDATING',
     'H1: ongoing update younger than 30 minutes cannot be recovered');
 $GLOBALS['options']['esp_runtime_state']['since'] = time() - 1900;
-check(ESP_Protection_State::recover_stuck_upgrade($setup, true) === true &&
-    saved_runtime_state() === 'READY',
-    'H1: manager may recover stale update only through locked full verification');
+$recovery_result = ESP_Protection_State::recover_stuck_upgrade($setup, true);
+check($recovery_result === true && saved_runtime_state() === 'READY',
+    'H1: manager may recover stale update only through locked full verification ' .
+    json_encode(['result' => $recovery_result, 'state' => get_option('esp_runtime_state'),
+        'db_version' => get_option('esp_db_version'), 'db_lock' => $wpdb->lock_owner,
+        'setup_ok' => $setup->ok, 'checks' => $setup->checks]));
 // レガシーの更新フラグはsinceを持たない。確認なしで自動解除しない。
 $GLOBALS['options']['esp_runtime_state'] = 'UPDATING';
 check(ESP_Protection_State::recover_stuck_upgrade($setup, true) === true &&
