@@ -95,7 +95,8 @@ function get_post_meta($post_id, $meta_key, $single = false) {
     if (!empty($GLOBALS['cached_meta_throw'])) {
         throw new RuntimeException('Simulated object cache failure');
     }
-    return $GLOBALS['cached_media_path'] ?? '';
+    return array_key_exists('cached_media_path', $GLOBALS)
+        ? $GLOBALS['cached_media_path'] : '';
 }
 function update_option($key, $value, $autoload = null) { $GLOBALS['options'][$key] = $value; return true; }
 function delete_option($key) { unset($GLOBALS['options'][$key]); return true; }
@@ -214,6 +215,12 @@ check($selectMeta->invoke(null, 42) === ['path_id' => 'cache_protected'],
 $GLOBALS['cached_media_path'] = ['malformed'];
 check($selectMeta->invoke(null, 42) === null,
     'cached metadata with unexpected array shape is not treated as public');
+$GLOBALS['cached_media_path'] = false;
+check($selectMeta->invoke(null, 42) === null,
+    'ambiguous false from cached metadata is not treated as public');
+$GLOBALS['cached_media_path'] = null;
+check($selectMeta->invoke(null, 42) === null,
+    'ambiguous null from cached metadata is not treated as public');
 $GLOBALS['cached_meta_throw'] = true;
 check($selectMeta->invoke(null, 42) === null,
     'cached metadata exception does not silently permit public delivery');
