@@ -51,3 +51,4 @@ wp-config.php
 dev-doc.md
 /archive/
 *.ps1
+/dist/

@@ -1,0 +1,26 @@
+name: Build stable release draft
+on:
+  push:
+    tags: ['v[0-9]*']
+permissions:
+  contents: write
+jobs:
+  release-draft:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require a reviewed main commit
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          git fetch origin main
+          git merge-base --is-ancestor HEAD origin/main
+          python3 tools/build-release.py --tag "$TAG"
+      - name: Create draft for maintainer review (never publish automatically)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" dist/*.zip dist/*.sha256 --draft --verify-tag --title "$TAG" --generate-notes

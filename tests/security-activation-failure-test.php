@@ -96,7 +96,12 @@ function check_activation_failure($condition, $message) {
 require __DIR__ . '/../includes/class-esp-setup.php';
 $wpdb = new ActivationTestDB();
 $_SERVER['SERVER_SOFTWARE'] = 'Apache/2.4';
-$setup = new ESP_Setup();
+// Schema ownership moved to Migrator. This suite exercises only activation's
+// failed-Rewrite cleanup; real migration admission is tested against WordPress/MySQL.
+class ActivationFlowSetup extends ESP_Setup {
+    public function update_check($lock = null) { $GLOBALS['ddl_count']++; return true; }
+}
+$setup = new ActivationFlowSetup();
 
 function reset_activation_test($records, $verifies, $cleanup_ok = true) {
     $GLOBALS['options'] = [];

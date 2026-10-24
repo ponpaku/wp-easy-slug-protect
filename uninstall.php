@@ -168,6 +168,9 @@ foreach (ESP_Config::DB_TABLES as $table_name) {
 delete_option(ESP_Config::OPTION_KEY);
 delete_option(ESP_Config::VERSION_OPTION_KEY);
 delete_option('esp_db_version');
+delete_option('esp_migration_state');
+delete_option('esp_update_state');
+delete_site_transient('esp_stable_release_v1');
 delete_option('esp_post_auth_epoch');
 delete_option('esp_media_auth_epoch');
 delete_option('esp_rewrite_policy_version');
@@ -197,7 +200,8 @@ $cron_hooks = [
     ESP_Config::INTEGRITY_CHECK_HOOK,
     'esp_media_cache_refresh',
     'esp_all_cache_refresh',
-    'esp_verify_runtime_once'
+    'esp_verify_runtime_once',
+    'esp_update_retry'
 ];
 
 foreach ($cron_hooks as $hook) {
