@@ -180,3 +180,11 @@ PR #49の認可キャッシュは、WordPressの標準postmeta APIによる保�
 - 不一致時の通知はESP設定内の「.htaccessのルールを再設定する」へのリンクを示す。「管理者による再検証まで新規保護メディア登録を拒否する」という曖昧な文言を廃止。再設定ボタンと内部認可の`READY`再検証は別処理。
 - この解除は**ファイルの構文一致**だけであり、LiteSpeed/Apache実HTTPの直URL保護を証明しない。HTTPテストゲートは残す。
 
+## 2026-10-24 CORESERVER V2 LiteSpeedの選択的B=互換性（v0.7.39候補）
+
+- ステージング（CloudLinux、LiteSpeed）で保護PNGの匿名HTTP GETがHTTP 200・本文一致。構文監査・DB保護メタ確認はPASSでもHTTP保護の保証ではない。
+- uploads/.htaccess（644）は適用され、明示的な `[F,L]` は403。元の `REQUEST_FILENAME -f` と `REQUEST_URI` 条件を保持して `[F,L]` にした場合も403。
+- 内部Rewriteのフラグ別実測：選択的 `[B= %&+#?;,L,QSA]`／`[B=%&+#?;,L,QSA]` は匿名200、`[L,QSA]`／通常 `[B,L,QSA]` は匿名302（ログイン画面）。
+- LiteSpeed分岐だけ通常 `[B,L,QSA]` に変更し、Apache側の選択的 `[B= %&+#?;,L]` は維持。通常 `[B]` はバックリファレンス中のスラッシュも `%2F` にする可能性があるが、クエリ値としてPHP側で復号される。特殊文字と複数階層を含む実HTTPは未受入。
+- Plugin / Rewrite Writer を0.7.39へ更新する。DB schema版は変更しない。Writer版印、UPDATING、GET_LOCK、flock、旧ワーカー防御は既存実装を利用し、別方式のLock機構を追加しない。
+- **マージゲート**：修正版ESPにRewriteを自動再生成させてから、実LiteSpeed・Apacheで匿名/認証済みの原本と派生メディア、特殊文字（空白、日本語、`&`、`+`、`#`、`?`、`%`）、複数階層、HEAD/Range/304、CFMの独立WebP/AVIF URL、0→1→0、Rewrite復旧・性能、メンテナンス下の旧新ワーカー切替を確認する。HTTP 302だけでは本人による取得や機密漏洩防止を証明しない。未検証の間はDraft・本番導入禁止。
