@@ -3,7 +3,7 @@
  * AVIF media protection regression tests (no WordPress bootstrap required).
  */
 define('ABSPATH', __DIR__ . '/');
-define('ESP_VERSION', '0.7.38');
+define('ESP_VERSION', '0.7.39');
 define('WEEK_IN_SECONDS', 7 * 24 * 60 * 60);
 require __DIR__ . '/../includes/class-esp-config.php';
 class ESP_Option {
@@ -69,8 +69,11 @@ check_avif(strpos($htaccess, 'esp-media=$1 "[B= %&+#?;,L]"') !== false,
 $_SERVER['SERVER_SOFTWARE'] = 'LiteSpeed/6.0';
 $htaccess = $apache->invoke($media);
 check_avif(strpos($htaccess, 'avif') !== false, 'LiteSpeed rules protect AVIF');
-check_avif(strpos($htaccess, 'esp-media=$1 "[B= %&+#?;,L,QSA]"') !== false,
-    'LiteSpeed media rewrite retains QSA and escapes reserved filename characters');
+check_avif(strpos($htaccess, 'esp-media=$1 [B,L,QSA]') !== false &&
+    strpos($htaccess, '[B=') === false,
+    'LiteSpeed media rewrite uses ordinary B instead of unsupported selective B= and retains QSA');
+check_avif(strpos($htaccess, '# ESP Rewrite Writer: 0.7.39') !== false,
+    'LiteSpeed Rewrite carries the new 0.7.39 writer version');
 $_SERVER['SERVER_SOFTWARE'] = 'nginx/1.27';
 $nginx = ESP_Media_Protection::generate_nginx_rules_for_admin();
 check_avif(is_array($nginx) && strpos($nginx['rules'], 'avif') !== false, 'Nginx rules protect AVIF');
