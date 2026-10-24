@@ -4,7 +4,13 @@ on:
   push:
     branches:
       - main
-      - fix/atomic-login-rate-limits
+
+# A PR branch should never run both pull_request and push for each commit.
+# Cancel outdated runs only; keep the full security / MySQL / packaging gates.
+concurrency:
+  group: esp-security-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   php:
     runs-on: ubuntu-latest
