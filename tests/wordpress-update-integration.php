@@ -75,10 +75,11 @@ $new_user = str_repeat('n', 32); $new_cookie = str_repeat('n', 64);
 $wpdb->insert(table_name('brute'), ['ip_address' => '127.0.0.1', 'path' => '/members/',
     'path_id' => 'path_old', 'time' => gmdate('Y-m-d H:i:s')]);
 foreach (['path_old' => [$old_user, $old_cookie], 'path_kept' => [$new_user, $new_cookie]] as $path_id => $auth) {
-    $wpdb->insert(table_name('remember'), ['path' => '/members/', 'path_id' => $path_id,
+    $inserted = $wpdb->insert(table_name('remember'), ['path' => '/members/', 'path_id' => $path_id,
         'password_version' => 7, 'user_id' => $auth[0],
         'token' => hash_hmac('sha256', $auth[1], AUTH_SALT),
         'created' => '2026-01-01 00:00:00', 'expires' => '2027-01-01 00:00:00']);
+    t($inserted === 1, 'fixture inserts ' . $path_id . ' remember token');
 }
 $stale_before = $wpdb->get_results('SELECT * FROM ' . table_name('remember') . ' ORDER BY id', ARRAY_A);
 $brute_before = $wpdb->get_results('SELECT * FROM ' . table_name('brute') . ' ORDER BY id', ARRAY_A);
@@ -91,6 +92,10 @@ t(!(new ESP_Auth())->is_logged_in($s['path']['path_kept']),
     'detached old remember token cannot authenticate the new path ID');
 $_COOKIE['esp_remember_id_path_kept'] = $new_user;
 $_COOKIE['esp_remember_token_path_kept'] = $new_cookie;
+$matched = $wpdb->get_var($wpdb->prepare('SELECT id FROM ' . table_name('remember') .
+    ' WHERE user_id = %s AND token = %s AND path_id = %s AND expires > NOW()',
+    $new_user, hash_hmac('sha256', $new_cookie, AUTH_SALT), 'path_kept'));
+t($matched !== null, 'current remember token is queryable by authentication conditions');
 t((new ESP_Auth())->is_logged_in($s['path']['path_kept']),
     'current path ID remember token continues authenticating');
 unset($_COOKIE['esp_remember_id_path_kept'], $_COOKIE['esp_remember_token_path_kept']);
