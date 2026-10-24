@@ -3,7 +3,7 @@
 define('ABSPATH', __DIR__ . '/');
 define('ARRAY_A', 'ARRAY_A');
 define('ESP_PATH', __DIR__ . '/../');
-define('ESP_VERSION', '0.7.38');
+define('ESP_VERSION', '0.7.39');
 require __DIR__ . '/../includes/class-esp-config.php';
 require __DIR__ . '/../includes/class-esp-option.php';
 require __DIR__ . '/../includes/class-esp-protection-state.php';
