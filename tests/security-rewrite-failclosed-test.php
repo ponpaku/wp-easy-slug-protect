@@ -2,7 +2,7 @@
 /** .htaccessの更新失敗時の拒否と、安全な置換処理を検証する単体テスト。 */
 define('ABSPATH', __DIR__ . '/');
 define('WEEK_IN_SECONDS', 604800);
-define('ESP_VERSION', '0.7.38');
+define('ESP_VERSION', '0.7.39');
 require __DIR__ . '/../includes/class-esp-config.php';
 class ESP_Option {
     public static function get_current_setting($name) {
@@ -309,9 +309,19 @@ check(strpos($new, 'esp-media') !== false && strpos($new, '# Other plugin rule')
 check(strpos($new, "# ESP Rewrite Writer: " . ESP_VERSION . "\n") !== false,
     'newly installed Rewrite records ESP writer version');
 
+// LiteSpeedの選択的[B=]は実HTTPでPHP認可を迂回した。生成時に通常[B]を要求。
+$_SERVER['SERVER_SOFTWARE'] = 'LiteSpeed/6.0';
+$lite_rules = $reflection->getMethod('get_htaccess_rules')->invoke($media, true, true, 'test-key');
+check(is_string($lite_rules) &&
+    strpos($lite_rules, 'esp-media=$1 [B,L,QSA]') !== false &&
+    strpos($lite_rules, '[B=') === false &&
+    strpos($lite_rules, '# ESP Rewrite Writer: ' . ESP_VERSION) !== false,
+    'LiteSpeed generated Rewrite captures protected files using ordinary B with 0.7.39 writer');
+$_SERVER['SERVER_SOFTWARE'] = 'Apache/2.4';
+
 // 古いPHPが新しいRewriteを復元・削除・書換えできないこと。
 $future_rules = str_replace('# ESP Rewrite Writer: ' . ESP_VERSION,
-    '# ESP Rewrite Writer: 0.7.39', $new);
+    '# ESP Rewrite Writer: 0.7.40', $new);
 file_put_contents($file, $future_rules);
 $future_conflict = $media->update_htaccess();
 check($future_conflict instanceof WP_Error &&
@@ -347,7 +357,7 @@ check($pending_error instanceof WP_Error &&
     file_get_contents($file) === $new,
     'Rewrite writer respects persisted UPDATING state');
 unset($GLOBALS['options']['esp_runtime_state']);
-$GLOBALS['options'][ESP_Config::VERSION_OPTION_KEY] = '0.7.39';
+$GLOBALS['options'][ESP_Config::VERSION_OPTION_KEY] = '0.7.40';
 $installed_newer = $media->update_htaccess();
 check($installed_newer instanceof WP_Error &&
     $installed_newer->get_error_code() === 'esp_htaccess_stale_writer' &&
