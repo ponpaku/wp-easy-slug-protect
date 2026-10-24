@@ -1,7 +1,7 @@
 <?php
 /** Advisory lock tests using two actual MySQL connections, through wpdb-style methods. */
 define('ABSPATH', __DIR__ . '/');
-define('ESP_VERSION', '0.7.38');
+define('ESP_VERSION', '0.7.39');
 class ESP_Config {
     const VERSION_OPTION_KEY = 'esp_plugin_version';
 }
@@ -122,10 +122,10 @@ verify($set->invoke(null, 'VERIFY_REQUIRED', null, 'UPDATING') === true &&
     get_option('esp_runtime_state')['state'] === 'VERIFY_REQUIRED',
     'shutdown transition validates expected state while holding lock');
 verify(update_option('esp_runtime_state',
-    ['state' => 'READY', 'version' => '0.7.39']), 'seed newer verified version');
+    ['state' => 'READY', 'version' => '0.7.40']), 'seed newer verified version');
 $wpdb = new VerificationTestWPDB($c);
 verify($set->invoke(null, 'FAILED') === false &&
-    get_option('esp_runtime_state') === ['state' => 'READY', 'version' => '0.7.39'],
+    get_option('esp_runtime_state') === ['state' => 'READY', 'version' => '0.7.40'],
     'older worker cannot overwrite a later READY from another connection');
 $wpdb = new VerificationTestWPDB($a);
 verify(update_option('esp_runtime_state',
