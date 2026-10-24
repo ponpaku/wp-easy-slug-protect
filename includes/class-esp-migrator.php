@@ -378,7 +378,11 @@ final class ESP_Migrator {
                 $id = 'path_' . substr(hash('sha256', $path['path']), 0, 32);
                 $path['id'] = $id; $changed = true;
             }
-            if (isset($new[$id])) { throw new RuntimeException('path_mapping_ambiguous'); }
+            // The retired_ namespace is reserved for non-authenticatable
+            // historical rows, never for active protection identities.
+            if (strpos($id, 'retired_') === 0 || isset($new[$id])) {
+                throw new RuntimeException('path_mapping_ambiguous');
+            }
             $new[$id] = $path; $map[$path['path']] = $id;
         }
         return ['map' => $map, 'paths' => $new, 'changed' => $changed];
