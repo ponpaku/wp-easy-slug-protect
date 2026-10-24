@@ -156,7 +156,7 @@ final class ESP_Migrator {
             // over integers; the schema inspector validates every required field/index.
             $this->apply_schema($tables, $clean || $resuming_install);
             $this->checkpoint('v1');
-            $backfill = $legacy || ($old['status'] ?? '') === 'pending' || $this->missing_path_rows($paths['map']);
+            $backfill = $legacy || ($old['status'] ?? '') === 'pending' || $this->missing_path_rows();
             if ($backfill) {
                 if (($old['status'] ?? '') !== 'pending') { unset($this->state['cursors']); }
                 if (!$this->backfill_paths($paths['map'])) { return false; }
@@ -386,6 +386,7 @@ final class ESP_Migrator {
 
     private function backfill_paths($map) {
         global $wpdb;
+        $active_ids = array_fill_keys(array_values($map), true);
         foreach (['brute', 'remember'] as $kind) {
             $cursor = (int) ($this->state['cursors'][$kind] ?? 0);
             $rows = $wpdb->get_results($wpdb->prepare('SELECT id, path, path_id FROM ' .
@@ -394,14 +395,24 @@ final class ESP_Migrator {
             foreach ($rows as $row) {
                 $expected = $map[$row['path']] ?? null;
                 if ($expected !== null) {
-                    if ($row['path_id'] !== '' && $row['path_id'] !== $expected) { throw new RuntimeException('path_mapping_ambiguous'); }
+                    // Stale history IDs are inert; never rewrite them to the current
+                    // path ID. A different *active* ID, however, is an invalid link.
+                    if ($row['path_id'] !== '' && $row['path_id'] !== $expected &&
+                        isset($active_ids[$row['path_id']])) {
+                        throw new RuntimeException('path_mapping_ambiguous');
+                    }
                     if ($row['path_id'] === '') {
                         $this->sql($wpdb->prepare('UPDATE ' . $this->table($kind) . ' SET path_id = %s WHERE id = %d AND path_id = %s',
                             $expected, $row['id'], ''));
                     }
                 } elseif ($row['path_id'] === '') {
-                    // Unknown historical path: preserve its row, never invent a mapping.
-                    throw new RuntimeException('path_mapping_ambiguous');
+                    // Do not leave deleted-path history unassigned: a later re-add
+                    // would otherwise bind its old credentials to the new path ID.
+                    // Assign a deterministic inert ID only to previously blank rows.
+                    $retired_id = 'retired_' . substr(hash('sha256', $row['path']), 0, 40);
+                    if (isset($active_ids[$retired_id])) { throw new RuntimeException('path_mapping_ambiguous'); }
+                    $this->sql($wpdb->prepare('UPDATE ' . $this->table($kind) . ' SET path_id = %s WHERE id = %d AND path_id = %s',
+                        $retired_id, $row['id'], ''));
                 }
                 $cursor = (int) $row['id'];
             }
@@ -414,26 +425,45 @@ final class ESP_Migrator {
         return true;
     }
 
-    private function verify_path_rows($map) {
+    /**
+     * Permit detached historical IDs, but not a reference to another active
+     * path: remember authentication identifies its scope by path_id.
+     * After backfill, unassigned rows are also invalid for active paths.
+     */
+    private function assert_active_path_links($kind, $map, $require_assigned) {
         global $wpdb;
-        foreach (['brute', 'remember'] as $kind) {
-            foreach ($map as $path => $id) {
-                $bad = $wpdb->get_var($wpdb->prepare('SELECT id FROM ' . $this->table($kind) .
-                    ' WHERE BINARY path = BINARY %s AND BINARY path_id <> BINARY %s LIMIT 1', $path, $id));
-                if ($wpdb->last_error !== '' || $bad !== null) { throw new RuntimeException('path_mapping_ambiguous'); }
+        $active_ids = array_values($map);
+        foreach ($map as $path => $expected) {
+            $other_ids = array_values(array_filter($active_ids, static function ($id) use ($expected) {
+                return $id !== $expected;
+            }));
+            $conditions = [];
+            if ($require_assigned) { $conditions[] = "path_id = ''"; }
+            if ($other_ids !== []) {
+                $conditions[] = 'BINARY path_id IN (' . implode(', ', array_fill(0, count($other_ids), '%s')) . ')';
             }
+            if (!$conditions) { continue; }
+            $sql = 'SELECT id FROM ' . $this->table($kind) .
+                ' WHERE BINARY path = BINARY %s AND (' . implode(' OR ', $conditions) . ') LIMIT 1';
+            $bad = $wpdb->get_var($wpdb->prepare($sql, array_merge([$path], $other_ids)));
+            if ($wpdb->last_error !== '') { throw new RuntimeException('schema_read_failed'); }
+            if ($bad !== null) { throw new RuntimeException('path_mapping_ambiguous'); }
         }
     }
 
-    private function missing_path_rows($map) {
-        global $wpdb;
+    private function verify_path_rows($map) {
         foreach (['brute', 'remember'] as $kind) {
-            foreach ($map as $path => $id) {
-                $row = $wpdb->get_var($wpdb->prepare('SELECT id FROM ' . $this->table($kind) .
-                    " WHERE path_id = '' AND BINARY path = BINARY %s LIMIT 1", $path));
-                if ($wpdb->last_error !== '') { throw new RuntimeException('schema_read_failed'); }
-                if ($row !== null) { return true; }
-            }
+            $this->assert_active_path_links($kind, $map, true);
+        }
+    }
+
+    private function missing_path_rows() {
+        global $wpdb;
+        // This includes retired-path history even when no active paths remain.
+        foreach (['brute', 'remember'] as $kind) {
+            $row = $wpdb->get_var('SELECT id FROM ' . $this->table($kind) . " WHERE path_id = '' LIMIT 1");
+            if ($wpdb->last_error !== '') { throw new RuntimeException('schema_read_failed'); }
+            if ($row !== null) { return true; }
         }
         return false;
     }
@@ -448,21 +478,22 @@ final class ESP_Migrator {
                 // generation for an existing token. Do not silently expire that login
                 // by guessing zero, or revive it by guessing the current generation.
                 $by_id = isset($tables[$kind]['columns']['path_id']);
+                // A partial migration can have path_id='' rows even with the
+                // column present. Never guess their missing password generation.
+                $unassigned_remember = $kind === 'remember' && $by_id;
+                $where = $unassigned_remember
+                    ? " WHERE BINARY path_id = BINARY %s OR (path_id = '' AND BINARY path = BINARY %s)"
+                    : ($by_id ? ' WHERE BINARY path_id = BINARY %s' : ' WHERE BINARY path = BINARY %s');
+                $args = $unassigned_remember ? [$id, $path['path']] : [$by_id ? $id : $path['path']];
                 $row = $wpdb->get_var($wpdb->prepare('SELECT id FROM ' . $this->table($kind) .
-                    ($by_id ? ' WHERE BINARY path_id = BINARY %s' : ' WHERE BINARY path = BINARY %s') . ' LIMIT 1',
-                    $by_id ? $id : $path['path']));
+                    $where . ' LIMIT 1', $args));
                 if ($wpdb->last_error !== '') { throw new RuntimeException('schema_read_failed'); }
                 if ($row !== null) { throw new RuntimeException('password_version_ambiguous'); }
             }
         }
         foreach (['brute', 'remember'] as $kind) {
             if (!isset($tables[$kind]['columns']['path_id'])) { continue; }
-            foreach ($paths['map'] as $path => $id) {
-                $row = $wpdb->get_var($wpdb->prepare('SELECT id FROM ' . $this->table($kind) .
-                    " WHERE BINARY path = BINARY %s AND path_id <> '' AND BINARY path_id <> BINARY %s LIMIT 1", $path, $id));
-                if ($wpdb->last_error !== '') { throw new RuntimeException('schema_read_failed'); }
-                if ($row !== null) { throw new RuntimeException('path_mapping_ambiguous'); }
-            }
+            $this->assert_active_path_links($kind, $paths['map'], false);
         }
         if ($legacy && $tables['session'] !== null) {
             $ids = $wpdb->get_col('SELECT DISTINCT path_id FROM ' . $this->table('session') .
