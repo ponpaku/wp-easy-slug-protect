@@ -79,7 +79,7 @@ legacy v1 が残る無効なプラグインの再有効化では、先に WP-CLI
 
 GitHub の source 自動生成 ZIP にはフォールバックしない。公開 API はトークン不要、5 秒、成功 6 時間/不成功 15 分の cache。障害は検出不能として扱い、保護/DB 状態を変更しない。専用 ZIP の名前、URL、公開状態、size、GitHub API の sha256 digest が揃った場合のみ対象とする。
 
-標準 download_url とアップグレーダーを使い、独自のファイル置換エンジンは作らない。最初の URL は固定 repository の正規 asset URL。リダイレクトは HTTPS の GitHub 同 repository releases/download と release-assets.githubusercontent.com のみ、3 回まで、認証情報/別 port/fragment を拒否。ZIP は 20 MiB 上限、取得後 size/SHA-256、展開後のヘッダー/ESP_VERSION/必須ファイルを検証する。
+標準 download_url とアップグレーダーを使い、独自のファイル置換エンジンは作らない。最初の URL は固定 repository の正規 asset URL。リダイレクトは HTTPS の GitHub 同 repository releases/download と release-assets.githubusercontent.com のみ、3 回まで、認証情報/別 port/fragment を拒否。ZIP は 20 MiB 上限、取得後 size/SHA-256、展開後のヘッダー/ESP_VERSION/必須ファイルを検証する。Requires PHP / Requires at least が宣言されている場合は配置前に実行環境と照合し、不適合・不正な要件を拒否する (Core の単体 upgrade と bulk/install の検査差異を補完)。最低要件がない版に独自の最低値は加えない。
 
 **配布元侵害の限界:** API と asset は同じ GitHub の信頼境界。SHA-256 は破損/取り違え検知であり、repository/Release 権限侵害者が ZIP と digest を同時に差し替える攻撃の独立した署名ではない。独立署名/別経路の attestations は未実装。
 

@@ -134,6 +134,19 @@ $corrupt = true;
 $bad = ESP_Updater::download_package(false, $record['assets'][0]['browser_download_url'], null, ['plugin' => $plugin]);
 check_release(is_wp_error($bad) && $bad->get_error_code() === 'esp_release_digest_mismatch', 'corrupt ZIP is rejected before installation');
 $corrupt = false;
+$verified_file = ESP_Updater::download_package(false, $record['assets'][0]['browser_download_url'], null, ['plugin' => $plugin]);
+check_release(is_string($verified_file), 'valid dedicated ZIP passes download verification');
+unlink($verified_file);
+$main_before_requirement = file_get_contents($main);
+file_put_contents($main, str_replace(' * Version:', " * Requires PHP: 999.0\n * Version:", $main_before_requirement));
+$incompatible = ESP_Updater::validate_source(dirname($main) . '/', $package_root . '/', null, ['plugin' => $plugin]);
+check_release(is_wp_error($incompatible) && $incompatible->get_error_code() === 'esp_release_requirements',
+    'declared incompatible PHP requirement is rejected before source installation');
+file_put_contents($main, str_replace(' * Version:', " * Requires at least: 999.0\n * Version:", $main_before_requirement));
+$incompatible = ESP_Updater::validate_source(dirname($main) . '/', $package_root . '/', null, ['plugin' => $plugin]);
+check_release(is_wp_error($incompatible) && $incompatible->get_error_code() === 'esp_release_requirements',
+    'declared incompatible WordPress requirement is rejected before source installation');
+file_put_contents($main, $main_before_requirement);
 wp_clean_plugins_cache(); wp_update_plugins();
 $updates = get_site_transient('update_plugins');
 check_release(isset($updates->response[$plugin]) && $updates->response[$plugin]->new_version === '0.7.41', 'Core discovers the release via Update URI');

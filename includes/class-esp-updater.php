@@ -185,12 +185,23 @@ final class ESP_Updater {
         // separate from this standard update path.
         $r = self::$download_release;
         if ($r === null) { return new WP_Error('esp_release_not_verified', 'ESP: update package was not verified.'); }
-        global $wp_filesystem;
+        global $wp_filesystem, $wp_version;
         $main = $wp_filesystem->get_contents(trailingslashit($source) . 'easy-slug-protect.php');
         if (!is_string($main) || !preg_match('/^ \* Version: ([0-9.]+)$/m', $main, $header) ||
             !preg_match("/define\('ESP_VERSION', '([0-9.]+)'\);/", $main, $constant) ||
             $header[1] !== $r['version'] || $constant[1] !== $r['version']) {
             return new WP_Error('esp_release_version_mismatch', 'ESP: ZIP version mismatch.');
+        }
+        // Core's single-plugin upgrade path does not run the same package checks
+        // as install()/bulk_upgrade(). Enforce declared requirements before copying.
+        foreach (['Requires PHP' => PHP_VERSION, 'Requires at least' => $wp_version] as $field => $running) {
+            if (preg_match('/^[ \t\/*#@]*' . preg_quote($field, '/') . ':(.*)$/mi', $main, $match)) {
+                $required = trim(preg_replace('/\s*(?:\*\/|\?>).*/', '', $match[1]));
+                if ($required !== '' && (!preg_match('/^[0-9]+(?:\.[0-9]+){0,2}$/D', $required) ||
+                    version_compare($running, $required, '<'))) {
+                    return new WP_Error('esp_release_requirements', 'ESP: incompatible WordPress/PHP requirements.');
+                }
+            }
         }
         foreach (['includes/class-esp-migrator.php', 'includes/class-esp-updater.php', 'includes/class-esp-protection-state.php', 'uninstall.php'] as $required) {
             if (!$wp_filesystem->is_file(trailingslashit($source) . $required)) {
