@@ -24,7 +24,12 @@ class ESP_Sanitize {
      * @return bool
      */
     private function is_hashed_password($password) {
-        return preg_match('/^\$P\$B/', $password) === 1;
+        if (!is_string($password)) {
+            return false;
+        }
+        // WordPress 6.8+ の $wp$2y$ と、従来のphpass・bcrypt・
+        // Argon2の既存ハッシュをフォームの平文として二重ハッシュしない。
+        return preg_match('/^\$(?:P\$|H\$|wp\$2y\$|2[aby]\$|argon2(?:i|id)\$)/', $password) === 1;
     }
 
     /**
@@ -85,8 +90,13 @@ class ESP_Sanitize {
             $current_version = $existing_path_data ? intval($existing_path_data['password_version']) : 0;
 
             if (!empty($path['password'])) {
-                if ($this->is_hashed_password($path['password'])) {
-                    // 既にハッシュ化済みの場合はそのまま使用
+                if (($existing_path_data && isset($existing_path_data['password']) &&
+                        is_string($existing_path_data['password']) &&
+                        is_string($path['password']) &&
+                        hash_equals($existing_path_data['password'], $path['password'])) ||
+                    $this->is_hashed_password($path['password'])) {
+                    // 現在保存されている値と同一なら、独自ハッシュ形式でも維持する。
+                    // WordPress 6.8+ の保存済みハッシュも二重にハッシュしない。
                     $hashed_password = $path['password'];
                 } else {
                     // 新しいパスワードの場合
@@ -223,9 +233,16 @@ class ESP_Sanitize {
             }
         }
 
+        // 未送信なら既存の明示選択を維持。未知値は厳密モードへ戻す。
+        $mode = is_array($settings) && array_key_exists('metadata_check_mode', $settings)
+            ? $settings['metadata_check_mode']
+            : (is_array($current) ? ($current['metadata_check_mode'] ?? 'strict') : 'strict');
+        $metadata_check_mode = is_string($mode) && $mode === 'cached' ? 'cached' : 'strict';
+
         return array(
             'enabled' => is_array($settings) && !empty($settings['enabled']),
             'delivery_method' => $delivery_method,
+            'metadata_check_mode' => $metadata_check_mode,
             ESP_Media_Protection::OPTION_LITESPEED_KEY => $stored_key
         );
     }

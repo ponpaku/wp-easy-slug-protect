@@ -15,14 +15,27 @@ class ESP_Setup {
     }
 
     public function activate() {
+        // DDLやRewriteを変更する前にダウングレードを拒否する。
+        // 新しいESPが検証済みの環境へ旧ZIPを有効化しても、古いdbDeltaを適用しない。
+        if (!class_exists('ESP_Protection_State') ||
+            !ESP_Protection_State::can_run_activation_migration()) {
+            error_log('ESP: activation refused before schema changes due to future version');
+            return false;
+        }
         $this->create_tables();
         $this->create_options();
         $this->schedule_cron_jobs();
 
+        // WP-CLIではWebサーバー種別が未設定のことがある。サーバー側ルールを
+        // 推測で更新せず、安全性を確認できる場合だけ初回HTTPへ検証を延期する。
+        $cli_without_web_server = defined('WP_CLI') && WP_CLI &&
+            trim((string) ($_SERVER['SERVER_SOFTWARE'] ?? '')) === '';
         // メディア保護の初期設定
         if (class_exists('ESP_Media_Protection')) {
             $media_protection = new ESP_Media_Protection();
-            $media_protection->update_htaccess();
+            if (!$cli_without_web_server) {
+                $media_protection->update_htaccess();
+            }
             // 初回のメディアキャッシュ生成
             $media_protection->regenerate_media_cache();
         }
@@ -34,6 +47,33 @@ class ESP_Setup {
         }
 
         flush_rewrite_rules();
+
+        // Webサーバー不明のWP-CLIでは保護メディアなしを確認できる場合だけ
+        // VERIFY_REQUIREDで有効化し、次のHTTPでRewriteを含めて厳密検証。
+        // 保護メディアが残る場合は静的直URLの漏洩を防げないため拒否する。
+        if ($cli_without_web_server) {
+            return ESP_Protection_State::defer_cli_activation_verification();
+        }
+        // 初回・再有効化とも検証を必須にする。失敗を成功として扱わない。
+        $ready = ESP_Protection_State::verify_and_commit($this);
+        if (!$ready && class_exists('ESP_Media_Protection')) {
+            // 有効化失敗時はWordPressの無効化フックが実行されない。
+            // 保護メタ0件をDBから確定できたときだけ、残存Rewriteを撤去する。
+            // 保護メタあり／DB不明なら静的直URLの漏洩を避けるため維持する。
+            try {
+                if (ESP_Media_Protection::protected_media_records_exist() === false) {
+                    $cleanup = (new ESP_Media_Protection())->update_htaccess(false, true);
+                    if ($cleanup !== true) {
+                        error_log('ESP: Activation failed and media Rewrite cleanup failed; manual review required');
+                    }
+                } else {
+                    error_log('ESP: Activation failed; media Rewrite retained because protected records exist or are unknown');
+                }
+            } catch (\Throwable $error) {
+                error_log('ESP: Activation failed and media Rewrite cleanup could not be completed; manual review required');
+            }
+        }
+        return $ready;
     }
 
     /**
@@ -68,6 +108,11 @@ class ESP_Setup {
      * クリーンアップタスクの実行 (既存のメソッド)
      */
     public static function run_cleanup_tasks() {
+        // 既存の日次ジョブを利用し、重複するCron予約を増やさない。
+        // 点検は読取専用。検知したRewrite不整合を自動上書きしない。
+        if (class_exists('ESP_Protection_State')) {
+            ESP_Protection_State::audit();
+        }
         if (class_exists('ESP_Security')) {
             ESP_Security::cron_cleanup_brute();
             ESP_Security::cron_cleanup_remember();
@@ -115,15 +160,21 @@ class ESP_Setup {
         wp_clear_scheduled_hook(ESP_Config::INTEGRITY_CHECK_HOOK);
         wp_clear_scheduled_hook('esp_media_cache_refresh');
         wp_clear_scheduled_hook('esp_all_cache_refresh');
+        wp_clear_scheduled_hook('esp_verify_runtime_once');
         
         // キャッシュのクリア
         delete_transient('esp_protected_posts');
         delete_transient('esp_protected_media');
+        delete_transient('esp_protected_posts_v2');
+        delete_transient('esp_protected_media_v2');
         
         // .htaccessからESPルールを削除
         if (class_exists('ESP_Media_Protection')) {
             $media_protection = new ESP_Media_Protection();
-            $media_protection->update_htaccess(); // 保護メディアがない場合、ルールが削除される
+            $result = $media_protection->update_htaccess(false, true);
+            if ($result !== true) {
+                error_log('ESP: Deactivation could not remove ESP media Rewrite rules; manual .htaccess cleanup may be needed');
+            }
         }
 
         flush_rewrite_rules();
@@ -271,16 +322,99 @@ class ESP_Setup {
      * アップデート確認と実行
      */
     public function update_check() {
-        $current_db_version = get_option('esp_db_version', 0);
+        $current_db_version = get_option('esp_db_version', null);
         $required_db_version = ESP_Config::OPTION_DEFAULTS['db_version'];
-        
+
+        // 既存サイトで版印だけが消失した場合、0とみなして旧移行を再実行すると
+        // 保護パスIDが再発行される。構造を読み取り専用で確認してから版印だけ復旧。
+        if ($current_db_version === null || $current_db_version === false || $current_db_version === '') {
+            if (!self::has_stable_path_ids() ||
+                !class_exists('ESP_Protection_State') ||
+                !ESP_Protection_State::verify_legacy_security_schema()) {
+                error_log('ESP: db_version missing and schema cannot be safely identified; migration refused');
+                return false; // 曖昧な部分移行は#44で明示復旧。破壊的再実行はしない。
+            }
+            update_option('esp_db_version', $required_db_version);
+            return (int) get_option('esp_db_version', 0) === (int) $required_db_version;
+        }
+
+        if (!is_int($current_db_version) &&
+            !(is_string($current_db_version) && ctype_digit($current_db_version))) {
+            return false;
+        }
+        $current_db_version = (int) $current_db_version;
+        if ($current_db_version > $required_db_version) {
+            return false; // 将来版のスキーマに古いコードの移行を適用しない。
+        }
+
+        // 途中で版印だけ古いまま残ったサイトも、完全移行済みなら
+        // 旧Migrationを重複適用せず、整合を確認して版印だけ進める。
+        if ($current_db_version < $required_db_version &&
+            self::has_stable_path_ids() &&
+            class_exists('ESP_Protection_State') &&
+            ESP_Protection_State::verify_legacy_security_schema()) {
+            update_option('esp_db_version', $required_db_version);
+            return (int) get_option('esp_db_version', 0) === (int) $required_db_version;
+        }
+
+        // V1が部分実行されたサイトでは一部のパスにだけIDが付いている。
+        // 全件が安定しているかではなく、ID付与済みのパスが一つでもあれば
+        // uniqid()による再発行を拒否する。部分移行の復旧は#44に委ねる。
+        $existing_settings = ESP_Option::get_all_settings();
+        if ($current_db_version < 1 && is_array($existing_settings) &&
+            !empty($existing_settings['path']) &&
+            self::has_any_assigned_path_id($existing_settings['path'])) {
+            return false;
+        }
+
         if ($current_db_version < $required_db_version) {
             if (!$this->migrate_to_version($current_db_version, $required_db_version)) {
                 return false;
             }
             update_option('esp_db_version', $required_db_version);
+            if ((int) get_option('esp_db_version', 0) !== (int) $required_db_version) {
+                return false;
+            }
         }
         return true;
+    }
+
+    /**
+     * 再移行で参照関係が失われないよう、既存パスIDの整合性を確認する。
+     * 空のパス集合は新規導入サイトでも成立する。
+     */
+    private static function has_stable_path_ids() {
+        $settings = ESP_Option::get_all_settings();
+        if (!is_array($settings) || !isset($settings['path']) ||
+            !is_array($settings['path'])) {
+            return false;
+        }
+        foreach ($settings['path'] as $id => $path) {
+            if (!is_string($id) || $id === '' ||
+                !is_array($path) || !isset($path['id'], $path['path']) ||
+                !is_string($path['id']) || $path['id'] !== $id ||
+                !is_string($path['path']) || trim($path['path'], " /\\t\\n\\r") === '') {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * V1の部分移行検出専用。古い数値添字の配列と混在する場合も
+     * ID付きエントリを見落とさず、破壊的な再移行を避ける。
+     */
+    private static function has_any_assigned_path_id($paths) {
+        if (!is_array($paths)) {
+            return false;
+        }
+        foreach ($paths as $id => $path) {
+            if ((is_array($path) && array_key_exists('id', $path)) ||
+                (is_string($id) && strncmp($id, 'path_', 5) === 0)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -293,7 +427,7 @@ class ESP_Setup {
         if (version_compare($current_version, ESP_VERSION, '<')) {
             // バージョンに応じた更新処理
             if (!$this->update_check()) {
-                return;
+                return false;
             }
             // AVIF対応以前のルールは .avif を捕捉しない。
             // Apache / LiteSpeed ではアップデート時に既存の保護ルールを更新する。
@@ -312,7 +446,7 @@ class ESP_Setup {
                                 . '</p></div>';
                         }
                     });
-                    return;
+                    return false;
                 }
             }
 
@@ -328,7 +462,11 @@ class ESP_Setup {
 
             // バージョン情報を更新
             update_option(ESP_Config::VERSION_OPTION_KEY, ESP_VERSION);
+            if (get_option(ESP_Config::VERSION_OPTION_KEY) !== ESP_VERSION) {
+                return false;
+            }
         }
+        return true;
     }
 
     /**

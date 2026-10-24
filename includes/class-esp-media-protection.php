@@ -28,6 +28,12 @@ class ESP_Media_Protection {
      */
     private $enabled = true;
 
+    /** Rewrite置換完了までDBに保存しないLiteSpeedキー（更新実行中のみ）。 */
+    private $rewrite_key_candidate = null;
+
+    /** 内部キー保存の update_option フックでRewriteを再入更新しない。 */
+    private static $litespeed_key_commit_in_progress = false;
+
     /**
      * @var string メディア保護用メタキー
      */
@@ -36,7 +42,7 @@ class ESP_Media_Protection {
     /**
      * @var string メディアキャッシュのトランジェントキー
      */
-    const MEDIA_CACHE_KEY = 'esp_protected_media';
+    const MEDIA_CACHE_KEY = 'esp_protected_media_v2';
 
     /**
      * @var int キャッシュの有効期間（秒）- 7日間に延長
@@ -128,6 +134,10 @@ class ESP_Media_Protection {
         
         // アップロード時の自動保護設定
         add_action('add_attachment', [$this, 'auto_protect_on_upload']);
+        // 他プラグインによるupdate_post_meta()を含め、保護情報の更新時には
+        // 認可キャッシュを必ず無効化する。
+        // 保護メタ更新の監視フックはプラグイン起動時に一度だけ登録する。
+        // 管理画面からの更新を取りこぼさず、複数インスタンスの重複登録も防止。
         
         // メディアの削除時にキャッシュを更新
         add_action('delete_attachment', [$this, 'regenerate_media_cache']);
@@ -147,28 +157,32 @@ class ESP_Media_Protection {
             return;
         }
 
-        $cached_data = get_transient(self::MEDIA_CACHE_KEY);
-        if ($cached_data === false) {
-            $this->regenerate_media_cache();
+        if (ESP_Authorization_Cache::read('media', self::MEDIA_CACHE_KEY) === null) {
+            $this->regenerate_media_cache(false);
         }
     }
 
     /**
      * 保護されたメディアのキャッシュを再生成
      */
-    public function regenerate_media_cache() {
+    public function regenerate_media_cache($invalidate = true) {
         if (!$this->enabled) {
             delete_transient(self::MEDIA_CACHE_KEY);
             return;
         }
 
         global $wpdb;
-
-        $protected_paths = ESP_Option::get_current_setting('path');
-        if (empty($protected_paths)) {
+        if ($invalidate && !ESP_Authorization_Cache::invalidate('media', self::MEDIA_CACHE_KEY)) {
+            return;
+        }
+        $snapshot = ESP_Authorization_Cache::signature('media');
+        if ($snapshot === null) {
             delete_transient(self::MEDIA_CACHE_KEY);
             return;
         }
+
+        // 設定側に対応する保護パスがなくても、保護済み添付IDは保持する。
+        // パス設定の欠損を公開扱いに変換しない。
 
         // パスIDごとのメディアIDをグループ化
         $media_by_path = [];
@@ -180,16 +194,21 @@ class ESP_Media_Protection {
             self::META_KEY_PROTECTED_PATH
         ));
         
+        if (!is_array($protected_media) || (isset($wpdb->last_error) && $wpdb->last_error !== '')) {
+            // 古いキャッシュには追加直後の保護画像が含まれない可能性がある。
+            // REST側が古い許可情報を使わないよう無効化する。
+            delete_transient(self::MEDIA_CACHE_KEY);
+            error_log('ESP: protected media cache query failed');
+            return;
+        }
         foreach ($protected_media as $media) {
-            if (isset($protected_paths[$media->path_id])) {
-                if (!isset($media_by_path[$media->path_id])) {
-                    $media_by_path[$media->path_id] = [];
-                }
-                $media_by_path[$media->path_id][] = (int) $media->post_id;
+            if (!isset($media_by_path[$media->path_id])) {
+                $media_by_path[$media->path_id] = [];
             }
+            $media_by_path[$media->path_id][] = (int) $media->post_id;
         }
         
-        set_transient(self::MEDIA_CACHE_KEY, $media_by_path, self::MEDIA_CACHE_DURATION);
+        ESP_Authorization_Cache::publish('media', self::MEDIA_CACHE_KEY, $snapshot, $media_by_path, self::MEDIA_CACHE_DURATION);
 
         // デバッグ
         // error_log(print_r($media_by_path, true));
@@ -212,22 +231,21 @@ class ESP_Media_Protection {
             return [];
         }
 
-        $cached_data = get_transient(self::MEDIA_CACHE_KEY);
-
-        if ($cached_data === false) {
-            $this->regenerate_media_cache();
-            $cached_data = get_transient(self::MEDIA_CACHE_KEY);
+        $cached_data = ESP_Authorization_Cache::read('media', self::MEDIA_CACHE_KEY);
+        if ($cached_data === null) {
+            $this->regenerate_media_cache(false);
+            $cached_data = ESP_Authorization_Cache::read('media', self::MEDIA_CACHE_KEY);
         }
         
         if (!is_array($cached_data)) {
-            return [];
+            return null; // Unknown authorization data; callers must deny.
         }
-        
+
         $excluded_ids = [];
         $protected_paths = ESP_Option::get_current_setting('path');
         
         foreach ($cached_data as $path_id => $media_ids) {
-            if (isset($protected_paths[$path_id]) && !$this->auth->is_logged_in($protected_paths[$path_id])) {
+            if (!isset($protected_paths[$path_id]) || !$this->auth->is_logged_in($protected_paths[$path_id])) {
                 $excluded_ids = array_merge($excluded_ids, $media_ids);
             }
         }
@@ -264,30 +282,42 @@ class ESP_Media_Protection {
         }
 
         if (!$this->enabled && !$this->is_apache()) {
-            $this->update_htaccess();
-            wp_send_json_success([
-                'message' => __('.htaccessのルールを再設定しました。', ESP_Config::TEXT_DOMAIN)
-            ]);
+            // OFF時はNginx/CLIでも残存するESPブロックだけを撤去できる。
+            // 失敗した場合も下の共通エラー処理へ渡し、成功を偽装しない。
+            $result = $this->update_htaccess();
+        } else {
+            if (!$this->is_apache()) {
+                wp_send_json_error([
+                    'message' => __('この機能はApacheまたはLiteSpeed環境でのみ利用できます。', ESP_Config::TEXT_DOMAIN)
+                ], 400);
+            }
+
+            $media_settings = ESP_Option::get_current_setting('media');
+            $delivery_method = is_array($media_settings) && isset($media_settings['delivery_method'])
+                ? $media_settings['delivery_method']
+                : 'auto';
+            $force_litespeed_key_regeneration = ($delivery_method === 'litespeed');
+            $result = $this->update_htaccess($force_litespeed_key_regeneration);
         }
 
-        if (!$this->is_apache()) {
-            wp_send_json_error([
-                'message' => __('この機能はApacheまたはLiteSpeed環境でのみ利用できます。', ESP_Config::TEXT_DOMAIN)
-            ], 400);
-        }
-
-        $media_settings = ESP_Option::get_current_setting('media');
-        $delivery_method = is_array($media_settings) && isset($media_settings['delivery_method'])
-            ? $media_settings['delivery_method']
-            : 'auto';
-        $force_litespeed_key_regeneration = ($delivery_method === 'litespeed');
-
-        // 実際の書き込み結果を取得（WP_Errorの可能性あり）
-        $result = $this->update_htaccess($force_litespeed_key_regeneration);
+        // すべてのサーバー種別で書込み結果を確認する（WP_Errorの可能性あり）。
 
         if ($result === true) {
+            // 書込み成功と、現在のメディア設定に一致する現物のRewriteは別。
+            // 実ファイルの読取照合に成功した後だけ古いエラーを消す。
+            if ($this->is_apache() &&
+                !self::rewrite_file_matches_policy(self::is_media_protection_enabled())) {
+                update_option('esp_rewrite_last_error', 'esp_htaccess_verify_failed', false);
+                wp_send_json_error([
+                    'message' => __('Rewriteの再設定後の照合に失敗しました。.htaccessを確認してください。', ESP_Config::TEXT_DOMAIN)
+                ]);
+                return;
+            }
+            delete_option('esp_rewrite_last_error');
+            update_option('esp_rewrite_policy_version',
+                'always-route-v2:' . (self::is_media_protection_enabled() ? 'on' : 'off'), false);
             wp_send_json_success([
-                'message' => __('.htaccessのルールを再設定しました。', ESP_Config::TEXT_DOMAIN)
+                'message' => __('.htaccessのルールを再設定し、保護ルールの構文一致を確認しました。', ESP_Config::TEXT_DOMAIN)
             ]);
         }
 
@@ -321,14 +351,18 @@ class ESP_Media_Protection {
             return $args;
         }
         
-        // 管理者権限がある場合はスキップ
+        // 既存WordPressのメディア管理者例外を維持する。
+        // 権限ポリシーを全経路で変更する場合は#43に分離する。
         if (current_user_can('upload_files')) {
             return $args;
         }
-        
         // 保護されたメディアIDを取得（キャッシュ利用）
         $excluded_media_ids = $this->get_protected_media_ids_for_current_user();
-        
+        if ($excluded_media_ids === null) {
+            $args['post__in'] = [0]; // Empty result instead of leaking all media.
+            return $args;
+        }
+
         if (!empty($excluded_media_ids)) {
             $current_excluded = isset($args['post__not_in']) ? (array) $args['post__not_in'] : [];
             $args['post__not_in'] = array_unique(array_merge($current_excluded, $excluded_media_ids));
@@ -369,14 +403,33 @@ class ESP_Media_Protection {
             return $response;
         }
         
-        // 管理者権限がある場合はスキップ
+        // 既存WordPressのメディア管理者例外を維持する。
+        // 権限ポリシーを全経路で変更する場合は#43に分離する。
         if (current_user_can('upload_files')) {
             return $response;
         }
-        
         // キャッシュから保護されたメディアIDを取得して確認
         $excluded_media_ids = $this->get_protected_media_ids_for_current_user();
-        
+        if ($excluded_media_ids === null) {
+            return new WP_REST_Response(['code' => 'esp_media_state_unknown'], 503);
+        }
+
+        // 厳密モードではWP_Queryのpostmetaキャッシュを再利用せず直接DB確認。
+        // 高速モードだけ、管理者の明示選択でWordPressメタキャッシュを使う。
+        // どちらもチェック後のDB変更との完全な原子性は保証しない。
+        $live_path = self::read_protected_media_path($post->ID);
+        if ($live_path === null) {
+            return new WP_REST_Response(['code' => 'esp_media_state_unknown'], 503);
+        }
+        $live_path_id = $live_path['path_id'];
+        if (!empty($live_path_id)) {
+            $paths = ESP_Option::get_current_setting('path');
+            if (!is_array($paths) || !isset($paths[$live_path_id]) ||
+                !$this->auth->is_logged_in($paths[$live_path_id])) {
+                return new WP_REST_Response(['code' => 'esp_rest_media_forbidden'], 403);
+            }
+        }
+
         if (in_array($post->ID, $excluded_media_ids)) {
             // 未認証の場合はエラーレスポンスを返す
             $error_data = [
@@ -391,6 +444,68 @@ class ESP_Media_Protection {
         return $response;
     }
 
+    /**
+     * メディアの保護メタ取得方式。既定は毎回直接DB照会する厳密モード。
+     * 管理者が高速モードを明示選択した場合だけWordPressのメタキャッシュを使う。
+     * 設定自体は既存esp_settingsのget_optionキャッシュから取得できる。
+     */
+    private static function get_metadata_check_mode() {
+        $media = ESP_Option::get_current_setting('media');
+        return is_array($media) &&
+            ($media['metadata_check_mode'] ?? null) === 'cached' ? 'cached' : 'strict';
+    }
+
+    /**
+     * PHP経由のメディア配信とREST最終検証で共通の選択方式を使う。
+     * キャッシュ値の形が不正なら「保護なし」ではなく不明として拒否する。
+     * 高速モードで古い値が読まれる可能性は管理者が明示的に選択する。
+     *
+     * @return array{path_id:string}|null null=照会結果不明
+     */
+    private static function read_protected_media_path($post_id) {
+        if (self::get_metadata_check_mode() !== 'cached') {
+            return self::read_live_protected_media_path($post_id);
+        }
+        try {
+            $path_id = get_post_meta((int) $post_id, self::META_KEY_PROTECTED_PATH, true);
+            // WordPressの正常な「メタなし」は空文字列。false/null/配列等の
+            // 異常な戻り値を「未保護」と解釈して公開しない。
+            if (!is_string($path_id) && !is_int($path_id)) {
+                return null;
+            }
+            return ['path_id' => (string) $path_id];
+        } catch (\Throwable $error) {
+            return null;
+        }
+    }
+
+    /**
+     * 厳密モードのDB直接照会。DBエラーと正常な保護メタ未設定を区別する。
+     * 通常のPHP配信とREST応答のいずれも既定ではこの方式を利用する。
+     *
+     * @return array{path_id:string}|null null=DB状態不明
+     */
+    private static function read_live_protected_media_path($post_id) {
+        global $wpdb;
+        if (!is_object($wpdb) || !isset($wpdb->postmeta)) {
+            return null;
+        }
+        try {
+            $path_id = $wpdb->get_var($wpdb->prepare(
+                "SELECT meta_value FROM {$wpdb->postmeta} WHERE post_id = %d AND meta_key = %s ORDER BY meta_id ASC LIMIT 1",
+                (int) $post_id,
+                self::META_KEY_PROTECTED_PATH
+            ));
+            if ($wpdb->last_error !== '' ||
+                ($path_id !== null && !is_scalar($path_id))) {
+                return null;
+            }
+            return ['path_id' => $path_id === null ? '' : (string)$path_id];
+        } catch (\Throwable $error) {
+            return null;
+        }
+    }
+
     /*----- メディア編集画面の機能 -----*/
 
     /**
@@ -401,6 +516,11 @@ class ESP_Media_Protection {
      * @return array 修正されたフォームフィールド
      */
     public function add_media_protection_field($form_fields, $post) {
+        if (!$this->enabled) {
+            // 保護OFF中は新しい保護対象を登録できない。
+            unset($form_fields['esp_protected_path']);
+            return $form_fields;
+        }
         $protected_paths = ESP_Option::get_current_setting('path');
         $current_path_id = get_post_meta($post->ID, self::META_KEY_PROTECTED_PATH, true);
         
@@ -435,6 +555,10 @@ class ESP_Media_Protection {
      */
     public function save_media_protection_field($post, $attachment) {
         if (isset($attachment['esp_protected_path'])) {
+            if (!$this->enabled && !empty($attachment['esp_protected_path'])) {
+                // 保護OFF中は保護メタの新規追加を拒否。解除は許可する。
+                return $post;
+            }
             if (empty($attachment['esp_protected_path'])) {
                 delete_post_meta($post['ID'], self::META_KEY_PROTECTED_PATH);
             } else {
@@ -526,6 +650,12 @@ class ESP_Media_Protection {
      * リライトルールを追加
      */
     public function add_rewrite_rules() {
+        // 保存済みWordPress Rewriteや.htaccessが一時的に残る場合にも
+        // OFF時の公開ファイルをPHPから安全に配信できるよう変数だけ登録する。
+        add_filter('query_vars', static function ($vars) {
+            $vars[] = self::REWRITE_ENDPOINT;
+            return $vars;
+        });
         if (!$this->enabled) {
             return;
         }
@@ -544,21 +674,13 @@ class ESP_Media_Protection {
             'top'
         );
         
-        // クエリ変数を追加
-        add_filter('query_vars', function($vars) {
-            $vars[] = self::REWRITE_ENDPOINT;
-            return $vars;
-        });
+
     }
 
     /**
     * メディアファイルへのアクセスを処理（クリーンアップ版）
     */
     public function handle_media_access() {
-        if (!$this->enabled) {
-            return;
-        }
-
         // リクエストURIから直接判定
         $request_uri = $_SERVER['REQUEST_URI'] ?? '';
         $is_media_request = false;
@@ -591,11 +713,29 @@ class ESP_Media_Protection {
         if (empty($requested_file)) {
             return;
         }
-        
+
+        // 公開クエリ変数は誰でも任意に指定できる。内部Rewriteの結果と
+        // 外部の ?esp-media=... を混同して第三者のuploads拒否を迂回させない。
+        // REQUEST_URIはRewrite前の元URLなので、要求されたuploadsの相対パスと
+        // 配信対象の一致を必要条件とする（URL形状だけで認可したわけではない）。
+        if (!self::is_allowed_media_request($requested_file) ||
+            !self::is_original_upload_request($requested_file)) {
+            $this->send_404();
+            return;
+        }
+
         // ファイルパスの検証とサニタイズ
         $file_path = $this->validate_file_path($requested_file);
         if (!$file_path) {
             $this->send_404();
+            return;
+        }
+
+        // 管理者が明示的にOFFにしたときは保護メタの有無を問わず公開。
+        // 古いRewriteが残ってPHPに転送されても、公開画像を404にしない。
+        // OFFは公開の意思表示であり、メタ情報自体は削除しない。
+        if (!$this->enabled) {
+            $this->deliver_media($file_path);
             return;
         }
 
@@ -612,17 +752,27 @@ class ESP_Media_Protection {
             return;
         }
         
-        // メディアIDを取得
+        // 添付IDの照会失敗と正常な未登録を区別する。未知なら配信しない。
         $attachment_id = $this->get_attachment_id_from_path($file_path);
-        if (!$attachment_id) {
-            // メディアライブラリに登録されていないファイルは通常配信
+        if ($attachment_id === null) {
+            $this->send_503();
+            return;
+        }
+        if ($attachment_id === false) {
+            // 正常なDB照会で未登録と確定した場合だけ、従来の配信を維持。
             $this->deliver_media($file_path);
             return;
         }
-        
-        // 保護設定を確認
-        $protected_path_id = get_post_meta($attachment_id, self::META_KEY_PROTECTED_PATH, true);
-        if (empty($protected_path_id)) {
+
+        // 管理者が選んだ確認方式で保護メタを確認する。既定はDB直接照会。
+        // 高速モードでも読取エラーや不正な値を「公開」として扱わない。
+        $live_path = self::read_protected_media_path($attachment_id);
+        if ($live_path === null) {
+            $this->send_503();
+            return;
+        }
+        $protected_path_id = $live_path['path_id'];
+        if ($protected_path_id === '') {
             $this->deliver_media($file_path);
             return;
         }
@@ -630,7 +780,8 @@ class ESP_Media_Protection {
         // 保護パス設定を取得
         $protected_paths = ESP_Option::get_current_setting('path');
         if (!isset($protected_paths[$protected_path_id])) {
-            $this->deliver_media($file_path);
+            // 保護済み添付の参照先パスが失われた場合、未認証で配信しない。
+            $this->send_403();
             return;
         }
         
@@ -661,6 +812,79 @@ class ESP_Media_Protection {
 
             $this->send_404();
         }
+    }
+
+    /**
+     * 公開esp-mediaクエリ経由で配信してよいファイル名だけを受け付ける。
+     * 配信許可のための入口検査であり、添付IDの帰属判定（#42）ではない。
+     */
+    private static function is_allowed_media_request($requested_file) {
+        if (!is_string($requested_file) || $requested_file === '') {
+            return false;
+        }
+
+        // validate_file_path()と同じ最大3回だけURLデコードして検査する。
+        for ($i = 0; $i < 3; $i++) {
+            $decoded = rawurldecode($requested_file);
+            if ($decoded === $requested_file) {
+                break;
+            }
+            $requested_file = $decoded;
+        }
+
+        // 隠しファイル・隠しディレクトリ、パスの不正区切り、制御文字を拒否。
+        // .htaccess / .htpasswd / .user.ini 等はOFF時でも配信してはならない。
+        if ($requested_file === '' || $requested_file[0] === '/' ||
+            strpos($requested_file, '\\') !== false ||
+            preg_match('/[\\x00-\\x1F\\x7F]/', $requested_file)) {
+            return false;
+        }
+        foreach (explode('/', $requested_file) as $segment) {
+            if ($segment === '' || $segment[0] === '.') {
+                return false;
+            }
+        }
+
+        return in_array(strtolower(pathinfo($requested_file, PATHINFO_EXTENSION)),
+            self::PROTECTED_EXTENSIONS, true);
+    }
+
+    /**
+     * 直接クエリはWordPressのトップURLからuploads内の任意ファイルへ到達する。
+     * 本来のuploads URLに向けた要求以外は、OFF時・ON時とも配信しない。
+     * サーバー側Rewriteで元URLが保持されない環境では安全側の404とする。
+     */
+    private static function is_original_upload_request($requested_file) {
+        if (!is_string($requested_file) || $requested_file === '') {
+            return false;
+        }
+        $uploads = wp_upload_dir(null, false);
+        if (!is_array($uploads) || !empty($uploads['error']) ||
+            empty($uploads['baseurl']) || !is_string($uploads['baseurl'])) {
+            return false;
+        }
+        $root = parse_url($uploads['baseurl'], PHP_URL_PATH);
+        $original = parse_url((string) ($_SERVER['REQUEST_URI'] ?? ''), PHP_URL_PATH);
+        if (!is_string($root) || !is_string($original)) {
+            return false;
+        }
+        $prefix = rtrim($root, '/') . '/';
+        if (strncmp($original, $prefix, strlen($prefix)) !== 0) {
+            return false;
+        }
+        $relative = substr($original, strlen($prefix));
+        // 二重・三重エンコードも同じ最大回数で比較し、リクエスト改ざんを拒否。
+        for ($i = 0; $i < 3; $i++) {
+            $next = rawurldecode($relative);
+            if ($next === $relative) { break; }
+            $relative = $next;
+        }
+        for ($i = 0; $i < 3; $i++) {
+            $next = rawurldecode($requested_file);
+            if ($next === $requested_file) { break; }
+            $requested_file = $next;
+        }
+        return $relative === $requested_file && self::is_allowed_media_request($relative);
     }
 
     /**
@@ -718,11 +942,14 @@ class ESP_Media_Protection {
             return false;
         }
         
-        // ベースディレクトリ外へのアクセスを防ぐ
-        if (strpos($file_path, $base_path) !== 0) {
+        // 接頭辞だけの比較ではuploads-backup等の兄弟ディレクトリを通してしまう。
+        // 実体パスでディレクトリ境界を確認し、リンク先の隠しファイルも拒否する。
+        $base_prefix = rtrim($base_path, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
+        if (strpos($file_path, $base_prefix) !== 0 ||
+            !self::is_allowed_media_request(substr($file_path, strlen($base_prefix)))) {
             return false;
         }
-        
+
         // ファイルが存在し、通常ファイルであることを確認
         if (!file_exists($file_path) || !is_file($file_path) || is_link($file_path)) {
             return false;
@@ -735,68 +962,83 @@ class ESP_Media_Protection {
      * ファイルパスから添付ファイルIDを取得
      *
      * @param string $file_path ファイルパス
-     * @return int|false 添付ファイルID、見つからない場合はfalse
+     * @return int|false|null ID=登録済み、false=正常な未登録、null=DB状態不明
      */
     private function get_attachment_id_from_path($file_path) {
         global $wpdb;
-        
-        $upload_dir = wp_upload_dir();
-        $relative_path = str_replace($upload_dir['basedir'] . '/', '', $file_path);
-        
-        // メタデータから検索
-        $attachment_id = $wpdb->get_var($wpdb->prepare(
-            "SELECT post_id FROM {$wpdb->postmeta} 
-            WHERE meta_key = '_wp_attached_file' 
-            AND meta_value = %s 
-            LIMIT 1",
-            $relative_path
-        ));
-        
-        if ($attachment_id) {
-            return (int) $attachment_id;
+        if (!is_object($wpdb) || !isset($wpdb->postmeta)) {
+            return null;
         }
+        try {
+            $upload_dir = wp_upload_dir();
+            if (!is_array($upload_dir) || empty($upload_dir['basedir'])) {
+                return null;
+            }
+            $relative_path = str_replace(rtrim($upload_dir['basedir'], '/') . '/', '', $file_path);
 
-        // AVIFサムネイルは _wp_attached_file に登録されない場合がある。
-        // 親画像の候補を同じディレクトリから探し、メタデータに記録された
-        // サムネイル名と一致した場合だけ保護設定を継承する。
-        if (strtolower(pathinfo($relative_path, PATHINFO_EXTENSION)) !== 'avif') {
-            return false;
-        }
-
-        $thumbnail_name = basename($relative_path);
-        if (!preg_match('/^(.+)-[0-9]+x[0-9]+\\.avif$/i', $thumbnail_name, $matches)) {
-            return false;
-        }
-
-        $directory = dirname($relative_path);
-        $parent_prefix = ($directory === '.' ? '' : $directory . '/') . $matches[1];
-        $parent_extensions = ['avif', 'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'heic', 'heif'];
-        $candidates = [];
-        foreach ($parent_extensions as $extension) {
-            $candidates[] = $parent_prefix . '.' . $extension;
-        }
-
-        $placeholders = implode(', ', array_fill(0, count($candidates), '%s'));
-        $candidate_ids = $wpdb->get_col($wpdb->prepare(
-            "SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = %s AND meta_value IN ({$placeholders})",
-            array_merge(['_wp_attached_file'], $candidates)
-        ));
-
-        foreach ((array) $candidate_ids as $candidate_id) {
-            $metadata = wp_get_attachment_metadata((int) $candidate_id);
-            if (!is_array($metadata) || !isset($metadata['file'], $metadata['sizes']) ||
-                !is_array($metadata['sizes']) || dirname($metadata['file']) !== $directory) {
-                continue;
+            // SQL失敗を「IDなし」と混同しない。単に見つからなかった場合のみfalse。
+            $attachment_id = $wpdb->get_var($wpdb->prepare(
+                "SELECT post_id FROM {$wpdb->postmeta}
+                WHERE meta_key = '_wp_attached_file'
+                AND meta_value = %s
+                LIMIT 1",
+                $relative_path
+            ));
+            if ($wpdb->last_error !== '' ||
+                ($attachment_id !== null && (!is_numeric($attachment_id) || (int) $attachment_id <= 0))) {
+                return null;
+            }
+            if ($attachment_id !== null) {
+                return (int) $attachment_id;
             }
 
-            foreach ($metadata['sizes'] as $size) {
-                if (is_array($size) && isset($size['file']) && $size['file'] === $thumbnail_name) {
-                    return (int) $candidate_id;
+            // AVIFサムネイルは _wp_attached_file に登録されない場合がある。
+            // 親画像の候補を同じディレクトリから探し、メタデータに記録された
+            // サムネイル名と一致した場合だけ保護設定を継承する。
+            if (strtolower(pathinfo($relative_path, PATHINFO_EXTENSION)) !== 'avif') {
+                return false;
+            }
+
+            $thumbnail_name = basename($relative_path);
+            if (!preg_match('/^(.+)-[0-9]+x[0-9]+\\.avif$/i', $thumbnail_name, $matches)) {
+                return false;
+            }
+
+            $directory = dirname($relative_path);
+            $parent_prefix = ($directory === '.' ? '' : $directory . '/') . $matches[1];
+            $parent_extensions = ['avif', 'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'heic', 'heif'];
+            $candidates = [];
+            foreach ($parent_extensions as $extension) {
+                $candidates[] = $parent_prefix . '.' . $extension;
+            }
+
+            $placeholders = implode(', ', array_fill(0, count($candidates), '%s'));
+            $candidate_ids = $wpdb->get_col($wpdb->prepare(
+                "SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = %s AND meta_value IN ({$placeholders})",
+                array_merge(['_wp_attached_file'], $candidates)
+            ));
+            if ($wpdb->last_error !== '' || !is_array($candidate_ids)) {
+                return null;
+            }
+
+            foreach ($candidate_ids as $candidate_id) {
+                $metadata = wp_get_attachment_metadata((int) $candidate_id);
+                if (!is_array($metadata) || !isset($metadata['file'], $metadata['sizes']) ||
+                    !is_array($metadata['sizes']) || dirname($metadata['file']) !== $directory) {
+                    continue;
+                }
+
+                foreach ($metadata['sizes'] as $size) {
+                    if (is_array($size) && isset($size['file']) && $size['file'] === $thumbnail_name) {
+                        return (int) $candidate_id;
+                    }
                 }
             }
-        }
 
-        return false;
+            return false;
+        } catch (\Throwable $error) {
+            return null;
+        }
     }
 
     /**
@@ -847,12 +1089,24 @@ class ESP_Media_Protection {
         exit;
     }
 
+    /** 認可用のDB照会失敗は本文を返さず、一時的な配信不能として扱う。 */
+    private function send_503() {
+        nocache_headers();
+        status_header(503);
+        wp_die(__('メディアの保護状態を確認できません。', ESP_Config::TEXT_DOMAIN),
+            '', ['response' => 503]);
+        exit;
+    }
+
     /**
      * アップロード時の自動保護設定
      *
      * @param int $attachment_id 添付ファイルID
      */
     public function auto_protect_on_upload($attachment_id) {
+        if (!$this->enabled) {
+            return;
+        }
         // 現在のユーザーがアップロードしているコンテキストから保護パスを推定
         // 例：特定のページや投稿からアップロードされた場合など
         // この実装は要件に応じてカスタマイズが必要
@@ -865,6 +1119,16 @@ class ESP_Media_Protection {
             
             // キャッシュを再生成
             $this->regenerate_media_cache();
+        }
+    }
+
+    /**
+     * ESP自身の保存処理を経由しないpostmeta更新でも、
+     * 古いメディア認可キャッシュを無効化する。
+     */
+    public static function on_protection_meta_mutation($meta_id, $post_id, $meta_key, $meta_value) {
+        if ($meta_key === self::META_KEY_PROTECTED_PATH) {
+            ESP_Authorization_Cache::invalidate('media', self::MEDIA_CACHE_KEY);
         }
     }
 
@@ -983,94 +1247,597 @@ class ESP_Media_Protection {
     }
 
     /**
+     * ESPの設定画面を初期化できない段階の失敗も含め、
+     * 管理者向けの警告を継続して表示する。
+     */
+    public static function render_rewrite_admin_notice() {
+        if (!current_user_can('manage_options')) {
+            return;
+        }
+        $error = get_option('esp_rewrite_last_error', '');
+        if (!$error) {
+            return;
+        }
+        // 管理者がCFM競合等を解消してルールを再設置したあとでも、
+        // 過去のエラーが残る場合がある。実ファイルが現行設定と完全一致
+        // するときだけ古い通知を消す。Nginxの外部設定はここでは証明できない。
+        if (preg_match('/apache|litespeed/i', $_SERVER['SERVER_SOFTWARE'] ?? '') &&
+            self::rewrite_file_matches_policy(self::is_media_protection_enabled())) {
+            delete_option('esp_rewrite_last_error');
+            return;
+        }
+        $settings_url = admin_url('admin.php?page=esp-settings#esp-reset-htaccess-rules');
+        echo '<div class="notice notice-error"><p>' .
+            esc_html__('Easy Slug Protect: メディア保護Rewriteの適用または照合に失敗しました。uploads/.htaccessと第三者Rewriteを確認してください。', ESP_Config::TEXT_DOMAIN) .
+            ' (' . esc_html((string) $error) . ')</p><p><a href="' .
+            esc_url($settings_url) . '">' .
+            esc_html__('ESP設定の「.htaccessのルールを再設定する」を開く', ESP_Config::TEXT_DOMAIN) .
+            '</a></p></div>';
+    }
+
+    /**
+     * バージョン番号が変わらなくても、既存環境では初回アクセス時にルールを検証する。
+     * 保護画像が0件から1件になる際、設定保存の遅延に依存させない。
+     */
+    public static function ensure_rewrite_policy() {
+        if (!preg_match('/apache|litespeed/i', $_SERVER['SERVER_SOFTWARE'] ?? '')) {
+            // 明示されたNginxは外部設定の責務。未知のサーバーで保護メタが
+            // 存在する／DBが不明なら、安全な配信経路を確認できないため拒否。
+            // 保護OFFまたは保護対象0件なら不要なサイト全体503を避ける。
+            return self::is_nginx_server() || !self::is_media_protection_enabled() ||
+                self::has_any_protected_media_records() === false;
+        }
+        $enabled = self::is_media_protection_enabled();
+        $policy = 'always-route-v2:' . ($enabled ? 'on' : 'off');
+        // .htaccessの実際の内容を正とし、バージョン印は管理用の目安とする。
+        // 保護無効など、実ファイルが既に正しければロック作成を試みない。
+        if (self::rewrite_file_matches_policy($enabled)) {
+            if (get_option('esp_rewrite_policy_version', '') !== $policy) {
+                update_option('esp_rewrite_policy_version', $policy, false);
+            }
+            delete_option('esp_rewrite_last_error');
+            return true;
+        }
+        // 保護ゲート中の修復で通常コンストラクタを起動しない。
+        // 管理フックやDBキャッシュ構築よりRewriteだけを修復する。
+        $media = (new \ReflectionClass(self::class))->newInstanceWithoutConstructor();
+        $result = $media->update_htaccess();
+        if ($result !== true) {
+            update_option('esp_rewrite_last_error', $result instanceof WP_Error
+                ? $result->get_error_code() : 'esp_rewrite_unknown', false);
+            // 実DBで保護済みメディアが0件と確定した場合に限り、
+            // Rewriteの修復失敗で通常の公開ページまで503にしない。
+            // 新規保護メタの追加はcan_assign_protected_mediaが別途拒否する。
+            return self::has_any_protected_media_records() === false;
+        }
+        update_option('esp_rewrite_policy_version', $policy, false);
+        delete_option('esp_rewrite_last_error');
+        return get_option('esp_rewrite_policy_version', '') === $policy;
+    }
+
+    /**
+     * WP-Cronによる読取専用点検。修復やロック取得は行わない。
+     */
+    public static function audit_rewrite_policy() {
+        if (!preg_match('/apache|litespeed/i', $_SERVER['SERVER_SOFTWARE'] ?? '')) {
+            // Nginxの外部ルールは別途運用確認が必要。未知のサーバーは
+            // 保護対象がある状態を正常な監査結果として報告しない。
+            return self::is_nginx_server() || !self::is_media_protection_enabled() ||
+                self::has_any_protected_media_records() === false;
+        }
+        return self::rewrite_file_matches_policy(self::is_media_protection_enabled());
+    }
+
+    /**
+     * キャッシュ上のバージョン印だけでなく、配置済みルールの内容を検証する。
+     * 実際のWebサーバーでのRewrite動作検証に代わるものではない。
+     */
+    private static function rewrite_file_matches_policy($enabled, $litespeed_key_override = null) {
+        $dir = wp_upload_dir(null, false);
+        if (!empty($dir['error']) || empty($dir['basedir'])) {
+            return false;
+        }
+        $file = trailingslashit($dir['basedir']) . '.htaccess';
+        if (!is_file($file) || is_link($file)) {
+            return !$enabled && !file_exists($file);
+        }
+        $contents = @file_get_contents($file);
+        if ($contents === false) {
+            return false;
+        }
+        $start = strpos($contents, '# BEGIN ESP Media Protection');
+        $begin_count = substr_count($contents, '# BEGIN ESP Media Protection');
+        $end_count = substr_count($contents, '# END ESP Media Protection');
+        if (!$enabled) {
+            // 片側だけ残った壊れたESPブロックも「設定OFFの正常状態」ではない。
+            return $begin_count === 0 && $end_count === 0;
+        }
+        if ($start === false || $begin_count !== 1 || $end_count !== 1) {
+            return false;
+        }
+        $end = strpos($contents, '# END ESP Media Protection', $start);
+        if ($end === false) {
+            return false;
+        }
+        $block = substr($contents, $start, $end - $start + strlen('# END ESP Media Protection'));
+        // ESP優先が基本。第三者の明示的拒否がある場合だけ、その後ろに配置。
+        $after_esp = substr($contents, $end + strlen('# END ESP Media Protection'));
+        $before_esp = substr($contents, 0, $start);
+        if (trim($before_esp) === '') {
+            if (self::foreign_rewrite_priority($after_esp) !== 'before') {
+                return false;
+            }
+        } elseif (trim($after_esp) === '') {
+            if (self::foreign_rewrite_priority($before_esp) !== 'after') {
+                return false;
+            }
+        } else {
+            return false;
+        }
+        // リクエストごとのルール照合では、キャッシュや各種フックを初期化しない。
+        // .htaccessの内容を比較する処理だけを実行する。
+        $media = (new \ReflectionClass(self::class))->newInstanceWithoutConstructor();
+        $expected = $media->get_htaccess_rules(true, true, $litespeed_key_override);
+        if (is_wp_error($expected)) {
+            return false;
+        }
+        return rtrim($block, "\r\n") === rtrim($expected, "\r\n");
+    }
+
+    /**
      * .htaccessファイルを更新（Apache環境用）
      *
      * @param bool $force_litespeed_key_regeneration LiteSpeedキーを再生成するかどうか
      * @return bool 成功時true
      */
-    public function update_htaccess($force_litespeed_key_regeneration = false) {
-        if (!$this->is_apache()) {
-            return $this->enabled
-                ? new WP_Error('esp_htaccess_unsupported', __('ApacheまたはLiteSpeed環境でのみ利用できます。', ESP_Config::TEXT_DOMAIN))
-                : true;
+    public function update_htaccess($force_litespeed_key_regeneration = false, $deactivating = false, $route_override = null) {
+        // WordPress管理画面と異なりWP-CLIではSERVER_SOFTWAREが空になり得る。
+        // ESP自身の既存ブロックの削除はWebサーバー種別に依存しない。
+        // ただし、サーバー不明時の保護ONルール新規設置は推測で許可しない。
+        if (!$this->is_apache() && !$deactivating && $this->enabled) {
+            return new WP_Error('esp_htaccess_unsupported',
+                __('ApacheまたはLiteSpeed環境でのみ利用できます。', ESP_Config::TEXT_DOMAIN));
         }
 
         $upload_dir = wp_upload_dir();
-
-        if (!empty($upload_dir['error'])) {
-            return new WP_Error('esp_htaccess_upload_dir', sprintf(__('アップロードディレクトリを取得できません: %s', ESP_Config::TEXT_DOMAIN), $upload_dir['error']));
+        if (!empty($upload_dir['error']) || empty($upload_dir['basedir']) || !is_dir($upload_dir['basedir'])) {
+            return new WP_Error('esp_htaccess_upload_dir', __('アップロードディレクトリを確認できません。', ESP_Config::TEXT_DOMAIN));
         }
 
         $htaccess_file = trailingslashit($upload_dir['basedir']) . '.htaccess';
-
-        // 既存の.htaccessを読み込み（失敗した場合は空文字で継続）
-        $current_rules = '';
-        if (file_exists($htaccess_file)) {
-            $contents = file_get_contents($htaccess_file);
-            if ($contents === false) {
-                return new WP_Error('esp_htaccess_read_failed', __('既存の.htaccessを読み込めませんでした。ファイル権限を確認してください。', ESP_Config::TEXT_DOMAIN));
+        if ($deactivating || ($route_override === null && !self::is_media_protection_enabled())) {
+            // OFF→ONの事前Rewrite設置（route_override=true）は素通りさせない。
+            // 既存ESPブロックなしなら変更不要。CLI/Nginxで空ファイルやロックを
+            // 作らず、読み取り失敗・部分マーカーは後続のエラー経路へ渡す。
+            if (!file_exists($htaccess_file) && !is_link($htaccess_file)) {
+                return true;
             }
-            $current_rules = $contents;
+            $present = @file_get_contents($htaccess_file);
+            if ($present === false) {
+                return new WP_Error('esp_htaccess_read_failed',
+                    __('既存の.htaccessを読み取れません。', ESP_Config::TEXT_DOMAIN));
+            }
+            if (!str_contains($present, '# BEGIN ESP Media Protection') &&
+                !str_contains($present, '# END ESP Media Protection')) {
+                return true;
+            }
+        }
+        $lock_file = $htaccess_file . '.esp.lock';
+        $lock = @fopen($lock_file, 'c');
+        if ($lock === false) {
+            return new WP_Error('esp_htaccess_lock_open', __('保護ルールの更新ロックを作成できません。', ESP_Config::TEXT_DOMAIN));
         }
 
-        // ESP用のルールを定義
-        $esp_rules = $this->get_htaccess_rules($force_litespeed_key_regeneration);
+        $temp = null;
+        $backup = null;
+        $keep_backup = false;
+        try {
+            if (!@flock($lock, LOCK_EX | LOCK_NB)) {
+                return new WP_Error('esp_htaccess_locked', __('別の保護ルール更新が進行中です。', ESP_Config::TEXT_DOMAIN));
+            }
+            // 保護設定が有効なら、対象画像が0件から1件になる場合もRewriteを維持する。
+            // DBの件数ではなく、保護の有効設定に従ってルールを決める。
+            $route_media = !$deactivating &&
+                ($route_override === null ? self::is_media_protection_enabled() : (bool) $route_override);
+            if (is_link($htaccess_file)) {
+                return new WP_Error('esp_htaccess_symlink', __('シンボリックリンクの保護ルールは自動置換できません。', ESP_Config::TEXT_DOMAIN));
+            }
+            $exists = file_exists($htaccess_file);
+            $old = $exists ? @file_get_contents($htaccess_file) : '';
+            if ($old === false) {
+                return new WP_Error('esp_htaccess_read_failed', __('既存の.htaccessを読み取れません。', ESP_Config::TEXT_DOMAIN));
+            }
 
-        // 既存のESPルールを削除
-        $pattern = '/# BEGIN ESP Media Protection.*?# END ESP Media Protection\s*/s';
-        $current_rules = preg_replace($pattern, '', $current_rules);
+            // マーカーの欠損や重複時は既存のESPブロックの範囲を推測しない。
+            $begin_count = substr_count($old, '# BEGIN ESP Media Protection');
+            $end_count = substr_count($old, '# END ESP Media Protection');
+            $begin_at = strpos($old, '# BEGIN ESP Media Protection');
+            $end_at = strpos($old, '# END ESP Media Protection');
+            // 各1個あってもEND→BEGINの逆順は正しいブロックではない。
+            if ($begin_count !== $end_count || $begin_count > 1 ||
+                ($begin_count === 1 && ($begin_at === false || $end_at === false ||
+                    $end_at <= $begin_at))) {
+                return new WP_Error('esp_htaccess_ambiguous', __('ESP保護ルールの境界が不正なため自動更新しません。', ESP_Config::TEXT_DOMAIN));
+            }
+            // 他のESPワーカーの書込みもflock取得後に版を再確認する。
+            // 将来版のRewriteと更新中の状態は旧コードが変更してはならない。
+            $compatibility = self::check_rewrite_writer_compatibility($old, $begin_at, $end_at);
+            if (is_wp_error($compatibility)) {
+                return $compatibility;
+            }
+            // WordPressの明示的なプラグイン無効化では、保護メタ件数にかかわらず
+            // ESPのRewriteだけを取り除く。他者のルールは従来どおり保全する。
 
-        // 保護が有効な場合は新しいルールを追加
-        $new_rules = $this->has_protected_media() ? $esp_rules . "\n" . ltrim($current_rules) : ltrim($current_rules);
+            // マーカーを独立した行として厳密に認識し、ESP以外の全バイトを保持。
+            // コメント中の同名文字列や不正な境界にマッチさせない。
+            $pattern = '/^# BEGIN ESP Media Protection[ \\t]*\\r?\\n.*?^# END ESP Media Protection[ \\t]*(?:\\r?\\n|\\z)/ms';
+            $replacements = 0;
+            $without_esp = preg_replace($pattern, '', $old, 1, $replacements);
+            if ($without_esp === null || ($begin_count === 1 && $replacements !== 1)) {
+                return new WP_Error('esp_htaccess_parse_failed', __('保護ルールの境界を厳密に解析できません。', ESP_Config::TEXT_DOMAIN));
+            }
+            // RewriteとDBのキーを同時更新できないため、まず新しいキーを
+            // メモリに保持してRewriteを設置・検証し、その後DBへ保存する。
+            $this->rewrite_key_candidate = null;
+            if ($route_media && $this->is_litespeed() &&
+                ($force_litespeed_key_regeneration || self::get_litespeed_key_value() === '')) {
+                $this->rewrite_key_candidate = $this->generate_litespeed_key();
+            }
+            $esp_rules = $this->get_htaccess_rules($route_media, false, $this->rewrite_key_candidate);
+            if (is_wp_error($esp_rules)) {
+                return $esp_rules;
+            }
+            // 第三者の拒否はESPより先、それ以外の配信RewriteはESPより後。
+            // 認可ゲートや両方が混在する場合は推測せず、既存ファイルを残す。
+            $priority = $route_media ? self::foreign_rewrite_priority($without_esp) : 'off';
+            if ($route_media && $priority === null) {
+                return new WP_Error('esp_htaccess_foreign_rewrite_conflict',
+                    __('第三者のアクセス制限または不明なRewriteと安全に共存できないため、自動設置しません。管理者が優先順位を確認してください。', ESP_Config::TEXT_DOMAIN));
+            }
+            if (!$route_media) {
+                $new_rules = $without_esp;
+            } elseif ($priority === 'after') {
+                $separator = $without_esp !== '' &&
+                    !preg_match('/(?:\\r\\n|\\n|\\r)\\z/', $without_esp) ? "\n" : '';
+                $new_rules = $without_esp . $separator . $esp_rules;
+            } else {
+                // ESPブロックは改行で終わる。余分な改行を加えず第三者のバイトを保持。
+                $new_rules = $esp_rules . $without_esp;
+            }
+            // 一組だけ、選択された配置にあることを確認する。
+            if ($route_media && (substr_count($new_rules, '# BEGIN ESP Media Protection') !== 1 ||
+                substr_count($new_rules, '# END ESP Media Protection') !== 1 ||
+                ($priority === 'after'
+                    ? substr($new_rules, -strlen($esp_rules)) !== $esp_rules
+                    : strpos($new_rules, $esp_rules) !== 0))) {
+                return new WP_Error('esp_htaccess_invalid_result',
+                    __('生成したRewrite保護ルールの構造が不正です。', ESP_Config::TEXT_DOMAIN));
+            }
+            if ($new_rules === $old) {
+                return true;
+            }
 
-        // WP_Filesystemを優先的に使用
-        if (!function_exists('WP_Filesystem')) {
-            require_once ABSPATH . 'wp-admin/includes/file.php';
+            // 実運用中の.htaccessへ直接書き込むと途中で破損するおそれがある。
+            // 同じディレクトリに一時ファイルを作成・検証してから置換する。
+            $temp = @tempnam($upload_dir['basedir'], '.htaccess.esp-');
+            // uploadsがシンボリックリンクの場合、tempnam()は実体側のパスを返し得る。
+            // 文字列のパスではなく実体ディレクトリを比較し、別ディレクトリへの
+            // フォールバック（権限不足など）だけを拒否する。
+            $expected_dir = @realpath($upload_dir['basedir']);
+            $temp_dir = $temp ? @realpath(dirname($temp)) : false;
+            if (!$temp || $expected_dir === false || $temp_dir === false ||
+                $temp_dir !== $expected_dir) {
+                return new WP_Error('esp_htaccess_temp_failed', __('保護ルールの一時ファイルを作成できません。', ESP_Config::TEXT_DOMAIN));
+            }
+            if ($exists) {
+                $mode = @fileperms($htaccess_file);
+                if ($mode === false) {
+                    return new WP_Error('esp_htaccess_mode_read', __('元の.htaccess権限を取得できません。', ESP_Config::TEXT_DOMAIN));
+                }
+                $mode &= 0777;
+            } else {
+                $mode = 0644;
+            }
+            if (($mode & 0444) === 0 || !@chmod($temp, $mode) || ((@fileperms($temp) & 0777) !== $mode)) {
+                return new WP_Error('esp_htaccess_mode_failed', __('一時ファイルの読取権限を設定・確認できません。', ESP_Config::TEXT_DOMAIN));
+            }
+            $written = @file_put_contents($temp, $new_rules);
+            if ($written !== strlen($new_rules) || @file_get_contents($temp) !== $new_rules) {
+                return new WP_Error('esp_htaccess_write_failed', __('保護ルールの一時ファイル書込・検証に失敗しました。', ESP_Config::TEXT_DOMAIN));
+            }
+
+            // 置換後の読戻し・保護ルール検証が失敗しても元のファイルを
+            // 復元できるよう、既存の内容を同じFS上に事前退避する。
+            // バックアップは0600、ファイル名もApache標準の .ht* 拒否対象に置く。
+            // これだけで全サーバーのWeb配信拒否を保証するものではない。
+            if ($exists) {
+                $backup = @tempnam($upload_dir['basedir'], '.htaccess.esp-restore-');
+                $backup_dir = $backup ? @realpath(dirname($backup)) : false;
+                if (!$backup || $backup_dir !== $expected_dir ||
+                    !@chmod($backup, 0600) ||
+                    (@fileperms($backup) & 0777) !== 0600 ||
+                    @file_put_contents($backup, $old) !== strlen($old) ||
+                    @file_get_contents($backup) !== $old) {
+                    return new WP_Error('esp_htaccess_backup_failed',
+                        __('旧Rewrite設定の安全な退避に失敗したため、置換しませんでした。', ESP_Config::TEXT_DOMAIN));
+                }
+            }
+
+            // ESPのロックを使わない外部変更との競合も検出する。
+            if ($exists !== file_exists($htaccess_file) ||
+                ($exists && @file_get_contents($htaccess_file) !== $old)) {
+                return new WP_Error('esp_htaccess_changed', __('更新中に.htaccessが変更されたため、置換しませんでした。', ESP_Config::TEXT_DOMAIN));
+            }
+            if (!@rename($temp, $htaccess_file)) {
+                return new WP_Error('esp_htaccess_rename_failed', __('保護ルールを安全に置換できません。', ESP_Config::TEXT_DOMAIN));
+            }
+            $temp = null;
+
+            $verified = $this->verify_rewrite_installation($htaccess_file, $new_rules, $route_media);
+            $key_committed = false;
+            if ($verified) {
+                try {
+                    $key_committed = $this->rewrite_key_candidate === null ||
+                        self::commit_litespeed_key($this->rewrite_key_candidate);
+                } catch (\Throwable $error) {
+                    // update_option()のフックが保存後に例外を投げることもある。
+                    // 保存済みなら新Rewriteを維持し、未保存なら既存の復元経路へ。
+                    error_log('ESP: LiteSpeed key commit raised an exception');
+                    try {
+                        $key_committed = $this->rewrite_key_candidate !== null &&
+                            self::get_litespeed_key_value() === $this->rewrite_key_candidate;
+                    } catch (\Throwable $read_error) {
+                        $key_committed = false;
+                    }
+                }
+            }
+            if (!$verified || !$key_committed) {
+                // 他のプロセスによる変更を旧データで上書きしない。
+                if (!$exists || @file_get_contents($htaccess_file) !== $new_rules) {
+                    $keep_backup = $exists;
+                    return new WP_Error($verified ? 'esp_litespeed_key_write' : 'esp_htaccess_verify_failed',
+                        __('RewriteまたはLiteSpeedキーの確定に失敗しました。安全に元のファイルへ復元できず、管理者による確認が必要です。', ESP_Config::TEXT_DOMAIN));
+                }
+                if (!@chmod($backup, $mode) || (@fileperms($backup) & 0777) !== $mode ||
+                    @file_get_contents($backup) !== $old) {
+                    $keep_backup = true;
+                    return new WP_Error('esp_htaccess_restore_prepare_failed',
+                        __('旧Rewrite設定を復元する準備に失敗しました。退避ファイルを保持します。', ESP_Config::TEXT_DOMAIN));
+                }
+                if (@file_get_contents($htaccess_file) !== $new_rules || !@rename($backup, $htaccess_file)) {
+                    // 復元を断念して退避ファイルを残すときは権限を狭め直す。
+                    @chmod($backup, 0600);
+                    $keep_backup = true;
+                    return new WP_Error('esp_htaccess_restore_failed',
+                        __('旧Rewrite設定を復元できませんでした。退避ファイルを保持します。', ESP_Config::TEXT_DOMAIN));
+                }
+                $backup = null;
+                if (@file_get_contents($htaccess_file) !== $old) {
+                    return new WP_Error('esp_htaccess_restore_verify_failed',
+                        __('旧Rewrite設定を復元しましたが照合に失敗しました。', ESP_Config::TEXT_DOMAIN));
+                }
+                return new WP_Error($verified ? 'esp_litespeed_key_write' : 'esp_htaccess_rolled_back',
+                    $verified
+                        ? __('LiteSpeedキーの保存に失敗したため、以前のRewrite設定に復元しました。', ESP_Config::TEXT_DOMAIN)
+                        : __('Rewrite検証に失敗したため、以前の設定に復元しました。', ESP_Config::TEXT_DOMAIN));
+            }
+            return true;
+        } finally {
+            $this->rewrite_key_candidate = null;
+            if ($temp && is_file($temp)) {
+                @unlink($temp);
+            }
+            if ($backup && !$keep_backup && is_file($backup)) {
+                @unlink($backup);
+            }
+            @flock($lock, LOCK_UN);
+            @fclose($lock);
         }
+    }
 
-        global $wp_filesystem;
-
-        if (!is_object($wp_filesystem)) {
-            WP_Filesystem();
+    /**
+     * 新旧PHPワーカーが同じ.htaccessを書き換える際、旧版による保護の後退を拒否。
+     * 旧mainのバージョン印が無いESPブロックは初回の管理下更新で移行可能。
+     * ただし#49以降は新しいRewriteのWriter版印を必ず保持すること。
+     *
+     * この検査は必ず.htaccess.esp.lock取得後に実行する。
+     */
+    private static function check_rewrite_writer_compatibility($contents, $begin_at, $end_at) {
+        if (!defined('ESP_VERSION')) {
+            return new WP_Error('esp_htaccess_writer_version_missing',
+                __('ESPの実行バージョンを確認できないため、保護ルールを変更しません。', ESP_Config::TEXT_DOMAIN));
         }
-
-        // 書き込み処理を共通化
-        $write_success = false;
-
-        if (is_object($wp_filesystem) && $wp_filesystem instanceof WP_Filesystem_Base) {
-            // WP_Filesystem経由で書き込み
-            $write_success = $wp_filesystem->put_contents($htaccess_file, $new_rules, FS_CHMOD_FILE);
+        // flockより前に別ワーカーが持っていたoptionsキャッシュを使わない。
+        // Writer呼出しは稀なので、更新判定の直前に必要な印だけ失効する。
+        if (function_exists('wp_cache_delete')) {
+            wp_cache_delete('alloptions', 'options');
+            wp_cache_delete('esp_runtime_state', 'options');
+            wp_cache_delete(ESP_Config::VERSION_OPTION_KEY, 'options');
         }
-
-        if (!$write_success) {
-            // フォールバックで直接書き込み
-            $bytes = @file_put_contents($htaccess_file, $new_rules);
-            $write_success = ($bytes !== false);
+        // updater_pre_installでUPDATINGに入った後は、通常のRewrite設定変更を止める。
+        // 更新後の新PHP検証（VERIFY_REQUIRED/PENDING）は別途行う。
+        $runtime = get_option('esp_runtime_state', null);
+        $runtime_state = is_array($runtime) ? ($runtime['state'] ?? null) : $runtime;
+        if ($runtime_state === 'UPDATING') {
+            return new WP_Error('esp_htaccess_upgrade_in_progress',
+                __('ESP更新中のため保護ルールを変更しません。', ESP_Config::TEXT_DOMAIN));
         }
-
-        if (!$write_success) {
-            return new WP_Error('esp_htaccess_write_failed', __('.htaccessを書き込めませんでした。ファイル/ディレクトリの権限を確認してください。', ESP_Config::TEXT_DOMAIN));
+        $installed = get_option(ESP_Config::VERSION_OPTION_KEY, null);
+        $verified = is_array($runtime) ? ($runtime['version'] ?? null) : null;
+        foreach ([$installed, $verified] as $version) {
+            if (is_string($version) && $version !== '' &&
+                version_compare($version, ESP_VERSION, '>')) {
+                return new WP_Error('esp_htaccess_stale_writer',
+                    __('新しいESPによる更新状態を旧版から変更できません。', ESP_Config::TEXT_DOMAIN));
+            }
         }
-
+        if ($begin_at === false || $end_at === false) {
+            return true;
+        }
+        $block = substr($contents, $begin_at, $end_at - $begin_at);
+        $count = preg_match_all('/^# ESP Rewrite Writer: ([^\\r\\n]+)\\r?$/m',
+            $block, $matches);
+        if ($count === false || $count > 1 ||
+            (str_contains($block, 'ESP Rewrite Writer:') && $count !== 1)) {
+            return new WP_Error('esp_htaccess_writer_ambiguous',
+                __('保護ルールの作成バージョンを確定できません。', ESP_Config::TEXT_DOMAIN));
+        }
+        // マーカーを持たない旧mainのブロックだけは初回更新で引き継ぐ。
+        if ($count === 1) {
+            $writer = trim($matches[1][0]);
+            if (!preg_match('/^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][A-Za-z0-9.+-]+)?$/D', $writer)) {
+                return new WP_Error('esp_htaccess_writer_ambiguous',
+                    __('保護ルールの作成バージョンが不正です。', ESP_Config::TEXT_DOMAIN));
+            }
+            if (version_compare($writer, ESP_VERSION, '>')) {
+                return new WP_Error('esp_htaccess_future_writer',
+                    __('新しいESPの保護ルールを旧版から書き換えることはできません。', ESP_Config::TEXT_DOMAIN));
+            }
+        }
         return true;
+    }
+
+    /**
+     * 第三者Rewriteとの優先順位を限定した構文から判定する。
+     * before: ESP先頭、after: 第三者の拒否優先、null: 未証明で書込み不可。
+     * RewriteCondや外部Webサーバー設定の意味的安全性までは保証しない。
+     */
+    private static function foreign_rewrite_priority($foreign_rules) {
+        $has_pass = false;
+        $has_deny = false;
+        $pending_condition = false;
+        $has_plain_inherit = false;
+        foreach (preg_split('/\\r\\n|\\n|\\r/', $foreign_rules) as $line) {
+            $line = trim($line);
+            if (preg_match('/^RewriteEngine(?:\\s|$)/i', $line)) {
+                // .htaccess後段のOffは先頭に置いたESPルールも無効化する。
+                // 不明な値・余分な引数も「安全なOn」と推測しない。
+                if (!preg_match('/^RewriteEngine\\s+On(?:\\s*(?:#.*)?)?$/i', $line)) {
+                    return null;
+                }
+                continue;
+            }
+            if (preg_match('/^RewriteOptions(?:\\s|$)/i', $line)) {
+                // Apacheのplain Inheritは親ルールを現在のルールの「後」に
+                // 追加する。ESPが先頭になる場合だけ許容する。
+                // InheritBefore / InheritDown / 複数指定等は解析せず拒否する。
+                if (!preg_match('/^RewriteOptions[ \\t]+Inherit(?:[ \\t]*#.*)?$/iD', $line)) {
+                    return null;
+                }
+                $has_plain_inherit = true;
+                continue;
+            }
+            if (preg_match('/^RewriteCond(?:\\s|$)/i', $line)) {
+                $pending_condition = true;
+                continue;
+            }
+            if (preg_match('/^RewriteRule\\s/i', $line) !== 1) {
+                continue;
+            }
+            $pending_condition = false;
+            if (!preg_match('/^RewriteRule\\s+(\\S+)\\s+(\\S+)(?:\\s+\\[([^\\]]*)\\])?(?:\\s*(?:#.*)?)?$/i',
+                $line, $matches)) {
+                return null;
+            }
+            $target = $matches[2];
+            $flags = isset($matches[3]) ? explode(',', $matches[3]) : [];
+            if (self::is_non_media_literal_rewrite($matches[1], $target, $flags)) {
+                continue;
+            }
+            $deny = false;
+            foreach ($flags as $flag) {
+                $flag = strtoupper(trim($flag));
+                if (in_array($flag, ['F', 'FORBIDDEN', 'G', 'GONE'], true) ||
+                    preg_match('/^(?:R|REDIRECT)=4[0-9]{2}$/', $flag)) {
+                    $deny = true;
+                    continue;
+                }
+                // プロキシ、handler、環境変数・未知の制御フラグは認可ゲートかもしれない。
+                if (!in_array($flag, ['L', 'END', 'NC', 'QSA', 'QSD', 'NE',
+                    'T=IMAGE/AVIF', 'T=IMAGE/WEBP', 'T=IMAGE/JPEG', 'T=IMAGE/PNG'], true)) {
+                    return null;
+                }
+            }
+            if ($deny) {
+                $has_deny = true;
+                continue;
+            }
+            if (preg_match('/\\.php(?:$|\\?)/i', $target)) {
+                return null;
+            }
+            // CFM等の元画像PASSと静的WebP/AVIFへの書換えをESPより後にする。
+            if ($target !== '-' &&
+                !preg_match('/\\.(?:avif|webp|jpe?g|png|gif|bmp|tiff?)$/i', $target)) {
+                return null;
+            }
+            $has_pass = true;
+        }
+        if ($has_pass && $has_deny) {
+            return null;
+        }
+        // plain Inheritを伴う構成はESP先頭時だけ安全性を判断できる。
+        // 他者DENYを先に置く必要があれば、親ルールとの順序は未証明として拒否。
+        if ($has_plain_inherit && $has_deny) {
+            return null;
+        }
+        // 明示DENYの後にESPを配置すると、末尾の孤立RewriteCondが
+        // ESPの最初のRewriteRuleへ結合し、保護を迂回する可能性がある。
+        if ($has_deny && $pending_condition) {
+            return null;
+        }
+        return $has_deny ? 'after' : 'before';
+    }
+
+    /**
+     * 第三者Rewriteとの非重複を確実に証明できる最小限の例外。
+     * 完全一致の相対ファイル名・拡張子だけに限定し、ESPが捕捉する
+     * 拡張子は除外する。任意の正規表現や外部設定の一般解析はしない。
+     */
+    private static function is_non_media_literal_rewrite($pattern, $target, $flags) {
+        if ($target !== '-' ||
+            !preg_match('/^\\^(?:[a-zA-Z0-9_-]+\\/)*[a-zA-Z0-9_-]+\\\\\\.([a-zA-Z0-9]+)\\$/D',
+                $pattern, $matches) ||
+            in_array(strtolower($matches[1]), self::PROTECTED_EXTENSIONS, true)) {
+            return false;
+        }
+        foreach ($flags as $flag) {
+            if (!in_array(strtoupper(trim($flag)), ['L', 'END', 'NC'], true)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * 配置後の確認。副作用のない検査として切り出し、
+     * テスト時は置換直後の故障を再現できるようにする。
+     */
+    protected function verify_rewrite_installation($file, $expected, $enabled) {
+        return @file_get_contents($file) === $expected &&
+            self::rewrite_file_matches_policy($enabled, $this->rewrite_key_candidate);
     }
 
     /**
      * .htaccess用のルールを生成
      *
-     * @param bool $force_litespeed_key_regeneration LiteSpeedキーを再生成するかどうか
-     * @return string .htaccessルール
+     * @param bool|null $has_protected_media ルールを適用するか
+     * @return string|WP_Error .htaccessルール
      */
-    private function get_htaccess_rules($force_litespeed_key_regeneration = false) {
+    private function get_htaccess_rules($has_protected_media = null, $read_only = false, $litespeed_key_override = null) {
+        if ($has_protected_media === null) {
+            $has_protected_media = self::is_media_protection_enabled();
+        }
         $home_path = parse_url(home_url(), PHP_URL_PATH);
         $home_path = $home_path ? trailingslashit($home_path) : '/';
         
         // wp-content/uploads/のパスを取得
-        $upload_dir = wp_upload_dir();
+        $upload_dir = wp_upload_dir(null, !$read_only);
         $upload_path = str_replace(ABSPATH, '', $upload_dir['basedir']);
         $upload_path = str_replace('\\', '/', $upload_path); // Windows対応
         
         $rules = "# BEGIN ESP Media Protection\n";
+        // #49以降の全リリースで生成コードの版を刻み、旧PHPが新版を上書きしない。
+        $rules .= "# ESP Rewrite Writer: " . ESP_VERSION . "\n";
         $rules .= "# 保護されたメディアファイルへの直接アクセスをWordPress経由にリダイレクト\n";
         $indent = '    ';
         $rules .= "<IfModule mod_rewrite.c>\n";
@@ -1080,11 +1847,20 @@ class ESP_Media_Protection {
         // 保護対象の拡張子パターンを生成
         $extensions_pattern = implode('|', array_map('preg_quote', self::PROTECTED_EXTENSIONS));
         
-        // 保護されたメディアが存在する場合のみルールを適用
-        if ($this->has_protected_media()) {
+        // 有効なら保護メディアが0件でもルールを適用（初回追加の直配信漏洩防止）
+        if ($has_protected_media) {
             if ($this->is_litespeed()) {
-                // LiteSpeed用の認証キーを必ず確保
-                $litespeed_key = $this->ensure_litespeed_key($force_litespeed_key_regeneration);
+                // 監査・既存ルール比較はキーを生成しない。
+                // キーの作成・更新は明示的なRewrite更新処理だけで行う。
+                $litespeed_key = $litespeed_key_override !== null
+                    ? $litespeed_key_override : self::get_litespeed_key_value();
+                if ($litespeed_key instanceof WP_Error) {
+                    return $litespeed_key;
+                }
+                if ($litespeed_key === '') {
+                    return new WP_Error('esp_litespeed_key_missing',
+                        __('LiteSpeedの保護キーがありません。管理者によるRewrite更新が必要です。', ESP_Config::TEXT_DOMAIN));
+                }
                 $escaped_key = preg_quote($litespeed_key, '/');
                 $query_key = ESP_Config::LITESPEED_QUERY_KEY;
 
@@ -1099,7 +1875,13 @@ class ESP_Media_Protection {
             $rules .= "{$indent}RewriteCond %{REQUEST_FILENAME} -f\n";
             $rules .= "{$indent}RewriteCond %{REQUEST_URI} ^.*\\.({$extensions_pattern})$ [NC]\n";
 
-            $rewrite_flags = $this->is_litespeed() ? '[L,QSA]' : '[L]';
+            // mod_rewriteは照合前にURLをデコードするため、&/+/#/?/空白等を
+            // クエリ値へ埋め込む前に再エスケープする。Apacheは選択的[B=]で
+            // ディレクトリ区切りを維持する。LiteSpeedでは選択的[B=]が
+            // ルーティングを素通りさせた実機事例があり、通常の[B]を使用。
+            // 通常[B]の%2Fはクエリ値としてPHP側で復号される。
+            $rewrite_flags = $this->is_litespeed()
+                ? '[B,L,QSA]' : '"[B= %&+#?;,L]"';
             $rules .= "{$indent}RewriteRule ^(.+)$ {$home_path}index.php?" . self::REWRITE_ENDPOINT . "=$1 {$rewrite_flags}\n";
         }
         
@@ -1198,29 +1980,30 @@ class ESP_Media_Protection {
     }
 
     /**
-     * LiteSpeed用のキーを取得（存在しない場合は生成して保存）
-     *
-     * @param bool $force_regeneration 強制的にキーを再生成するかどうか
+     * 配置済みRewriteを照合した後に限ってキーを保存する。
+     * 保存できなければ呼出元でRewriteを元の内容へ復元する。
      */
-    private function ensure_litespeed_key($force_regeneration = false) {
-        // 強制再生成が不要で、保存済みのキーがあればそれを利用
-        $existing = self::get_litespeed_key_value();
-        if (!$force_regeneration && $existing !== '') {
-            return $existing;
-        }
+    /** 内部キー保存中は、管理画面フォームのパスワードサニタイザを再実行しない。 */
+    public static function is_committing_litespeed_key() {
+        return self::$litespeed_key_commit_in_progress;
+    }
 
-        // 未保存または強制再生成が必要な場合は新たにキーを生成
-        $key = $this->generate_litespeed_key();
-
+    private static function commit_litespeed_key($key) {
         $settings = ESP_Option::get_all_settings();
-        if (!isset($settings['media']) || !is_array($settings['media'])) {
-            $settings['media'] = array();
+        if (!is_array($settings)) {
+            return false;
         }
-
+        if (!isset($settings['media']) || !is_array($settings['media'])) {
+            $settings['media'] = [];
+        }
         $settings['media'][self::OPTION_LITESPEED_KEY] = $key;
-        ESP_Option::update_settings($settings);
-
-        return $key;
+        self::$litespeed_key_commit_in_progress = true;
+        try {
+            ESP_Option::update_settings($settings);
+            return self::get_litespeed_key_value() === $key;
+        } finally {
+            self::$litespeed_key_commit_in_progress = false;
+        }
     }
 
     /**
@@ -1283,6 +2066,68 @@ class ESP_Media_Protection {
     }
 
     /**
+     * 管理者がOFFにする際の警告判定。true:保護メタあり、
+     * false:0件、null:DB状態不明（確認を要するが明示的OFFは妨げない）。
+     */
+    public static function protected_media_records_exist() {
+        return self::has_any_protected_media_records();
+    }
+
+    /** 管理者の明示的なOFFはDB照会状態によって拒否しない。 */
+    public static function can_disable_media_protection() {
+        return true;
+    }
+
+    /**
+     * Rewriteが実際に配置済みのときだけ新しい保護メタを受け入れる。
+     * 失敗時は保護メタの書込みより先に中止する。
+     */
+    public static function can_assign_protected_media() {
+        if (!self::is_media_protection_enabled()) {
+            return false;
+        }
+        $software = self::get_server_software();
+        if (self::is_nginx_server()) {
+            return true; // Nginxの保護ルールは外部設定の責務。
+        }
+        if (!preg_match('/apache|litespeed/i', $software)) {
+            // WP-CLI等でSERVER_SOFTWAREが未設定なら配信方式は特定できない。
+            // Nginxと推測して保護メタの先行登録を許可しない。
+            return false;
+        }
+        // ensureは0件時に一般公開ページの503を回避し得るため、
+        // 保護メタを書き込む際は必ず実ファイルの捕捉ルールを検証する。
+        return self::rewrite_file_matches_policy(true) ||
+            (self::ensure_rewrite_policy() && self::rewrite_file_matches_policy(true));
+    }
+
+    /**
+     * OFF→ONで既に保護メタがある場合は、設定をONに保存する前に
+     * サーバー側のRewriteを確実に設置・確認する。0件なら副作用は不要。
+     * 保存失敗で設定がOFFのまま残っても、PHP側はOFFとして公開配信可能。
+     */
+    public static function can_enable_media_protection() {
+        $records = self::has_any_protected_media_records();
+        if ($records === null) {
+            return false;
+        }
+        if ($records === false) {
+            return true;
+        }
+        if (!preg_match('/apache|litespeed/i', $_SERVER['SERVER_SOFTWARE'] ?? '')) {
+            // 保護メタありのOFF→ONは、明示されたNginxだけ外部設定に委ねる。
+            // WP-CLI等の未知の実行環境で安全なRewriteがあると推測しない。
+            return self::is_nginx_server();
+        }
+        if (self::rewrite_file_matches_policy(true)) {
+            return true;
+        }
+        $media = (new \ReflectionClass(self::class))->newInstanceWithoutConstructor();
+        return $media->update_htaccess(false, false, true) === true &&
+            self::rewrite_file_matches_policy(true);
+    }
+
+    /**
      * 保護されたメディアが存在するかどうか
      */
     private static function has_any_protected_media_records() {
@@ -1293,6 +2138,10 @@ class ESP_Media_Protection {
             self::META_KEY_PROTECTED_PATH
         ));
 
+        if ((!is_int($count) && (!is_string($count) || !ctype_digit($count))) ||
+            (isset($wpdb->last_error) && $wpdb->last_error !== '')) {
+            return null; // DB failure, never interpreted as an empty collection.
+        }
         return (int) $count > 0;
     }
 
@@ -1300,14 +2149,32 @@ class ESP_Media_Protection {
      * 設定保存時に呼び出される処理
      */
     public function on_settings_save() {
+        // Rewrite更新の一部でLiteSpeedキーだけを保存した場合、
+        // 同じフックから再びRewriteを書こうとすると自分自身のflockと競合する。
+        if (self::$litespeed_key_commit_in_progress) {
+            return true;
+        }
         // キャッシュを再生成
         $this->regenerate_media_cache();
         
         // .htaccessを更新
-        $this->update_htaccess();
-        
+        $result = $this->update_htaccess();
+        if ($result !== true) {
+            update_option('esp_rewrite_last_error', $result instanceof WP_Error
+                ? $result->get_error_code() : 'esp_rewrite_unknown', false);
+            if (function_exists('add_settings_error')) {
+                add_settings_error(ESP_Config::OPTION_KEY, 'esp_rewrite_failed',
+                    __('設定は保存されましたが、メディア保護ルールの適用に失敗しました。サーバー設定を確認して再適用してください。', ESP_Config::TEXT_DOMAIN),
+                    'error');
+            }
+            return $result;
+        }
+        delete_option('esp_rewrite_last_error');
+        update_option('esp_rewrite_policy_version', 'always-route-v2:' . (self::is_media_protection_enabled() ? 'on' : 'off'), false);
+
         // リライトルールをフラッシュ
         flush_rewrite_rules();
+        return true;
     }
 
     /**

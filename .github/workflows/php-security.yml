@@ -24,8 +24,34 @@ jobs:
         run: php tests/security-rate-limit-test.php
       - name: Test InnoDB and rate limit schema validation
         run: php tests/security-schema-test.php
+      - name: Test missing migration marker compatibility
+        run: php tests/security-migration-marker-test.php
       - name: Test AVIF media protection and rewrite coverage
         run: php tests/security-avif-test.php
+      - name: Test HEAD-only PHP media delivery
+        run: php tests/security-head-delivery-test.php
+      - name: Test fail-closed rewrite replacement
+        run: php tests/security-rewrite-failclosed-test.php
+      - name: Test failure boot and REST gate
+        run: php tests/security-protection-state-test.php
+      - name: Test first activation dependency bootstrap
+        run: php tests/security-activation-bootstrap-test.php
+      - name: Test failed activation media Rewrite cleanup
+        run: php tests/security-activation-failure-test.php
+      - name: Test safe media ON/OFF settings transitions
+        run: php tests/security-media-settings-transition-test.php
+      - name: Test LiteSpeed key rotation preserves protected-path passwords
+        run: php tests/security-litespeed-password-test.php
+      - name: Test safe uninstall Rewrite cleanup
+        run: php tests/security-uninstall-rewrite-test.php
+      - name: Test failure of authorization cache rebuilds
+        run: php tests/security-cache-failclosed-test.php
+      - name: Test generation-tagged caches
+        run: php tests/security-authorization-generation-test.php
+      - name: Test normal empty protection settings
+        run: php tests/security-zero-protected-paths-test.php
+      - name: Test protected path index freshness
+        run: php tests/security-path-matcher-generation-test.php
   mysql-integration:
     runs-on: ubuntu-latest
     services:
@@ -55,6 +81,13 @@ jobs:
           ESP_TEST_DB_PASSWORD: test-password
           ESP_TEST_DB_NAME: esp_test
         run: php tests/security-mysql-integration.php
+      - name: Verify migration lock ownership across MySQL sessions
+        env:
+          ESP_TEST_DB_HOST: 127.0.0.1
+          ESP_TEST_DB_USER: root
+          ESP_TEST_DB_PASSWORD: test-password
+          ESP_TEST_DB_NAME: esp_test
+        run: php tests/security-verification-mysql-lock-test.php
   package-plugin:
     runs-on: ubuntu-latest
     steps:

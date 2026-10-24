@@ -80,6 +80,13 @@ class ESP_Settings {
      * 
      */
     public function sanitize_settings($input) {
+        // LiteSpeedの内部キー更新は設定フォーム送信ではない。WordPressの
+        // sanitize_option フックを経由しても、保護パス・パスワード・セッション
+        // 世代を再処理しない。元データはcommit_litespeed_key()が取得した設定全体。
+        if (ESP_Media_Protection::is_committing_litespeed_key()) {
+            return $input;
+        }
+
         $sanitized = array();
 
         // error_log('esp: '. json_encode($input));
@@ -112,6 +119,51 @@ class ESP_Settings {
             isset($input['media']) ? $input['media'] : ESP_Option::get_current_setting('media')
         );
 
+        $old_media = ESP_Option::get_current_setting('media');
+        $old_enabled = !is_array($old_media) ||
+            !array_key_exists('enabled', $old_media) || (bool) $old_media['enabled'];
+        $new_enabled = !empty($sanitized['media']['enabled']);
+
+        if (!$old_enabled && $new_enabled) {
+            if (!ESP_Media_Protection::can_enable_media_protection()) {
+                // 既存の保護メタがあれば、設定をONにする前にRewriteの設置を必須とする。
+                // DB件数が不明、またはRewrite設置に失敗したときは旧OFF設定を維持。
+                $sanitized['media']['enabled'] = false;
+                add_settings_error(
+                    ESP_Config::OPTION_KEY,
+                    'esp_media_enable_rejected',
+                    __('保護メディアの状態を確認できないか、配信保護ルールを安全に設置できませんでした。ONへの変更は保存されていません。', ESP_Config::TEXT_DOMAIN),
+                    'error'
+                );
+            } else {
+                // LiteSpeedで保存前のRewrite設置が初回キーを作った場合、
+                // options.php の後段保存が古い空キーで上書きしないよう引き継ぐ。
+                $key = ESP_Media_Protection::get_litespeed_key_value();
+                if ($key !== '') {
+                    $sanitized['media'][ESP_Media_Protection::OPTION_LITESPEED_KEY] = $key;
+                }
+            }
+        }
+
+        if ($old_enabled && !$new_enabled) {
+            $records = ESP_Media_Protection::protected_media_records_exist();
+            $confirmed = isset($input['media']['confirm_disable']) &&
+                $input['media']['confirm_disable'] === '1';
+            if (($records === null || $records === true) && !$confirmed) {
+                // 保護メタの存在またはDB状態が不明なら明示確認を求める。
+                // 確認後のOFFは管理者の意思として受理し、DB障害でも妨げない。
+                $sanitized['media']['enabled'] = true;
+                add_settings_error(
+                    ESP_Config::OPTION_KEY,
+                    'esp_media_disable_rejected',
+                    $records === null
+                        ? __('保護メディアの件数を確認できません。公開される可能性を理解し、確認チェックを入れてから保存してください。', ESP_Config::TEXT_DOMAIN)
+                        : __('保護指定済みメディアが公開されることを確認し、確認チェックを入れてから保存してください。', ESP_Config::TEXT_DOMAIN),
+                    'error'
+                );
+            }
+        }
+
         return $sanitized;
     }
 
@@ -119,6 +171,12 @@ class ESP_Settings {
      * ハンドラーへのハンドラー
      */
     public function handle_settings_update($old_value, $value) {
+        // 内部LiteSpeedキー更新ではpath・キャッシュ・通知を再処理しない。
+        // Rewrite更新側は同じスコープでキーの適用・照合を実施する。
+        if (ESP_Media_Protection::is_committing_litespeed_key()) {
+            return;
+        }
+
         // パス設定の変更を処理
         if (isset($value['path'])) {
             $this->handle_update_path(
