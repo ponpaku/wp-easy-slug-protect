@@ -2,7 +2,7 @@
 /** Event-driven runtime gate: normal reads never invoke update/DB/Rewrite checks. */
 define('ABSPATH', __DIR__ . '/');
 define('ARRAY_A', 'ARRAY_A');
-define('ESP_VERSION', '0.7.38');
+define('ESP_VERSION', '0.7.39');
 define('ESP_PATH', __DIR__ . '/../');
 require __DIR__ . '/../includes/class-esp-config.php';
 
@@ -749,24 +749,24 @@ check(saved_runtime_state() === 'VERIFY_REQUIRED',
 
 // ロック待ち中に別ワーカーが新版READYへ進めた場合は取得後に再判定。
 $GLOBALS['options']['esp_runtime_state'] = runtime_value('READY');
-$wpdb->state_on_acquire = runtime_value('READY', '0.7.39');
+$wpdb->state_on_acquire = runtime_value('READY', '0.7.40');
 $stale_start = $pre(true, $bulk_extra);
 check($stale_start instanceof WP_Error &&
     $stale_start->get_error_code() === 'esp_upgrade_pending_unavailable' &&
-    get_option('esp_runtime_state') === runtime_value('READY', '0.7.39'),
+    get_option('esp_runtime_state') === runtime_value('READY', '0.7.40'),
     'locked writer re-reads state and cannot replace a newer READY');
 $GLOBALS['options']['esp_runtime_state'] = runtime_value('READY');
 
 // 新版READY後に残っている旧PHPワーカーは共有状態を書き換えない。
-$GLOBALS['options']['esp_runtime_state'] = runtime_value('READY', '0.7.39');
+$GLOBALS['options']['esp_runtime_state'] = runtime_value('READY', '0.7.40');
 $setup->checks = 0;
 check(ESP_Protection_State::boot($setup) === false &&
     $setup->checks === 0 &&
-    get_option('esp_runtime_state') === runtime_value('READY', '0.7.39'),
+    get_option('esp_runtime_state') === runtime_value('READY', '0.7.40'),
     'stale worker refuses this request without overwriting newer READY');
 
 $GLOBALS['options']['esp_runtime_state'] = runtime_value('READY');
-$GLOBALS['options'][ESP_Config::VERSION_OPTION_KEY] = '0.7.39';
+$GLOBALS['options'][ESP_Config::VERSION_OPTION_KEY] = '0.7.40';
 $setup->checks = 0;
 check(ESP_Protection_State::boot($setup) === false &&
     $setup->checks === 0 &&
@@ -781,11 +781,11 @@ $GLOBALS['options'][ESP_Config::VERSION_OPTION_KEY] = ESP_VERSION;
 // M2: 有効化前の無副作用な判定で旧コードのDDLと将来スキーマを拒否。
 check(ESP_Protection_State::can_run_activation_migration() === true,
     'M2: current code can activate against a compatible database');
-$GLOBALS['options'][ESP_Config::VERSION_OPTION_KEY] = '0.7.39';
+$GLOBALS['options'][ESP_Config::VERSION_OPTION_KEY] = '0.7.40';
 check(ESP_Protection_State::can_run_activation_migration() === false,
     'M2: prior installed version blocks stale activation before schema migration');
 $GLOBALS['options'][ESP_Config::VERSION_OPTION_KEY] = ESP_VERSION;
-$GLOBALS['options']['esp_runtime_state'] = runtime_value('READY', '0.7.39');
+$GLOBALS['options']['esp_runtime_state'] = runtime_value('READY', '0.7.40');
 check(ESP_Protection_State::can_run_activation_migration() === false,
     'M2: newer verified READY also blocks stale activation');
 $GLOBALS['options']['esp_runtime_state'] = runtime_value('READY');
