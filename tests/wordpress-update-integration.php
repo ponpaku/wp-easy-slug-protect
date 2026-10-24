@@ -112,6 +112,18 @@ $wpdb->insert(table_name('remember'), ['path' => '/members/', 'path_id' => 'path
 t(!run_migration() && get_option(ESP_Migrator::STATE_OPTION)['reason'] === 'path_mapping_ambiguous',
     'cross-linked active path ID is rejected even when retired history is allowed');
 
+// The retired_ prefix cannot be assigned to an active path, even by
+// manually edited settings; otherwise a past credential could be revived.
+create_current(); $s = settings_fixture();
+$s['path'] = ['retired_manual' => ['id' => 'retired_manual', 'path' => '/deleted/',
+    'password' => 'new-hash', 'password_version' => 0]];
+option_db('esp_settings', $s);
+t(!run_migration() && get_option(ESP_Migrator::STATE_OPTION)['reason'] === 'path_mapping_ambiguous',
+    'retired-history identity namespace cannot be used by active settings');
+
+// Tests that deliberately fail migration must not leave the subsequent
+// historical-version matrix running against corrupted fixture data.
+create_current(); settings_fixture(); seed_auth_rows();
 foreach ([0, 1, 2, 3, 4, 6] as $version) {
     option_db('esp_db_version', $version);
     t(run_migration() && (int) ESP_Migrator::read_option('esp_db_version') === 6,
