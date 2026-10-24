@@ -201,6 +201,10 @@ final class ESP_Protection_State {
             trim((string) ($_SERVER['SERVER_SOFTWARE'] ?? '')) === '') {
             return false;
         }
+        if (class_exists('ESP_Updater') && !ESP_Updater::can_finish_now()) {
+            ESP_Updater::schedule_retry();
+            return false;
+        }
         return self::verify_and_commit($setup, true);
     }
 
@@ -391,7 +395,7 @@ final class ESP_Protection_State {
      * タイムアウトで「所有中のロックを削除」する実装はしない。
      * DB接続終了時にはサーバーが自動解放する。
      */
-    private static function acquire_verification_lock($timeout = 0) {
+    public static function acquire_verification_lock($timeout = 0) {
         global $wpdb;
         if (!is_object($wpdb) || !isset($wpdb->prefix)) {
             return null;
@@ -414,7 +418,7 @@ final class ESP_Protection_State {
      * wpdb が途中で自動再接続した場合はロックを失ったものと扱う。
      * 他の検証が獲得した新しいロックを解放したりREADY確定したりしない。
      */
-    private static function owns_verification_lock($lock) {
+    public static function owns_verification_lock($lock) {
         global $wpdb;
         $owner = $wpdb->get_var($wpdb->prepare('SELECT IS_USED_LOCK(%s)', $lock['name']));
         $connection = $wpdb->get_var('SELECT CONNECTION_ID()');
@@ -423,7 +427,7 @@ final class ESP_Protection_State {
             (string) $connection === $lock['connection'];
     }
 
-    private static function release_verification_lock($lock) {
+    public static function release_verification_lock($lock) {
         global $wpdb;
         if (self::owns_verification_lock($lock)) {
             $wpdb->get_var($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $lock['name']));
@@ -479,7 +483,7 @@ final class ESP_Protection_State {
             if ($downgrade) {
                 error_log('ESP: plugin downgrade requires explicit compatibility review');
             } else {
-                $ready = $setup->check_plugin_version() === true;
+                $ready = $setup->check_plugin_version($lock) === true;
             }
             // バージョン移行の途中でDBが再接続されていれば以後は触らない。
             if (!self::owns_verification_lock($lock)) {

@@ -38,6 +38,7 @@ function plugin_dir_path($file) { return dirname($file) . '/'; }
 function wp_upload_dir() { return ['basedir' => $GLOBALS['test_dir'], 'error' => '']; }
 function delete_option($key) { return true; }
 function delete_transient($key) { return true; }
+function delete_site_transient($key) { return true; }
 function wp_clear_scheduled_hook($key) { return true; }
 function check_uninstall($value, $message) {
     if (!$value) { fwrite(STDERR, "FAIL: $message\n"); exit(1); }
