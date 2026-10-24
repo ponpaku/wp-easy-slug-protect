@@ -78,7 +78,8 @@ foreach (['path_old' => [$old_user, $old_cookie], 'path_kept' => [$new_user, $ne
     $inserted = $wpdb->insert(table_name('remember'), ['path' => '/members/', 'path_id' => $path_id,
         'password_version' => 7, 'user_id' => $auth[0],
         'token' => hash_hmac('sha256', $auth[1], AUTH_SALT),
-        'created' => '2026-01-01 00:00:00', 'expires' => '2027-01-01 00:00:00']);
+        'created' => '2026-01-01 00:00:00', 'expires' => '2027-01-01 00:00:00'],
+        ['%s', '%s', '%d', '%s', '%s', '%s', '%s']);
     t($inserted === 1, 'fixture inserts ' . $path_id . ' remember token');
 }
 $stale_before = $wpdb->get_results('SELECT * FROM ' . table_name('remember') . ' ORDER BY id', ARRAY_A);
@@ -95,17 +96,6 @@ $_COOKIE['esp_remember_token_path_kept'] = $new_cookie;
 $matched = $wpdb->get_var($wpdb->prepare('SELECT id FROM ' . table_name('remember') .
     ' WHERE user_id = %s AND token = %s AND path_id = %s AND expires > NOW()',
     $new_user, hash_hmac('sha256', $new_cookie, AUTH_SALT), 'path_kept'));
-if ($matched === null) {
-    $rows = $wpdb->get_results('SELECT path_id, password_version, user_id, token, expires FROM ' .
-        table_name('remember'), ARRAY_A);
-    echo 'DIAG current DB time: ' . $wpdb->get_var('SELECT NOW()') . ' error: ' . $wpdb->last_error . "\n";
-    foreach ($rows as $row) {
-        echo 'DIAG row: ' . json_encode(['id' => $row['path_id'],
-            'user_match' => $row['user_id'] === $new_user,
-            'token_match' => $row['token'] === hash_hmac('sha256', $new_cookie, AUTH_SALT),
-            'expires' => $row['expires'], 'pv' => $row['password_version']]) . "\n";
-    }
-}
 t($matched !== null, 'current remember token is queryable by authentication conditions');
 t((new ESP_Auth())->is_logged_in($s['path']['path_kept']),
     'current path ID remember token continues authenticating');
