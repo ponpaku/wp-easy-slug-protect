@@ -67,6 +67,45 @@ option_db('esp_db_version', 0);
 $wpdb->query('UPDATE ' . table_name('remember') . " SET path_id = ''");
 t(run_migration() && $wpdb->get_results('SELECT * FROM ' . table_name('remember'), ARRAY_A) === $before,
     'partial V1 with assigned settings IDs resumes missing row backfill without reissuing IDs');
+// Previously removed /members/ path with a different ID must not prevent a
+// normal v6 update. Its remember cookie must remain unusable for the new ID.
+create_current(); $s = settings_fixture(); seed_auth_rows();
+$old_user = str_repeat('o', 32); $old_cookie = str_repeat('o', 64);
+$new_user = str_repeat('n', 32); $new_cookie = str_repeat('n', 64);
+$wpdb->insert(table_name('brute'), ['ip_address' => '127.0.0.1', 'path' => '/members/',
+    'path_id' => 'path_old', 'time' => gmdate('Y-m-d H:i:s')]);
+foreach (['path_old' => [$old_user, $old_cookie], 'path_kept' => [$new_user, $new_cookie]] as $path_id => $auth) {
+    $wpdb->insert(table_name('remember'), ['path' => '/members/', 'path_id' => $path_id,
+        'password_version' => 7, 'user_id' => $auth[0],
+        'token' => hash_hmac('sha256', $auth[1], AUTH_SALT),
+        'created' => '2026-01-01 00:00:00', 'expires' => '2027-01-01 00:00:00']);
+}
+$stale_before = $wpdb->get_results('SELECT * FROM ' . table_name('remember') . ' ORDER BY id', ARRAY_A);
+$brute_before = $wpdb->get_results('SELECT * FROM ' . table_name('brute') . ' ORDER BY id', ARRAY_A);
+t(run_migration() && $wpdb->get_results('SELECT * FROM ' . table_name('remember') . ' ORDER BY id', ARRAY_A) === $stale_before &&
+    $wpdb->get_results('SELECT * FROM ' . table_name('brute') . ' ORDER BY id', ARRAY_A) === $brute_before,
+    'v6 migration preserves detached brute and remember history without rebinding');
+$_COOKIE['esp_remember_id_path_kept'] = $old_user;
+$_COOKIE['esp_remember_token_path_kept'] = $old_cookie;
+t(!(new ESP_Auth())->is_logged_in($s['path']['path_kept']),
+    'detached old remember token cannot authenticate the new path ID');
+$_COOKIE['esp_remember_id_path_kept'] = $new_user;
+$_COOKIE['esp_remember_token_path_kept'] = $new_cookie;
+t((new ESP_Auth())->is_logged_in($s['path']['path_kept']),
+    'current path ID remember token continues authenticating');
+unset($_COOKIE['esp_remember_id_path_kept'], $_COOKIE['esp_remember_token_path_kept']);
+
+// An ID assigned to another *active* path is not detached history.
+create_current(); $s = settings_fixture();
+$s['path']['path_other'] = ['id' => 'path_other', 'path' => '/other/',
+    'password' => 'other-hash', 'password_version' => 0];
+option_db('esp_settings', $s);
+$wpdb->insert(table_name('remember'), ['path' => '/members/', 'path_id' => 'path_other',
+    'password_version' => 0, 'user_id' => str_repeat('a', 32), 'token' => str_repeat('a', 64),
+    'created' => '2026-01-01 00:00:00', 'expires' => '2027-01-01 00:00:00']);
+t(!run_migration() && get_option(ESP_Migrator::STATE_OPTION)['reason'] === 'path_mapping_ambiguous',
+    'cross-linked active path ID is rejected even when retired history is allowed');
+
 foreach ([0, 1, 2, 3, 4, 6] as $version) {
     option_db('esp_db_version', $version);
     t(run_migration() && (int) ESP_Migrator::read_option('esp_db_version') === 6,
@@ -89,6 +128,18 @@ t(!run_migration() && get_option(ESP_Migrator::STATE_OPTION)['reason'] === 'pass
     $wpdb->get_results('SELECT * FROM ' . table_name('remember'), ARRAY_A) === $remember_before_unknown_generation &&
     (int) get_option('esp_db_version') === 2,
     'missing token password generation with nonzero current generation stops without guessing or changing tokens');
+// A partial V1 row with path_id='' must not evade the generation preflight
+// just because its path_id column is present.
+create_current(); settings_fixture(); seed_auth_rows();
+option_db('esp_db_version', 2);
+$wpdb->query('UPDATE ' . table_name('remember') . " SET path_id = ''");
+$wpdb->query('ALTER TABLE ' . table_name('remember') . ' DROP COLUMN password_version');
+$partial_before = $wpdb->get_results('SELECT * FROM ' . table_name('remember'), ARRAY_A);
+t(!run_migration() && get_option(ESP_Migrator::STATE_OPTION)['reason'] === 'password_version_ambiguous' &&
+    $wpdb->get_results('SELECT * FROM ' . table_name('remember'), ARRAY_A) === $partial_before &&
+    (int) get_option('esp_db_version') === 2,
+    'blank path ID with missing generation fails before DDL and preserves tokens');
+
 
 // Historical v1/2/3/4 schemas. No v5 implementation exists.
 foreach ([1, 2, 3, 4] as $version) {
@@ -126,6 +177,12 @@ for ($i = 0; $i < 205; $i++) {
     $wpdb->insert(table_name('remember'), ['path' => '/legacy/', 'user_id' => str_pad((string) $i, 32, '0'),
         'token' => str_pad((string) $i, 64, 't'), 'created' => '2026-01-01 00:00:00', 'expires' => '2027-01-01 00:00:00']);
 }
+$deleted_token = str_repeat('d', 64);
+$wpdb->insert(table_name('remember'), ['path' => '/deleted/', 'user_id' => str_repeat('d', 32),
+    'token' => $deleted_token, 'created' => '2026-01-01 00:00:00', 'expires' => '2027-01-01 00:00:00']);
+$wpdb->insert(table_name('brute'), ['path' => '/deleted/', 'ip_address' => '127.0.0.1',
+    'time' => gmdate('Y-m-d H:i:s')]);
+
 t(!run_migration() && get_option(ESP_Migrator::STATE_OPTION)['reason'] === 'maintenance_confirmation_required',
     'legacy V1 data conversion requires explicit worker-drain/backup confirmation');
 t(!run_migration(true) && get_option(ESP_Migrator::STATE_OPTION)['status'] === 'pending' && (int) get_option('esp_db_version') === 0,
@@ -137,6 +194,22 @@ t(array_key_first(get_option('esp_settings')['path']) === $id && count(get_optio
     (int) $wpdb->get_var('SELECT COUNT(*) FROM ' . table_name('remember') . " WHERE path_id = '$id'") === 205,
     'V1 resume preserves the first assigned ID, original password and all remember tokens');
 t(run_migration() && array_key_first(get_option('esp_settings')['path']) === $id, 'completed migration is idempotent');
+$retired_id = 'retired_' . substr(hash('sha256', '/deleted/'), 0, 40);
+$deleted_remember = $wpdb->get_row($wpdb->prepare('SELECT path_id, token FROM ' .
+    table_name('remember') . ' WHERE BINARY path = BINARY %s', '/deleted/'), ARRAY_A);
+$deleted_brute_id = $wpdb->get_var($wpdb->prepare('SELECT path_id FROM ' .
+    table_name('brute') . ' WHERE BINARY path = BINARY %s', '/deleted/'));
+t($deleted_remember['path_id'] === $retired_id && $deleted_remember['token'] === $deleted_token &&
+    $deleted_brute_id === $retired_id,
+    'V1 removed-path history is retained under an inert ID across batch resume');
+$readded = get_option('esp_settings');
+$readded['path']['path_new'] = ['id' => 'path_new', 'path' => '/deleted/',
+    'password' => 'new-hash', 'password_version' => 0];
+option_db('esp_settings', $readded);
+t(run_migration() && $wpdb->get_var($wpdb->prepare('SELECT path_id FROM ' .
+    table_name('remember') . ' WHERE BINARY path = BINARY %s', '/deleted/')) === $retired_id,
+    'later re-registration cannot rebind the deleted-path remember token');
+
 
 create_current(); settings_fixture(); option_db('esp_db_version', 3);
 $wpdb->query('ALTER TABLE ' . table_name('session') . ' DROP INDEX token_unique');
