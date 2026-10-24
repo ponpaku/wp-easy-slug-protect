@@ -468,6 +468,14 @@ class ESP_Admin_Menu {
                                 <p class="description">
                                     <?php _e('OFFにすると保護指定済みの画像も公開されます。保護指定の情報は残るため、ONに戻すと保護を再開できます。ただしOFF中に取得・キャッシュされた画像は回収できません。', $text_domain); ?>
                                 </p>
+                                <?php if ($media_enabled): ?>
+                                    <div class="notice notice-warning inline">
+                                        <p><strong><?php _e('画像最適化プラグインとの併用について', $text_domain); ?></strong></p>
+                                        <p>
+                                            <?php _e('他の画像最適化プラグインが独自に生成・配信するWebP・AVIFなどの派生ファイルについて、ESPはアクセス制限や高速配信を保証しません。元画像を保護していても、派生ファイルの直接URLから閲覧できる場合があります。保護対象には、安全性を確認できない画像最適化や外部配信を使用しないでください。', $text_domain); ?>
+                                        </p>
+                                    </div>
+                                <?php endif; ?>
                                 <p>
                                     <label>
                                         <input type="checkbox"
