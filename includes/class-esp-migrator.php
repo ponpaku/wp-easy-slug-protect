@@ -135,6 +135,11 @@ final class ESP_Migrator {
             foreach ($this->definitions() as $kind => $def) { $this->validate_existing($kind, $tables[$kind], $def); }
             $paths = $this->path_map($settings['path']);
             $legacy = $paths['changed'];
+            // Discover ambiguous existing links before changing even the first row.
+            if (!$this->verify_references($paths['paths'])) {
+                throw new RuntimeException('path_reference_invalid');
+            }
+            $this->preflight_path_rows($tables, $paths, $legacy);
             if (!$clean && !$resuming_install &&
                 (($marker === null && $present < 4 && !$legacy) ||
                  ((int) $marker >= 2 && $tables['session'] === null) ||
@@ -189,7 +194,7 @@ final class ESP_Migrator {
             // Only fixed diagnostic codes reach the UI. Never store exception SQL/paths.
             $known = ['option_read_failed', 'option_write_failed', 'lock_lost', 'future_schema',
                 'invalid_db_version', 'invalid_plugin_version', 'partial_installation', 'path_reference_invalid',
-                'path_mapping_ambiguous', 'settings_changed', 'schema_incompatible',
+                'path_mapping_ambiguous', 'password_version_ambiguous', 'settings_changed', 'schema_incompatible',
                 'schema_read_failed', 'schema_write_failed', 'schema_verification_failed',
                 'future_or_invalid_migration_state'];
             $reason = in_array($error->getMessage(), $known, true) ? $error->getMessage() : 'migration_exception';
@@ -431,6 +436,42 @@ final class ESP_Migrator {
             }
         }
         return false;
+    }
+
+    private function preflight_path_rows($tables, $paths, $legacy) {
+        global $wpdb;
+        foreach (['remember', 'session'] as $kind) {
+            if ($tables[$kind] === null || isset($tables[$kind]['columns']['password_version'])) { continue; }
+            foreach ($paths['paths'] as $id => $path) {
+                if ((int) ($path['password_version'] ?? 0) === 0) { continue; }
+                // A missing version column cannot reconstruct a nonzero password
+                // generation for an existing token. Do not silently expire that login
+                // by guessing zero, or revive it by guessing the current generation.
+                $by_id = isset($tables[$kind]['columns']['path_id']);
+                $row = $wpdb->get_var($wpdb->prepare('SELECT id FROM ' . $this->table($kind) .
+                    ($by_id ? ' WHERE BINARY path_id = BINARY %s' : ' WHERE BINARY path = BINARY %s') . ' LIMIT 1',
+                    $by_id ? $id : $path['path']));
+                if ($wpdb->last_error !== '') { throw new RuntimeException('schema_read_failed'); }
+                if ($row !== null) { throw new RuntimeException('password_version_ambiguous'); }
+            }
+        }
+        foreach (['brute', 'remember'] as $kind) {
+            if (!isset($tables[$kind]['columns']['path_id'])) { continue; }
+            foreach ($paths['map'] as $path => $id) {
+                $row = $wpdb->get_var($wpdb->prepare('SELECT id FROM ' . $this->table($kind) .
+                    " WHERE BINARY path = BINARY %s AND path_id <> '' AND BINARY path_id <> BINARY %s LIMIT 1", $path, $id));
+                if ($wpdb->last_error !== '') { throw new RuntimeException('schema_read_failed'); }
+                if ($row !== null) { throw new RuntimeException('path_mapping_ambiguous'); }
+            }
+        }
+        if ($legacy && $tables['session'] !== null) {
+            $ids = $wpdb->get_col('SELECT DISTINCT path_id FROM ' . $this->table('session') .
+                ' LIMIT ' . (count($paths['paths']) + 1));
+            if ($wpdb->last_error !== '') { throw new RuntimeException('schema_read_failed'); }
+            foreach ($ids as $id) {
+                if (!isset($paths['paths'][$id])) { throw new RuntimeException('path_mapping_ambiguous'); }
+            }
+        }
     }
 
     private function has_protection_metadata() {

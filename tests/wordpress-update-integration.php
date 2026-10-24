@@ -81,6 +81,15 @@ option_db('esp_db_version', 6);
 option_db(ESP_Migrator::STATE_OPTION, ['version' => '99.0.0', 'status' => 'complete']);
 t(!run_migration() && get_option(ESP_Migrator::STATE_OPTION)['version'] === '99.0.0', 'future migration checkpoint is never overwritten');
 
+create_current(); settings_fixture(); seed_auth_rows();
+option_db('esp_db_version', 2);
+$wpdb->query('ALTER TABLE ' . table_name('remember') . ' DROP COLUMN password_version');
+$remember_before_unknown_generation = $wpdb->get_results('SELECT * FROM ' . table_name('remember'), ARRAY_A);
+t(!run_migration() && get_option(ESP_Migrator::STATE_OPTION)['reason'] === 'password_version_ambiguous' &&
+    $wpdb->get_results('SELECT * FROM ' . table_name('remember'), ARRAY_A) === $remember_before_unknown_generation &&
+    (int) get_option('esp_db_version') === 2,
+    'missing token password generation with nonzero current generation stops without guessing or changing tokens');
+
 // Historical v1/2/3/4 schemas. No v5 implementation exists.
 foreach ([1, 2, 3, 4] as $version) {
     create_current(); settings_fixture();
@@ -91,6 +100,19 @@ foreach ([1, 2, 3, 4] as $version) {
     if ($version >= 2 && $version < 4) { $wpdb->query('ALTER TABLE ' . table_name('session') . ' DROP COLUMN password_version'); }
     t(run_migration(), "historical v$version schema reaches verified v6 using only additive steps");
 }
+
+// Ambiguity anywhere in the input must stop before a preceding row is modified.
+create_current(); settings_fixture(); seed_auth_rows();
+$wpdb->query('UPDATE ' . table_name('remember') . " SET path_id = ''");
+$wpdb->insert(table_name('remember'), ['path' => '/members/', 'path_id' => 'path_ambiguous', 'password_version' => 7,
+    'user_id' => str_repeat('x', 32), 'token' => str_repeat('x', 64), 'created' => '2026-01-01 00:00:00', 'expires' => '2027-01-01 00:00:00']);
+$ambiguous_settings = ESP_Config::OPTION_DEFAULTS;
+$ambiguous_settings['path'] = [['path' => '/members/', 'password' => 'preserved-legacy-hash']];
+option_db('esp_settings', $ambiguous_settings); option_db('esp_db_version', 0);
+$ambiguous_rows = $wpdb->get_results('SELECT * FROM ' . table_name('remember'), ARRAY_A);
+t(!run_migration(true) && get_option('esp_settings') === $ambiguous_settings &&
+    $wpdb->get_results('SELECT * FROM ' . table_name('remember'), ARRAY_A) === $ambiguous_rows,
+    'preflight detects ambiguous partial V1 links before changing any preceding row or settings');
 
 // V1 legacy IDs: interrupted DDL, fixed batches, preserved passwords/tokens.
 create_current();
