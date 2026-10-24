@@ -472,7 +472,7 @@ class ESP_Admin_Menu {
                                     <div class="notice notice-warning inline">
                                         <p><strong><?php _e('画像最適化プラグインとの併用について', $text_domain); ?></strong></p>
                                         <p>
-                                            <?php _e('他の画像最適化プラグインが独自に生成・配信するWebP・AVIFなどの派生ファイルについて、ESPはアクセス制限や高速配信を保証しません。元画像を保護していても、派生ファイルの直接URLから閲覧できる場合があります。保護対象には、安全性を確認できない画像最適化や外部配信を使用しないでください。', $text_domain); ?>
+                                            <?php _e('他の画像最適化プラグインが独自に生成・配信するWebP・AVIFなどの派生ファイルについて、ESPはアクセス制限や高速配信を保証しません。元画像を保護していても、派生ファイルの直接URLから閲覧できる場合があります。', $text_domain); ?>
                                         </p>
                                     </div>
                                 <?php endif; ?>
