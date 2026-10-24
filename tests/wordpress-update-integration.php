@@ -195,9 +195,12 @@ for ($i = 0; $i < 205; $i++) {
     $wpdb->insert(table_name('remember'), ['path' => '/legacy/', 'user_id' => str_pad((string) $i, 32, '0'),
         'token' => str_pad((string) $i, 64, 't'), 'created' => '2026-01-01 00:00:00', 'expires' => '2027-01-01 00:00:00']);
 }
-$deleted_token = str_repeat('d', 64);
-$wpdb->insert(table_name('remember'), ['path' => '/deleted/', 'user_id' => str_repeat('d', 32),
-    'token' => $deleted_token, 'created' => '2026-01-01 00:00:00', 'expires' => '2027-01-01 00:00:00']);
+$deleted_cookie = str_repeat('d', 64);
+$deleted_user = str_repeat('d', 32);
+$deleted_token = hash_hmac('sha256', $deleted_cookie, AUTH_SALT);
+$wpdb->insert(table_name('remember'), ['path' => '/deleted/', 'user_id' => $deleted_user,
+    'token' => $deleted_token, 'created' => '2026-01-01 00:00:00', 'expires' => '2027-01-01 00:00:00'],
+    ['%s', '%s', '%s', '%s', '%s']);
 $wpdb->insert(table_name('brute'), ['path' => '/deleted/', 'ip_address' => '127.0.0.1',
     'time' => gmdate('Y-m-d H:i:s')]);
 
@@ -227,6 +230,11 @@ option_db('esp_settings', $readded);
 t(run_migration() && $wpdb->get_var($wpdb->prepare('SELECT path_id FROM ' .
     table_name('remember') . ' WHERE BINARY path = BINARY %s', '/deleted/')) === $retired_id,
     'later re-registration cannot rebind the deleted-path remember token');
+$_COOKIE['esp_remember_id_path_new'] = $deleted_user;
+$_COOKIE['esp_remember_token_path_new'] = $deleted_cookie;
+t(!(new ESP_Auth())->is_logged_in($readded['path']['path_new']),
+    'deleted V1 path cookie is rejected after registration under a new ID');
+unset($_COOKIE['esp_remember_id_path_new'], $_COOKIE['esp_remember_token_path_new']);
 
 
 create_current(); settings_fixture(); option_db('esp_db_version', 3);
