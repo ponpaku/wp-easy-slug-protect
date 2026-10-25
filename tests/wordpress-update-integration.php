@@ -264,7 +264,8 @@ t(!run_migration() && get_option(ESP_Migrator::STATE_OPTION)['reason'] === 'pass
     'blank path ID with missing generation fails before DDL and preserves tokens');
 
 
-// Historical v1/2/3/4 schemas. No v5 implementation exists.
+// Known v2-v4 additive differences remain supported; V1 lacks session and
+// must be handled by a separate, explicitly reviewed migration procedure.
 foreach ([1, 2, 3, 4] as $version) {
     create_current(); settings_fixture();
     option_db('esp_db_version', $version);
@@ -272,75 +273,48 @@ foreach ([1, 2, 3, 4] as $version) {
     if ($version < 2) { $wpdb->query('DROP TABLE ' . table_name('session')); }
     if ($version < 3) { $wpdb->query('ALTER TABLE ' . table_name('remember') . ' DROP COLUMN password_version'); }
     if ($version >= 2 && $version < 4) { $wpdb->query('ALTER TABLE ' . table_name('session') . ' DROP COLUMN password_version'); }
-    t(run_migration(), "historical v$version schema reaches verified v6 using only additive steps");
+    $ok = run_migration();
+    if ($version === 1) {
+        t(!$ok && get_option(ESP_Migrator::STATE_OPTION)['reason'] === 'v1_migration_required' &&
+            (int) get_option('esp_db_version') === 1 &&
+            $wpdb->get_var($wpdb->prepare('SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s', table_name('limit'))) === '0',
+            'v1-only absent session stops without creating newer tables');
+    } else {
+        t($ok && (int) get_option('esp_db_version') === 6,
+            "known additive v$version schema reaches verified v6");
+    }
 }
 
-// Ambiguity anywhere in the input must stop before a preceding row is modified.
-create_current(); settings_fixture(); seed_auth_rows();
-$wpdb->query('UPDATE ' . table_name('remember') . " SET path_id = ''");
-$wpdb->insert(table_name('remember'), ['path' => '/members/', 'path_id' => 'path_ambiguous', 'password_version' => 7,
-    'user_id' => str_repeat('x', 32), 'token' => str_repeat('x', 64), 'created' => '2026-01-01 00:00:00', 'expires' => '2027-01-01 00:00:00']);
-$ambiguous_settings = ESP_Config::OPTION_DEFAULTS;
-$ambiguous_settings['path'] = [['path' => '/members/', 'password' => 'preserved-legacy-hash']];
-option_db('esp_settings', $ambiguous_settings); option_db('esp_db_version', 0);
-$ambiguous_rows = $wpdb->get_results('SELECT * FROM ' . table_name('remember'), ARRAY_A);
-t(!run_migration(true) && get_option('esp_settings') === $ambiguous_settings &&
-    $wpdb->get_results('SELECT * FROM ' . table_name('remember'), ARRAY_A) === $ambiguous_rows,
-    'preflight detects ambiguous partial V1 links before changing any preceding row or settings');
-
-// V1 legacy IDs: interrupted DDL, fixed batches, preserved passwords/tokens.
-create_current();
+// Numeric-key settings without a stable ID are specific to V1. Neither a
+// normal retry nor a manual confirmation may generate an ID or alter tokens.
+create_current(); seed_auth_rows();
 $legacy = ESP_Config::OPTION_DEFAULTS;
 $legacy['path'] = [['path' => '/legacy/', 'password' => 'legacy-password-hash']];
 option_db('esp_settings', $legacy); option_db('esp_db_version', 0);
-$wpdb->query('ALTER TABLE ' . table_name('remember') . ' DROP INDEX path_id, DROP COLUMN path_id, DROP COLUMN password_version');
-$wpdb->query('ALTER TABLE ' . table_name('brute') . ' DROP INDEX ip_path_id, DROP COLUMN path_id');
-$wpdb->query('DROP TABLE ' . table_name('session')); $wpdb->query('DROP TABLE ' . table_name('limit'));
-for ($i = 0; $i < 205; $i++) {
-    $wpdb->insert(table_name('remember'), ['path' => '/legacy/', 'user_id' => str_pad((string) $i, 32, '0'),
-        'token' => str_pad((string) $i, 64, 't'), 'created' => '2026-01-01 00:00:00', 'expires' => '2027-01-01 00:00:00']);
-}
-$deleted_cookie = str_repeat('d', 64);
-$deleted_user = str_repeat('d', 32);
-$deleted_token = hash_hmac('sha256', $deleted_cookie, AUTH_SALT);
-$wpdb->insert(table_name('remember'), ['path' => '/deleted/', 'user_id' => $deleted_user,
-    'token' => $deleted_token, 'created' => '2026-01-01 00:00:00', 'expires' => '2027-01-01 00:00:00'],
-    ['%s', '%s', '%s', '%s', '%s']);
-$wpdb->insert(table_name('brute'), ['path' => '/deleted/', 'ip_address' => '127.0.0.1',
-    'time' => gmdate('Y-m-d H:i:s')]);
+$legacy_remember = $wpdb->get_results('SELECT * FROM ' . table_name('remember') . ' ORDER BY id', ARRAY_A);
+t(!run_migration(true) && get_option(ESP_Migrator::STATE_OPTION)['reason'] === 'v1_migration_required' &&
+    get_option('esp_settings') === $legacy &&
+    $wpdb->get_results('SELECT * FROM ' . table_name('remember') . ' ORDER BY id', ARRAY_A) === $legacy_remember &&
+    (int) get_option('esp_db_version') === 0,
+    'v1 settings require separate migration even when legacy confirmation is provided');
 
-t(!run_migration() && get_option(ESP_Migrator::STATE_OPTION)['reason'] === 'maintenance_confirmation_required',
-    'legacy V1 data conversion requires explicit worker-drain/backup confirmation');
-t(!run_migration(true) && get_option(ESP_Migrator::STATE_OPTION)['status'] === 'pending' && (int) get_option('esp_db_version') === 0,
-    'fixed first batch checkpoints without advancing completed DB version');
-$id = $wpdb->get_var('SELECT path_id FROM ' . table_name('remember') . ' WHERE id = 1');
-t(run_migration(), 'second invocation resumes after DDL and cursor checkpoint');
-t(array_key_first(get_option('esp_settings')['path']) === $id && count(get_option('esp_settings')['path']) === 1 &&
-    get_option('esp_settings')['path'][$id]['password'] === 'legacy-password-hash' &&
-    (int) $wpdb->get_var('SELECT COUNT(*) FROM ' . table_name('remember') . " WHERE path_id = '$id'") === 205,
-    'V1 resume preserves the first assigned ID, original password and all remember tokens');
-t(run_migration() && array_key_first(get_option('esp_settings')['path']) === $id, 'completed migration is idempotent');
-$retired_id = 'retired_' . substr(hash('sha256', '/deleted/'), 0, 40);
-$deleted_remember = $wpdb->get_row($wpdb->prepare('SELECT path_id, token FROM ' .
-    table_name('remember') . ' WHERE BINARY path = BINARY %s', '/deleted/'), ARRAY_A);
-$deleted_brute_id = $wpdb->get_var($wpdb->prepare('SELECT path_id FROM ' .
-    table_name('brute') . ' WHERE BINARY path = BINARY %s', '/deleted/'));
-t($deleted_remember['path_id'] === $retired_id && $deleted_remember['token'] === $deleted_token &&
-    $deleted_brute_id === $retired_id,
-    'V1 removed-path history is retained under an inert ID across batch resume');
-$readded = get_option('esp_settings');
-$readded['path']['path_new'] = ['id' => 'path_new', 'path' => '/deleted/',
-    'password' => 'new-hash', 'password_version' => 0];
-option_db('esp_settings', $readded);
-t(run_migration() && $wpdb->get_var($wpdb->prepare('SELECT path_id FROM ' .
-    table_name('remember') . ' WHERE BINARY path = BINARY %s', '/deleted/')) === $retired_id,
-    'later re-registration cannot rebind the deleted-path remember token');
-$_COOKIE['esp_remember_id_path_new'] = $deleted_user;
-$_COOKIE['esp_remember_token_path_new'] = $deleted_cookie;
-t(!(new ESP_Auth())->is_logged_in($readded['path']['path_new']),
-    'deleted V1 path cookie is rejected after registration under a new ID');
-unset($_COOKIE['esp_remember_id_path_new'], $_COOKIE['esp_remember_token_path_new']);
-
+// Missing v1 path-ID columns are diagnosed before any DDL. Show the operator
+// a specific message without offering an in-place V1 conversion button.
+create_current(); settings_fixture();
+option_db('esp_db_version', 0);
+$wpdb->query('ALTER TABLE ' . table_name('remember') . ' DROP INDEX path_id, DROP COLUMN path_id');
+$schema_v1 = $wpdb->get_results('SHOW COLUMNS FROM ' . table_name('remember'), ARRAY_A);
+t(!run_migration() && get_option(ESP_Migrator::STATE_OPTION)['reason'] === 'v1_migration_required' &&
+    $wpdb->get_results('SHOW COLUMNS FROM ' . table_name('remember'), ARRAY_A) === $schema_v1 &&
+    (int) get_option('esp_db_version') === 0,
+    'v1-specific missing path_id column is diagnosed and left untouched');
+wp_set_current_user(1);
+ob_start(); ESP_Updater::notice(); $v1_notice = ob_get_clean();
+t(strpos($v1_notice, 'v1形式') !== false &&
+    strpos($v1_notice, 'path_id') !== false &&
+    strpos($v1_notice, 'maintenance_confirmed') === false,
+    'administrator notice names V1-specific migration without an automatic conversion control');
+wp_set_current_user(0);
 
 create_current(); settings_fixture(); option_db('esp_db_version', 3);
 $wpdb->query('ALTER TABLE ' . table_name('session') . ' DROP INDEX token_unique');
