@@ -385,8 +385,12 @@ $reject_retry = static function ($event) {
 };
 add_filter('pre_schedule_event', $reject_retry);
 ESP_Updater::recover_missing_retry();
-t(!wp_next_scheduled('esp_update_retry') &&
-    (int) get_option(ESP_Updater::STATE_OPTION)['attempts'] === 4,
+$after_wp_error_attempts = (int) get_option(ESP_Updater::STATE_OPTION)['attempts'];
+$after_wp_error_event = wp_next_scheduled('esp_update_retry');
+echo 'DIAG: after WP_Error attempts=' . $after_wp_error_attempts .
+    ', retry_event=' . var_export($after_wp_error_event, true) . ', state=' .
+    json_encode(get_option(ESP_Updater::STATE_OPTION)) . "\n";
+t($after_wp_error_event === false && $after_wp_error_attempts === 4,
     'WP_Error during scheduling also leaves retry budget intact');
 remove_filter('pre_schedule_event', $reject_retry);
 ESP_Updater::recover_missing_retry();
