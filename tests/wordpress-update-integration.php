@@ -122,8 +122,10 @@ t(get_option('esp_settings') === $s && $wpdb->get_results('SELECT * FROM ' . tab
     'missing marker preserves path IDs, passwords, remember rows and sessions');
 option_db('esp_db_version', 0);
 $wpdb->query('UPDATE ' . table_name('remember') . " SET path_id = ''");
-t(run_migration() && $wpdb->get_results('SELECT * FROM ' . table_name('remember'), ARRAY_A) === $before,
-    'partial V1 with assigned settings IDs resumes missing row backfill without reissuing IDs');
+t(!run_migration() && get_option(ESP_Migrator::STATE_OPTION)['reason'] === 'v1_migration_required' &&
+    $wpdb->get_results('SELECT * FROM ' . table_name('remember'), ARRAY_A) !== $before &&
+    (int) get_option('esp_db_version') === 0,
+    'interrupted V1 ID assignment is stopped without rewriting auth history');
 // Previously removed /members/ path with a different ID must not prevent a
 // normal v6 update. Its remember cookie must remain unusable for the new ID.
 create_current(); $s = settings_fixture(); seed_auth_rows();
@@ -158,7 +160,8 @@ t((new ESP_Auth())->is_logged_in($s['path']['path_kept']),
     'current path ID remember token continues authenticating');
 unset($_COOKIE['esp_remember_id_path_kept'], $_COOKIE['esp_remember_token_path_kept']);
 
-// An ID assigned to another *active* path is not detached history.
+// The updater does not reinterpret historical path strings as authentication
+// permissions. Access is scoped by current path_id, token and generation.
 create_current(); $s = settings_fixture();
 $s['path']['path_other'] = ['id' => 'path_other', 'path' => '/other/',
     'password' => 'other-hash', 'password_version' => 0];
@@ -166,11 +169,16 @@ option_db('esp_settings', $s);
 $wpdb->insert(table_name('remember'), ['path' => '/members/', 'path_id' => 'path_other',
     'password_version' => 0, 'user_id' => str_repeat('a', 32), 'token' => str_repeat('a', 64),
     'created' => '2026-01-01 00:00:00', 'expires' => '2027-01-01 00:00:00']);
-t(!run_migration() && get_option(ESP_Migrator::STATE_OPTION)['reason'] === 'path_mapping_ambiguous',
-    'cross-linked active path ID is rejected even when retired history is allowed');
+t(run_migration(), 'existing history is not globally rejected solely for stale path text');
+$_COOKIE['esp_remember_id_path_kept'] = str_repeat('a', 32);
+$_COOKIE['esp_remember_token_path_kept'] = str_repeat('a', 64);
+t(!(new ESP_Auth())->is_logged_in($s['path']['path_kept']),
+    'cross-ID historical token cannot authenticate another protected path');
+unset($_COOKIE['esp_remember_id_path_kept'], $_COOKIE['esp_remember_token_path_kept']);
 
-// Scaling regression: path validation should scan records in primary-key
-// batches, not generate one IN(other active IDs...) statement per path.
+// Normal updates must never enumerate history, irrespective of its volume
+// or the number of protection paths. These synthetic records are inert and
+// must be byte-preserved, not silently reassigned.
 create_current(); $many = settings_fixture();
 for ($i = 0; $i < 140; $i++) {
     $key = 'path_bulk_' . $i;
@@ -191,27 +199,23 @@ for ($i = 0; $i < 425; $i++) {
         'path' => $path, 'path_id' => $row_id, 'time' => '2026-01-01 00:00:00'],
         ['%s', '%s', '%s', '%s']);
 }
-$scan_queries = 0;
-$count_scan = static function ($sql) use (&$scan_queries) {
-    if (strpos($sql, 'SELECT id, path, path_id FROM ') === 0) { $scan_queries++; }
+$remember_before = $wpdb->get_results('SELECT * FROM ' . table_name('remember') . ' ORDER BY id', ARRAY_A);
+$brute_before = $wpdb->get_results('SELECT * FROM ' . table_name('brute') . ' ORDER BY id', ARRAY_A);
+$history_reads = 0;
+$reject_history_reads = static function ($sql) use (&$history_reads) {
+    if (preg_match('/^\\s*SELECT\\b.*\\bFROM\\s+`?[^\\s`]*(?:esp_login_remember|esp_login_attempts)`?/i', $sql)) {
+        $history_reads++;
+        return 'SELECT id FROM esp_forbidden_history_full_scan';
+    }
     return $sql;
 };
-add_filter('query', $count_scan);
+add_filter('query', $reject_history_reads);
 $many_ok = run_migration();
-remove_filter('query', $count_scan);
-t($many_ok && $scan_queries <= 20 &&
-    (int) $wpdb->get_var('SELECT COUNT(*) FROM ' . table_name('remember')) === 425 &&
-    (int) $wpdb->get_var('SELECT COUNT(*) FROM ' . table_name('brute')) === 425,
-    '140 paths and 850 history rows validate using bounded primary-key queries (scans=' . $scan_queries . ')');
-$old_bulk = $wpdb->get_var($wpdb->prepare('SELECT path_id FROM ' . table_name('remember') .
-    ' WHERE BINARY path = BINARY %s ORDER BY id LIMIT 1', '/bulk/0/'));
-t($old_bulk === 'former_0', 'batched validation preserves detached history IDs');
-$wpdb->insert(table_name('remember'), ['path' => '/bulk/0/', 'path_id' => 'path_bulk_1',
-    'password_version' => 0, 'user_id' => str_repeat('z', 32),
-    'token' => str_repeat('z', 64), 'created' => '2026-01-01 00:00:00',
-    'expires' => '2027-01-01 00:00:00'], ['%s', '%s', '%d', '%s', '%s', '%s', '%s']);
-t(!run_migration() && get_option(ESP_Migrator::STATE_OPTION)['reason'] === 'path_mapping_ambiguous',
-    'batched validation rejects wrong active IDs after processing multiple batches');
+remove_filter('query', $reject_history_reads);
+t($many_ok && $history_reads === 0 &&
+    $wpdb->get_results('SELECT * FROM ' . table_name('remember') . ' ORDER BY id', ARRAY_A) === $remember_before &&
+    $wpdb->get_results('SELECT * FROM ' . table_name('brute') . ' ORDER BY id', ARRAY_A) === $brute_before,
+    '140 paths and 850 history rows update with zero auth-history reads or mutations');
 
 // The retired_ prefix cannot be assigned to an active path, even by
 // manually edited settings; otherwise a past credential could be revived.
