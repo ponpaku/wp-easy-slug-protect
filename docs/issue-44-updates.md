@@ -63,7 +63,7 @@ Rewrite 未検証時は PHP 認可を維持するが、更新完了版を進め�
 
 Nginx/未知サーバーでメディア保護 ON の場合、外部 Rewrite の適用は PHP から検証できないため必須後処理は pending。管理画面から診断できるが、今回の自動完了の保証は Apache/LiteSpeed の生成ルール検査まで。Nginx の自動完了・外部サーバー認証フローは追加設計を要する。Apache/LiteSpeed でも構文一致は実 HTTP・CDN の秘密保持証明ではない。
 
-非重要な日次 cleanup、整合性点検、定期キャッシュ refresh の Cron 予約失敗は degraded とし、必須処理が完了していれば esp_plugin_version は記録できる。安全な継続/予約の再試行は最大 5 回、1/2/4/8/16 分。予約が失敗した場合（`false`/`WP_Error`）は再試行回数を消費しない。管理者アクセス時のみ、`degraded/cron_unscheduled` の予約が失われた場合に単発イベントを再予約する。v1特殊移行対象や未知のDB状態は自動再試行しない。予約成功後の状態保存に失敗した場合はイベントを取り消す。SQL 構文・権限・未知スキーマ・ID 不整合は自動再試行せず管理者診断。ロックが取れない間は共有状態を上書きしない。
+非重要な日次 cleanup、整合性点検、定期キャッシュ refresh の Cron 予約失敗は degraded とし、必須処理が完了していれば esp_plugin_version は記録できる。安全な再試行は最大 5 回、1/2/4/8/16 分。`option_read_failed`、`option_write_failed`、`schema_read_failed` のように原因を限定した移行の一時的DB障害だけは、runtimeを未検証のFAILEDに維持したまま `retryable_migration_failure` を記録し、単発Cronの再検証を予約する。最初のcheckpoint保存より前の失敗も同一PHP実行中の診断理由で判定する。Cronで再検証が成功した場合のみREADYに戻す。予約が失敗した場合（`false`/`WP_Error`）は再試行回数を消費しない。管理者アクセス時のみ、`degraded/cron_unscheduled` または `retryable_migration_failure` の予約が失われた場合に単発イベントを再予約する。5回到達後は自動再試行しない。v1特殊移行対象、スキーマ不整合、ID不整合、不明な障害、ロック喪失は自動再試行しない。予約成功後の状態保存に失敗した場合はイベントを取り消す。SQL 構文・権限・未知スキーマ・ID 不整合は自動再試行せず管理者診断。ロックが取れない間は共有状態を上書きしない。
 
 WP-Cron を止めた環境でも管理者通知から状態/失敗ステップ/最後の完了版を確認し、nonce と manage_options を要求する POST で再試行できる。止まったファイル更新の UPDATING 解除は #49 の「ジョブ/ロールバック停止の明示確認」経路を使用し、Migrator の再試行から強制解除しない。
 
@@ -74,13 +74,13 @@ v1特殊移行対象は管理画面で `v1_migration_required` を通知する�
 ## 配布と公開手順
 
 1. DB、プラグインファイル、uploads/.htaccess と第三者ルールをセットでバックアップし、保守環境で復旧を試す。WordPress のファイル一時バックアップは DB 復旧ではない。
-2. 0.7.38 以前は旧 PHP/Cron を停止して初回 ZIP を手動導入。0.7.39 には更新検出機能がないため、0.7.40 導入までは手動 ZIP が必要。正常に管理画面検証が完了するまで自動更新の運用へ移さない。
+2. 0.7.38 以前は旧 PHP/Cron を停止して初回 ZIP を手動導入。0.7.39 には更新検出機能がないため、0.7.40 導入までは手動 ZIP が必要。**このPRのGitHub Stable Release更新検出は、ESPプラグインが有効な場合のみ保証する。** 無効化中はESP本体がロードされず `update_plugins_github.com` フックを登録できないため、WordPress標準更新一覧でのStable検出を保証しない。無効化中の導入は管理者が配布ZIPを確認して手動更新する。通常利用では、正常に管理画面検証が完了するまで自動更新の運用へ移さない。
 3. main でレビュー・検証後、`python3 tools/build-release.py --tag v0.7.40` でビルド。タグ、ヘッダー、ESP_VERSION、Update URI、必須ファイル、easy-slug-protect/easy-slug-protect.php を検査する。ZIP は追跡済み runtime ファイルのみを含む。tests、docs、CI、.git、ビルドツール、README を含めない。
 4. v* タグの workflow は main の祖先であることを確認して **draft** Release と専用 `easy-slug-protect-<version>.zip`/SHA-256 を作る。自動では公開しない。workflow_dispatch/タグ作成は今回実行していない。
 5. 配布担当者が内容・バックアップ/復旧・対象環境の実 HTTP・CI を確認後、Stable として公開し latest に指定する。タグ/Release の書込権限を最小化し、GitHub の tag ruleset、保護された main、必須レビューを設定する。設定済みとの主張はしない。
 6. 次の Stable へ標準画面で手動更新・利用者設定に従う自動更新を確認する。draft/prerelease や同版・旧版、欠落 asset は更新対象にしない。
 
-GitHub の source 自動生成 ZIP にはフォールバックしない。公開 API はトークン不要、5 秒、成功 6 時間/不成功 15 分の cache。障害は検出不能として扱い、保護/DB 状態を変更しない。専用 ZIP の名前、URL、公開状態、size、GitHub API の sha256 digest が揃った場合のみ対象とする。
+GitHub の source 自動生成 ZIP にはフォールバックしない。公開 API はトークン不要、5 秒、成功 6 時間/不成功 15 分の cache。障害は新しいReleaseを検出不能として扱い、保護/DB状態を変更しない。APIが失敗してもCoreの `no_update` に稼働版・package空のメタデータを渡し、通常の自動更新設定UIを維持する。更新ZIPの検証失敗をこのフォールバックで迂回しない。専用 ZIP の名前、URL、公開状態、size、GitHub API の sha256 digest が揃った場合のみ対象とする。
 
 標準 download_url とアップグレーダーを使い、独自のファイル置換エンジンは作らない。最初の URL は固定 repository の正規 asset URL。リダイレクトは HTTPS の GitHub 同 repository releases/download と release-assets.githubusercontent.com のみ、3 回まで、認証情報/別 port/fragment を拒否。ZIP は 20 MiB 上限、取得後 size/SHA-256、展開後のヘッダー/ESP_VERSION/必須ファイルを検証する。Requires PHP / Requires at least が宣言されている場合は配置前に実行環境と照合し、不適合・不正な要件を拒否する (Core の単体 upgrade と bulk/install の検査差異を補完)。最低要件がない版に独自の最低値は加えない。
 
@@ -90,7 +90,7 @@ GitHub の source 自動生成 ZIP にはフォールバックしない。公開
 
 ## 検証と残る公開ゲート
 
-`tests/wordpress-update-integration.php` は opt-in した esp_ で始まる使い捨て DB 上で実行する。新規/既存版印なし、v1特殊移行対象の診断とデータ非変更、v2/v3/v4の既知の追加補修、現行互換DBでの履歴読取0件、未来版、列/索引、SQL read/write 故障、実 ALTER 権限拒否、複数接続/切断/旧所有者を確認する。通常の marker/path/schema テストも新しい責務へ移管し、既存の保護・Rewrite・認可・認証・アンインストール回帰を維持する。
+`tests/wordpress-update-integration.php` は opt-in した esp_ で始まる使い捨て DB 上で実行する。 初回DB検査に一度だけSQL読取エラーを発生させ、Cronから管理者操作なしでruntimeがFAILED→READYへ復旧すること、スキーマ不整合は自動再試行しないことを検証する。新規/既存版印なし、v1特殊移行対象の診断とデータ非変更、v2/v3/v4の既知の追加補修、現行互換DBでの履歴読取0件、未来版、列/索引、SQL read/write 故障、実 ALTER 権限拒否、複数接続/切断/旧所有者を確認する。通常の marker/path/schema テストも新しい責務へ移管し、既存の保護・Rewrite・認可・認証・アンインストール回帰を維持する。
 
 `.github/scripts/test-wordpress-updates.sh` は WordPress 7.1.3 と使い捨て DB で移行試験に加え、標準 Plugin_Upgrader/WP_Automatic_Updater に synthetic 0.7.41 asset を渡す。標準/任意フォルダ × 手動/自動の 4 経路、Core の no_update/利用者設定、破損 ZIP、別 PHP worker による後処理、Core の fatal 判定後の実ファイル復元を確認する。GitHub API/asset と Core の loopback は fixture 応答。実際の fatal 判定自体は注入し、PHP 致命エラーの実 loopback を合格と主張しない。
 
