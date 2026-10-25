@@ -315,7 +315,11 @@ final class ESP_Updater {
         if (!is_array($old)) { $old = []; }
         ESP_Migrator::write_option(self::STATE_OPTION, [
             'version' => ESP_VERSION, 'status' => $status, 'reason' => $reason,
-            'attempts' => ($old['version'] ?? '') === ESP_VERSION ? (int) ($old['attempts'] ?? 0) : 0,
+            // A new transient-migration incident gets its own capped budget;
+            // stale Cron-maintenance attempts must not silently exhaust it.
+            'attempts' => $status === 'retryable_migration_failure' &&
+                ($old['status'] ?? '') !== 'retryable_migration_failure'
+                ? 0 : (($old['version'] ?? '') === ESP_VERSION ? (int) ($old['attempts'] ?? 0) : 0),
         ]);
     }
 
