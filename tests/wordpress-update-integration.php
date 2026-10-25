@@ -312,9 +312,18 @@ wp_set_current_user(1);
 ob_start(); ESP_Updater::notice(); $v1_notice = ob_get_clean();
 t(strpos($v1_notice, 'v1形式') !== false &&
     strpos($v1_notice, 'path_id') !== false &&
+    strpos($v1_notice, 'esp_retry_update') === false &&
     strpos($v1_notice, 'maintenance_confirmed') === false,
     'administrator notice names V1-specific migration without an automatic conversion control');
 wp_set_current_user(0);
+
+// Missing path_id in a modern, explicitly completed DB is corruption,
+// not evidence of a V1 installation. Do not offer V1-only recovery.
+create_current(); settings_fixture(); option_db('esp_db_version', 6);
+$wpdb->query('ALTER TABLE ' . table_name('remember') . ' DROP INDEX path_id, DROP COLUMN path_id');
+t(!run_migration() && get_option(ESP_Migrator::STATE_OPTION)['reason'] === 'schema_incompatible' &&
+    (int) get_option('esp_db_version') === 6,
+    'missing path_id in completed v6 schema is classified as corruption, not V1');
 
 create_current(); settings_fixture(); option_db('esp_db_version', 3);
 $wpdb->query('ALTER TABLE ' . table_name('session') . ' DROP INDEX token_unique');
