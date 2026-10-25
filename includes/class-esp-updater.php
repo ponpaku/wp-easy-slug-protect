@@ -400,12 +400,12 @@ final class ESP_Updater {
                 echo '<p>' . esc_html($kind . ': ' . ($state['status'] ?? 'pending') . ' / ' . ($state['step'] ?? '') . ' / ' . ($state['reason'] ?? '')) . '</p>';
             }
         }
-        echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
-        wp_nonce_field('esp_retry_update');
-        echo '<input type="hidden" name="action" value="esp_retry_update">';
         if (!$v1) {
-            echo '<p><button class="button">' . esc_html__('更新後処理を再検証・再試行', ESP_Config::TEXT_DOMAIN) . '</button></p>';
+            echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
+            wp_nonce_field('esp_retry_update');
+            echo '<input type="hidden" name="action" value="esp_retry_update">';
+            echo '<p><button class="button">' . esc_html__('更新後処理を再検証・再試行', ESP_Config::TEXT_DOMAIN) . '</button></p></form>';
         }
-        echo '</form></div>';
+        echo '</div>';
     }
 }
