@@ -47,6 +47,42 @@ function seed_auth_rows() {
     $wpdb->insert(table_name('session'), ['path_id' => 'path_kept', 'password_version' => 7,
         'token' => str_repeat('s', 64), 'created' => '2026-01-01 00:00:00', 'expires' => '2027-01-01 00:00:00']);
 }
+// Failure in the very first DB inspection is diagnostic only. With no schema,
+// settings or verified runtime, a later invocation must still install cleanly.
+reset_fixture();
+$first_inspection_failures = 0;
+$reject_first_inspection = static function ($sql) use (&$first_inspection_failures) {
+    if ($first_inspection_failures === 0 &&
+        strpos($sql, 'SELECT ENGINE FROM information_schema.TABLES') === 0) {
+        $first_inspection_failures++;
+        return 'SELECT invalid_column FROM esp_missing_initial_inspection_table';
+    }
+    return $sql;
+};
+add_filter('query', $reject_first_inspection);
+t(!run_migration() && $first_inspection_failures === 1 &&
+    ESP_Migrator::read_option(ESP_Migrator::STATE_OPTION) === null &&
+    ESP_Migrator::read_option('esp_settings') === null,
+    'transient initial inspection failure does not create false installation evidence');
+remove_filter('query', $reject_first_inspection);
+t(run_migration() && (int) ESP_Migrator::read_option('esp_db_version') === 6,
+    'empty site installs normally after the transient initial SQL error clears');
+
+// Older PR builds wrote an unclassified failed/inspect marker before any
+// schema changes. Accept only its narrow shape when all actual evidence is
+// absent, never an arbitrary failed migration record.
+reset_fixture();
+$preclassification = ['version' => ESP_VERSION, 'step' => 'inspect',
+    'status' => 'failed', 'reason' => 'schema_read_failed', 'updated_at' => time()];
+option_db(ESP_Migrator::STATE_OPTION, $preclassification);
+t(run_migration() && (int) ESP_Migrator::read_option('esp_db_version') === 6,
+    'old preclassification read-error marker does not permanently poison clean install');
+reset_fixture();
+$preclassification['reason'] = 'path_mapping_ambiguous';
+option_db(ESP_Migrator::STATE_OPTION, $preclassification);
+t(!run_migration() && ESP_Migrator::read_option('esp_settings') === null,
+    'unrelated failed migration marker cannot masquerade as clean install');
+
 reset_fixture();
 option_db(ESP_Protection_State::RUNTIME_STATE_OPTION, ['state' => 'READY', 'version' => ESP_VERSION]);
 t(!run_migration() && get_option('esp_settings', null) === null,
