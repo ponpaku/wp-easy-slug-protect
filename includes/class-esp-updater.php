@@ -46,8 +46,12 @@ final class ESP_Updater {
     }
 
     public static function can_finish_now() {
-        return self::$activation || is_admin() || (defined('DOING_CRON') && DOING_CRON) ||
-            (defined('WP_CLI') && WP_CLI);
+        // is_admin() also covers anonymous admin-ajax.php/admin-post.php
+        // requests. Only a capable administrator, trusted activation, Cron
+        // or WP-CLI may begin database migration/post-update verification.
+        return self::$activation || (defined('DOING_CRON') && DOING_CRON) ||
+            (defined('WP_CLI') && WP_CLI) ||
+            (is_admin() && current_user_can('manage_options'));
     }
 
     public static function during_activation($callback) {
