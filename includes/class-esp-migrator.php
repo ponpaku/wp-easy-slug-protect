@@ -56,6 +56,27 @@ final class ESP_Migrator {
     }
 
     /**
+     * A pre-classification read error may have left a diagnostic in earlier
+     * versions. It is not evidence that schema or settings were ever created.
+     * Admit only the exact read-failure shape, and still inspect all real
+     * installation evidence before deciding that the site is empty.
+     */
+    private static function preclassification_diagnostic($state) {
+        if (!is_array($state) || ($state['version'] ?? null) !== ESP_VERSION ||
+            ($state['status'] ?? null) !== 'failed' ||
+            ($state['step'] ?? null) !== 'inspect' ||
+            !in_array($state['reason'] ?? null, ['option_read_failed', 'schema_read_failed'], true)) {
+            return false;
+        }
+        foreach (array_keys($state) as $key) {
+            if (!in_array($key, ['version', 'step', 'status', 'reason', 'updated_at'], true)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
      * A single bounded invocation. Interrupted DDL is discovered from actual schema on
      * resume. GET_LOCK is connection owned, has no lease to steal, and is shared with #48.
      * $maintenance confirms drained old workers for legacy V1 data conversion only.
@@ -110,7 +131,8 @@ final class ESP_Migrator {
             $unverified_runtime = $runtime === [] || (is_array($runtime) &&
                 ($runtime['state'] ?? '') === 'PENDING' && ($runtime['version'] ?? null) === null);
             $clean = $settings === null && $marker === null && $plugin === null && $unverified_runtime &&
-                $present === 0 && $old === [] && !$this->has_protection_metadata();
+                $present === 0 && ($old === [] || self::preclassification_diagnostic($old)) &&
+                !$this->has_protection_metadata();
             $this->state['classification'] = $clean ? 'clean_install' : 'existing_install';
             if (!$clean && (!is_array($settings) || !isset($settings['path']) || !is_array($settings['path']) ||
                 (($tables['brute'] === null || $tables['remember'] === null) && !$resuming_install))) {
@@ -198,8 +220,13 @@ final class ESP_Migrator {
                 'schema_read_failed', 'schema_write_failed', 'schema_verification_failed',
                 'future_or_invalid_migration_state'];
             $reason = in_array($error->getMessage(), $known, true) ? $error->getMessage() : 'migration_exception';
-            try { $this->checkpoint($this->state['step'] ?? 'inspect', 'failed', $reason); }
-            catch (Throwable $ignored) { /* Lost lock / DB failure must never advance versions. */ }
+            // Before classification no mutation can have begun. Persisting an
+            // unclassified failure as migration evidence would make an empty
+            // installation impossible to retry after transient read errors.
+            if (isset($this->state['classification']) || !empty($this->state['clean_install'])) {
+                try { $this->checkpoint($this->state['step'] ?? 'inspect', 'failed', $reason); }
+                catch (Throwable $ignored) { /* Lost lock / DB failure must never advance versions. */ }
+            }
             return false;
         } finally {
             if ($held_lock === null) { ESP_Protection_State::release_verification_lock($this->lock); }
