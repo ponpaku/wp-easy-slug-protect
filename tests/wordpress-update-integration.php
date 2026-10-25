@@ -456,6 +456,10 @@ $_SERVER['SERVER_SOFTWARE'] = 'Apache/2.4';
 // schedule recovery while runtime remains fail-closed.
 create_current(); settings_fixture();
 wp_clear_scheduled_hook('esp_update_retry');
+// A previous, unrelated Cron-maintenance budget must not prevent recovery
+// from the first transient migration error.
+option_db(ESP_Updater::STATE_OPTION, ['version' => ESP_VERSION, 'status' => 'degraded',
+    'reason' => 'cron_unscheduled', 'attempts' => 5]);
 option_db(ESP_Protection_State::RUNTIME_STATE_OPTION,
     ['state' => 'VERIFY_REQUIRED', 'version' => null]);
 $setup = new ESP_Setup();
