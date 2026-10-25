@@ -111,6 +111,18 @@ add_filter('pre_http_request', static function ($reply, $args, $url) use (&$reco
 delete_site_transient(ESP_Updater::CACHE);
 $fail_api = true;
 check_release(ESP_Updater::release() === null && get_option('esp_settings') === $settings, 'GitHub outage preserves existing settings and operation');
+$headers = get_plugin_data($installed . '/easy-slug-protect.php');
+$offline = ESP_Updater::update_metadata(false, $headers, $plugin);
+check_release(is_array($offline) && $offline['version'] === $headers['Version'] &&
+    $offline['package'] === '' && $offline['slug'] === ESP_Updater::slug(),
+    'GitHub outage offers current-version metadata without an unverified package');
+wp_clean_plugins_cache(); wp_update_plugins();
+$offline_updates = get_site_transient('update_plugins');
+check_release(!isset($offline_updates->response[$plugin]) &&
+    isset($offline_updates->no_update[$plugin]) &&
+    $offline_updates->no_update[$plugin]->new_version === $headers['Version'] &&
+    $offline_updates->no_update[$plugin]->package === '',
+    'WordPress retains GitHub update support and auto-update UI during API outage');
 $fail_api = false; delete_site_transient(ESP_Updater::CACHE);
 $sentinel = (object) ['untouched' => true];
 check_release(ESP_Updater::plugin_information($sentinel, 'plugin_information', (object) ['slug' => 'other']) === $sentinel,
