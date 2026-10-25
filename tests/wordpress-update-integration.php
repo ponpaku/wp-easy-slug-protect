@@ -450,5 +450,71 @@ ESP_Protection_State::release_verification_lock($lock);
 t(get_option('esp_plugin_version', null) === null && get_option(ESP_Updater::STATE_OPTION)['reason'] === 'rewrite_unverified',
     'external Rewrite uncertainty cannot record a completed update');
 $_SERVER['SERVER_SOFTWARE'] = 'Apache/2.4';
+
+// A transient SQL failure before the first migration checkpoint still has
+// a current-run diagnostic. Only that explicitly retryable diagnosis may
+// schedule recovery while runtime remains fail-closed.
+create_current(); settings_fixture();
+wp_clear_scheduled_hook('esp_update_retry');
+option_db(ESP_Protection_State::RUNTIME_STATE_OPTION,
+    ['state' => 'VERIFY_REQUIRED', 'version' => null]);
+$setup = new ESP_Setup();
+ESP_Updater::register($setup);
+$transient_reads = 0;
+$fail_once = static function ($sql) use (&$transient_reads) {
+    if ($transient_reads === 0 && strpos($sql, 'SELECT ENGINE FROM information_schema.TABLES') === 0) {
+        $transient_reads++;
+        return 'SELECT missing_column FROM esp_missing_transient_schema_table';
+    }
+    return $sql;
+};
+add_filter('query', $fail_once);
+t(!ESP_Protection_State::verify_and_commit($setup) && $transient_reads === 1,
+    'transient schema read error fails closed during new-code verification');
+remove_filter('query', $fail_once);
+$runtime = get_option(ESP_Protection_State::RUNTIME_STATE_OPTION);
+$retryable = get_option(ESP_Updater::STATE_OPTION);
+t($runtime['state'] === 'FAILED' &&
+    $retryable['status'] === 'retryable_migration_failure' &&
+    $retryable['reason'] === 'schema_read_failed' &&
+    (int) $retryable['attempts'] === 1 &&
+    wp_next_scheduled('esp_update_retry') !== false,
+    'first transient failure schedules exactly one bounded retry while runtime is FAILED');
+wp_set_current_user(0);
+$scheduled = wp_next_scheduled('esp_update_retry');
+wp_unschedule_event($scheduled, 'esp_update_retry'); // Simulate WP-Cron event consumption.
+do_action('esp_update_retry'); // Registered Cron callback; no administrator POST.
+t(get_option(ESP_Protection_State::RUNTIME_STATE_OPTION)['state'] === 'READY' &&
+    get_option('esp_plugin_version') === ESP_VERSION &&
+    get_option(ESP_Migrator::STATE_OPTION)['status'] === 'complete',
+    'scheduled verification returns to READY after transient DB recovery without administrator action');
+t(!wp_next_scheduled('esp_update_retry'),
+    'successful transient retry does not schedule another recovery event');
+
+// Transient retry budget is bounded even when the scheduler event is lost.
+create_current(); settings_fixture();
+option_db(ESP_Updater::STATE_OPTION, [
+    'version' => ESP_VERSION, 'status' => 'retryable_migration_failure',
+    'reason' => 'schema_read_failed', 'attempts' => 5,
+]);
+wp_clear_scheduled_hook('esp_update_retry');
+wp_set_current_user(1);
+ESP_Updater::recover_missing_retry();
+t(!wp_next_scheduled('esp_update_retry') &&
+    (int) get_option(ESP_Updater::STATE_OPTION)['attempts'] === 5,
+    'exhausted transient retry budget is never rearmed automatically');
+wp_set_current_user(0);
+
+// Schema incompatibility is an explicit diagnostic, not a transient failure.
+create_current(); settings_fixture();
+option_db(ESP_Protection_State::RUNTIME_STATE_OPTION,
+    ['state' => 'VERIFY_REQUIRED', 'version' => null]);
+$wpdb->query('ALTER TABLE ' . table_name('session') . ' DROP COLUMN created');
+t(!ESP_Protection_State::verify_and_commit($setup) &&
+    get_option(ESP_Protection_State::RUNTIME_STATE_OPTION)['state'] === 'FAILED' &&
+    get_option(ESP_Migrator::STATE_OPTION)['reason'] === 'schema_incompatible' &&
+    !wp_next_scheduled('esp_update_retry'),
+    'incompatible schema stays FAILED without automatic migration retry');
+
 reset_fixture();
 echo "All real WordPress/MySQL update integration fixtures passed.\n";
