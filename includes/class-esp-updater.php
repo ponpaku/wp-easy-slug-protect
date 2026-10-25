@@ -24,6 +24,9 @@ final class ESP_Updater {
         add_action('esp_update_retry', static function () use ($setup) {
             ESP_Protection_State::verify_and_commit($setup);
         });
+        // Admin-only, lightweight recovery if WP-Cron rejected the last
+        // one-shot retry. No migration or mandatory post-update work here.
+        add_action('admin_init', [self::class, 'recover_missing_retry']);
         add_action('admin_notices', [self::class, 'notice']);
         add_action('admin_post_esp_retry_update', static function () use ($setup) {
             if (!current_user_can('manage_options')) { wp_die('Forbidden', '', ['response' => 403]); }
@@ -302,7 +305,10 @@ final class ESP_Updater {
         ]);
     }
 
-    /** At most five automatic continuations, 1/2/4/8/16 minutes. Manual retry resets. */
+    /**
+     * A rejected scheduling request must not consume an automatic attempt.
+     * The DB lock serializes all reservation/budget changes across workers.
+     */
     public static function schedule_retry($progress = false) {
         $lock = ESP_Protection_State::acquire_verification_lock();
         if ($lock === null) { return; }
@@ -314,11 +320,47 @@ final class ESP_Updater {
             if (($state['version'] ?? '') !== ESP_VERSION) { $state = ['version' => ESP_VERSION]; }
             $attempts = (int) ($state['attempts'] ?? 0);
             if (!$progress && $attempts >= 5) { return; }
+
+            $when = time() + ($progress ? 1 : 60 * (1 << $attempts));
+            // Request an explicit WP_Error on failure, rather than assuming an
+            // event was persisted. Both false and WP_Error mean no budget use.
+            if (wp_schedule_single_event($when, 'esp_update_retry', [], true) !== true) {
+                return;
+            }
             $state['attempts'] = $progress ? $attempts : $attempts + 1;
-            ESP_Migrator::write_option(self::STATE_OPTION, $state);
-            wp_schedule_single_event(time() + ($progress ? 1 : 60 * (1 << $attempts)), 'esp_update_retry');
+            try {
+                ESP_Migrator::write_option(self::STATE_OPTION, $state);
+            } catch (Throwable $error) {
+                // Compensate for the separate cron/option writes if the budget
+                // cannot be persisted; never run unaccounted scheduled retries.
+                wp_unschedule_event($when, 'esp_update_retry');
+                throw $error;
+            }
         } catch (Throwable $ignored) { /* DB failure cannot be converted into READY. */ }
         finally { ESP_Protection_State::release_verification_lock($lock); }
+    }
+
+    /**
+     * An unscheduled retry cannot wake itself back up. An administrator's next
+     * request may reserve it again without running any heavy migration.
+     * Diagnostic-only rewrite/schema failures and exhausted budgets stay manual.
+     */
+    public static function recover_missing_retry() {
+        if (!current_user_can('manage_options') || wp_next_scheduled('esp_update_retry')) { return; }
+        try {
+            $state = ESP_Migrator::read_option(self::STATE_OPTION, []);
+            if (!is_array($state) || ($state['version'] ?? '') !== ESP_VERSION) { return; }
+            $migration = ESP_Migrator::read_option(ESP_Migrator::STATE_OPTION, []);
+            if (is_array($migration) && ($migration['version'] ?? '') === ESP_VERSION &&
+                ($migration['status'] ?? '') === 'pending') {
+                // V1 batches were already explicitly approved for maintenance
+                // before they could enter pending status.
+                self::schedule_retry(true);
+            } elseif (($state['status'] ?? '') === 'degraded' &&
+                ($state['reason'] ?? '') === 'cron_unscheduled') {
+                self::schedule_retry();
+            }
+        } catch (Throwable $ignored) { /* Leave diagnostic state for manual repair. */ }
     }
 
     private static function reset_retry_budget() {
