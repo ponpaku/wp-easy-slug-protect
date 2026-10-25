@@ -163,6 +163,16 @@ final class ESP_Migrator {
                 throw new RuntimeException('v1_migration_required');
             }
             foreach ($this->definitions() as $kind => $def) { $this->validate_existing($kind, $tables[$kind], $def); }
+            // A stale v0/v1 marker can represent interrupted path-ID assignment
+            // even after the column was created. An indexed existence probe
+            // detects unassigned remember tokens without scanning all history.
+            if (!$clean && !$resuming_install && $marker !== null && (int) $marker <= 1 &&
+                $tables['remember'] !== null) {
+                $blank = $wpdb->get_var('SELECT id FROM ' . $this->table('remember') .
+                    " WHERE path_id = '' LIMIT 1");
+                if ($wpdb->last_error !== '') { throw new RuntimeException('schema_read_failed'); }
+                if ($blank !== null) { throw new RuntimeException('v1_migration_required'); }
+            }
             $paths = $this->path_map($settings['path']);
             if (!$this->verify_references($paths['paths'])) {
                 throw new RuntimeException('path_reference_invalid');
@@ -409,8 +419,14 @@ final class ESP_Migrator {
             if ($tables[$kind] === null || isset($tables[$kind]['columns']['password_version'])) { continue; }
             foreach ($paths['paths'] as $id => $path) {
                 if ((int) ($path['password_version'] ?? 0) === 0) { continue; }
+                // A partially assigned V1 row with a missing generation is
+                // ambiguous too. This preflight is reached only for a missing
+                // password_version column and a nonzero active generation.
+                $where = $kind === 'remember'
+                    ? ' WHERE BINARY path_id = BINARY %s OR (path_id = \'\' AND BINARY path = BINARY %s) LIMIT 1'
+                    : ' WHERE BINARY path_id = BINARY %s LIMIT 1';
                 $row = $wpdb->get_var($wpdb->prepare('SELECT id FROM ' . $this->table($kind) .
-                    ' WHERE BINARY path_id = BINARY %s LIMIT 1', $id));
+                    $where, $kind === 'remember' ? [$id, $path['path']] : [$id]));
                 if ($wpdb->last_error !== '') { throw new RuntimeException('schema_read_failed'); }
                 if ($row !== null) { throw new RuntimeException('password_version_ambiguous'); }
             }
