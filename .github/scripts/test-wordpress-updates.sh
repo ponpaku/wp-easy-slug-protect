@@ -8,6 +8,10 @@ php "$fixture_root/wp-cli.phar" --allow-root --path="$fixture_root/wordpress" co
 php "$fixture_root/wp-cli.phar" --allow-root --path="$fixture_root/wordpress" core install --url=http://esp44.example.test --title=ESP44 --admin_user=esp-test --admin_password=disposable-ci-test-only --admin_email=esp@example.test --skip-email
 export ESP_WP_ROOT="$fixture_root/wordpress" ESP_ALLOW_DISPOSABLE_DB=1
 php tests/wordpress-update-integration.php
+# Fresh PHP processes avoid the WP_CLI shortcut used by the migration fixture.
+for entry in ajax post cron; do
+  ESP_TEST_ADMIN_ENTRY="$entry" php tests/wordpress-unauthorized-update-test.php
+done
 for fixture_folder in easy-slug-protect esp44-custom; do
   for automatic in 0 1; do
     ESP_TEST_FOLDER="$fixture_folder" ESP_TEST_AUTOMATIC="$automatic" php tests/wordpress-release-integration.php
