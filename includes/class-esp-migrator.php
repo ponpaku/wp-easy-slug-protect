@@ -7,6 +7,10 @@ final class ESP_Migrator {
     private $lock;
     private $state = [];
     private $connection;
+    // Per-request reason also covers an error before migration state can be saved.
+    private static $last_failure_reason = null;
+
+    public static function last_failure_reason() { return self::$last_failure_reason; }
 
     /** Read the database, not an option-cache snapshot; absence and SQL failure differ. */
     public static function read_option($name, $default = null) {
@@ -81,6 +85,7 @@ final class ESP_Migrator {
      * GET_LOCK is connection owned and shared with #48.
      */
     public function run($held_lock = null, $maintenance = false) {
+        self::$last_failure_reason = null;
         if (is_multisite()) { return false; } // Network migration needs its own design/tests.
         $this->lock = $held_lock ?? ESP_Protection_State::acquire_verification_lock();
         if ($this->lock === null) { return false; }
@@ -218,6 +223,7 @@ final class ESP_Migrator {
                 'schema_read_failed', 'schema_write_failed', 'schema_verification_failed',
                 'future_or_invalid_migration_state', 'v1_migration_required'];
             $reason = in_array($error->getMessage(), $known, true) ? $error->getMessage() : 'migration_exception';
+            self::$last_failure_reason = $reason;
             // Before classification no mutation can have begun. Persisting an
             // unclassified failure as migration evidence would make an empty
             // installation impossible to retry after transient read errors.
