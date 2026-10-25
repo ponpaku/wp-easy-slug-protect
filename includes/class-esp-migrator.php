@@ -153,16 +153,16 @@ final class ESP_Migrator {
                     throw new RuntimeException('partial_installation');
                 }
             }
-            foreach ($this->definitions() as $kind => $def) { $this->validate_existing($kind, $tables[$kind], $def); }
             // V1-specific path-ID migration is intentionally unsupported by
             // normal updates, including an interrupted old V1 conversion.
-            // This guard precedes any DDL or settings writes.
+            // Classify it before structural validation or any DDL.
             if (!$clean && !$resuming_install &&
-                (!isset($tables['brute']['columns']['path_id']) ||
-                 !isset($tables['remember']['columns']['path_id']) ||
+                (($tables['brute'] !== null && !isset($tables['brute']['columns']['path_id'])) ||
+                 ($tables['remember'] !== null && !isset($tables['remember']['columns']['path_id'])) ||
                  ($marker !== null && (int) $marker <= 1 && $tables['session'] === null))) {
                 throw new RuntimeException('v1_migration_required');
             }
+            foreach ($this->definitions() as $kind => $def) { $this->validate_existing($kind, $tables[$kind], $def); }
             $paths = $this->path_map($settings['path']);
             if (!$this->verify_references($paths['paths'])) {
                 throw new RuntimeException('path_reference_invalid');
