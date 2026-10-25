@@ -436,23 +436,31 @@ final class ESP_Migrator {
      */
     private function assert_active_path_links($kind, $map, $require_assigned) {
         global $wpdb;
-        $active_ids = array_values($map);
-        foreach ($map as $path => $expected) {
-            $other_ids = array_values(array_filter($active_ids, static function ($id) use ($expected) {
-                return $id !== $expected;
-            }));
-            $conditions = [];
-            if ($require_assigned) { $conditions[] = "path_id = ''"; }
-            if ($other_ids !== []) {
-                $conditions[] = 'BINARY path_id IN (' . implode(', ', array_fill(0, count($other_ids), '%s')) . ')';
+        if ($map === []) { return; }
+
+        // A single primary-key walk replaces one increasingly large IN(...) SQL
+        // statement per protected path. Memory and SQL size are bounded by the
+        // same fixed batch limit used by the V1 migration.
+        $active_ids = array_fill_keys(array_values($map), true);
+        $cursor = 0;
+        do {
+            $rows = $wpdb->get_results($wpdb->prepare('SELECT id, path, path_id FROM ' .
+                $this->table($kind) . ' WHERE id > %d ORDER BY id LIMIT %d',
+                $cursor, self::BATCH_SIZE), ARRAY_A);
+            if ($wpdb->last_error !== '' || !is_array($rows)) {
+                throw new RuntimeException('schema_read_failed');
             }
-            if (!$conditions) { continue; }
-            $sql = 'SELECT id FROM ' . $this->table($kind) .
-                ' WHERE BINARY path = BINARY %s AND (' . implode(' OR ', $conditions) . ') LIMIT 1';
-            $bad = $wpdb->get_var($wpdb->prepare($sql, array_merge([$path], $other_ids)));
-            if ($wpdb->last_error !== '') { throw new RuntimeException('schema_read_failed'); }
-            if ($bad !== null) { throw new RuntimeException('path_mapping_ambiguous'); }
-        }
+            foreach ($rows as $row) {
+                $cursor = (int) $row['id'];
+                $expected = $map[$row['path']] ?? null;
+                if ($expected === null) { continue; }
+                $actual = $row['path_id'];
+                if (($require_assigned && $actual === '') ||
+                    ($actual !== $expected && isset($active_ids[$actual]))) {
+                    throw new RuntimeException('path_mapping_ambiguous');
+                }
+            }
+        } while (count($rows) === self::BATCH_SIZE);
     }
 
     private function verify_path_rows($map) {
