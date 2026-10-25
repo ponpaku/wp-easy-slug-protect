@@ -108,8 +108,7 @@ final class ESP_Updater {
     public static function update_metadata($update, $plugin_data, $plugin_file, $locales = []) {
         if ($plugin_file !== self::basename() || ($plugin_data['UpdateURI'] ?? '') !== self::URI || is_multisite()) { return $update; }
         $r = self::release();
-        if ($r === null) { return false; }
-        if (!version_compare($r['version'], $plugin_data['Version'], '>')) {
+        if ($r === null || !version_compare($r['version'], $plugin_data['Version'], '>')) {
             // Core puts this into no_update. That metadata is also how its plugin
             // list recognizes update support and shows the auto-update setting.
             return ['id' => self::URI, 'slug' => self::slug(), 'version' => $plugin_data['Version'],
@@ -238,8 +237,22 @@ final class ESP_Updater {
         }
         if (!ESP_Protection_State::owns_verification_lock($lock)) { return false; }
         if (!$setup->update_check($lock)) {
-            // Incompatible schemas and V1-specific conversion remain
-            // diagnostic-only; never queue an automatic migration retry.
+            // Only an explicitly classified transient DB read/option failure
+            // may be retried. V1, incompatible schema, unknown failures and
+            // lost locks remain diagnostic-only. No second GET_LOCK on this
+            // already-owned connection.
+            $reason = ESP_Migrator::last_failure_reason();
+            if (in_array($reason, ['option_read_failed', 'option_write_failed',
+                'schema_read_failed'], true) &&
+                ESP_Protection_State::owns_verification_lock($lock)) {
+                try {
+                    self::save_status('retryable_migration_failure', $reason);
+                    self::schedule_retry(false, $lock);
+                } catch (Throwable $ignored) {
+                    // When the database cannot persist state, fail closed and
+                    // leave administrator recovery rather than a blind retry.
+                }
+            }
             return false;
         }
         try {
@@ -310,10 +323,11 @@ final class ESP_Updater {
      * A rejected scheduling request must not consume an automatic attempt.
      * The DB lock serializes all reservation/budget changes across workers.
      */
-    public static function schedule_retry($progress = false) {
-        $lock = ESP_Protection_State::acquire_verification_lock();
+    public static function schedule_retry($progress = false, $held_lock = null) {
+        $lock = $held_lock ?? ESP_Protection_State::acquire_verification_lock();
         if ($lock === null) { return; }
         try {
+            if (!ESP_Protection_State::owns_verification_lock($lock)) { return; }
             if (wp_next_scheduled('esp_update_retry')) { return; }
             $state = ESP_Migrator::read_option(self::STATE_OPTION, []);
             if (!is_array($state)) { return; }
@@ -338,7 +352,9 @@ final class ESP_Updater {
                 throw $error;
             }
         } catch (Throwable $ignored) { /* DB failure cannot be converted into READY. */ }
-        finally { ESP_Protection_State::release_verification_lock($lock); }
+        finally {
+            if ($held_lock === null) { ESP_Protection_State::release_verification_lock($lock); }
+        }
     }
 
     /**
@@ -351,8 +367,12 @@ final class ESP_Updater {
         try {
             $state = ESP_Migrator::read_option(self::STATE_OPTION, []);
             if (!is_array($state) || ($state['version'] ?? '') !== ESP_VERSION) { return; }
-            if (($state['status'] ?? '') === 'degraded' &&
-                ($state['reason'] ?? '') === 'cron_unscheduled') {
+            $cron_degraded = ($state['status'] ?? '') === 'degraded' &&
+                ($state['reason'] ?? '') === 'cron_unscheduled';
+            $retryable_failure = ($state['status'] ?? '') === 'retryable_migration_failure' &&
+                in_array($state['reason'] ?? '', ['option_read_failed',
+                    'option_write_failed', 'schema_read_failed'], true);
+            if ($cron_degraded || $retryable_failure) {
                 self::schedule_retry();
             }
         } catch (Throwable $ignored) { /* Leave diagnostic state for manual repair. */ }
