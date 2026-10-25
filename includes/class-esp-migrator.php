@@ -160,7 +160,10 @@ final class ESP_Migrator {
                 (($tables['brute'] !== null && !isset($tables['brute']['columns']['path_id'])) ||
                  ($tables['remember'] !== null && !isset($tables['remember']['columns']['path_id'])) ||
                  ($marker !== null && (int) $marker <= 1 && $tables['session'] === null))) {
-                throw new RuntimeException('v1_migration_required');
+                // A version-6 database losing a column is corruption, not a
+                // historical V1 install. Never mislabel it as V1.
+                throw new RuntimeException($marker === null || (int) $marker <= 1
+                    ? 'v1_migration_required' : 'schema_incompatible');
             }
             foreach ($this->definitions() as $kind => $def) { $this->validate_existing($kind, $tables[$kind], $def); }
             // A stale v0/v1 marker can represent interrupted path-ID assignment
