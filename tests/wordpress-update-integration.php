@@ -68,6 +68,27 @@ remove_filter('query', $reject_first_inspection);
 t(run_migration() && (int) ESP_Migrator::read_option('esp_db_version') === 6,
     'empty site installs normally after the transient initial SQL error clears');
 
+// The initial migration-state option read can also fail before we have
+// classified the installation. No phantom state may be written on error.
+reset_fixture();
+$first_state_read_failures = 0;
+$reject_first_state_read = static function ($sql) use (&$first_state_read_failures) {
+    if ($first_state_read_failures === 0 &&
+        strpos($sql, 'SELECT option_value FROM ') === 0 &&
+        strpos($sql, "'esp_migration_state'") !== false) {
+        $first_state_read_failures++;
+        return 'SELECT invalid_column FROM esp_missing_initial_option_table';
+    }
+    return $sql;
+};
+add_filter('query', $reject_first_state_read);
+t(!run_migration() && $first_state_read_failures === 1 &&
+    ESP_Migrator::read_option(ESP_Migrator::STATE_OPTION) === null,
+    'initial option-read failure leaves no phantom migration state');
+remove_filter('query', $reject_first_state_read);
+t(run_migration() && (int) ESP_Migrator::read_option('esp_db_version') === 6,
+    'clean installation succeeds after first option-read error clears');
+
 // Older PR builds wrote an unclassified failed/inspect marker before any
 // schema changes. Accept only its narrow shape when all actual evidence is
 // absent, never an arbitrary failed migration record.
