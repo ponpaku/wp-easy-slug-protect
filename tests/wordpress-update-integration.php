@@ -112,6 +112,50 @@ $wpdb->insert(table_name('remember'), ['path' => '/members/', 'path_id' => 'path
 t(!run_migration() && get_option(ESP_Migrator::STATE_OPTION)['reason'] === 'path_mapping_ambiguous',
     'cross-linked active path ID is rejected even when retired history is allowed');
 
+// Scaling regression: path validation should scan records in primary-key
+// batches, not generate one IN(other active IDs...) statement per path.
+create_current(); $many = settings_fixture();
+for ($i = 0; $i < 140; $i++) {
+    $key = 'path_bulk_' . $i;
+    $many['path'][$key] = ['id' => $key, 'path' => '/bulk/' . $i . '/',
+        'password' => 'fixture-hash', 'password_version' => 0];
+}
+option_db('esp_settings', $many);
+for ($i = 0; $i < 425; $i++) {
+    $n = $i % 140;
+    $path = '/bulk/' . $n . '/';
+    $row_id = ($i % 13 === 0) ? 'former_' . $n : 'path_bulk_' . $n;
+    $wpdb->insert(table_name('remember'), ['path' => $path, 'path_id' => $row_id,
+        'password_version' => 0, 'user_id' => str_pad((string) $i, 32, 'x'),
+        'token' => hash('sha256', 'bulk-' . $i),
+        'created' => '2026-01-01 00:00:00', 'expires' => '2027-01-01 00:00:00'],
+        ['%s', '%s', '%d', '%s', '%s', '%s', '%s']);
+    $wpdb->insert(table_name('brute'), ['ip_address' => '127.0.0.1',
+        'path' => $path, 'path_id' => $row_id, 'time' => '2026-01-01 00:00:00'],
+        ['%s', '%s', '%s', '%s']);
+}
+$scan_queries = 0;
+$count_scan = static function ($sql) use (&$scan_queries) {
+    if (strpos($sql, 'SELECT id, path, path_id FROM ') === 0) { $scan_queries++; }
+    return $sql;
+};
+add_filter('query', $count_scan);
+$many_ok = run_migration();
+remove_filter('query', $count_scan);
+t($many_ok && $scan_queries <= 20 &&
+    (int) $wpdb->get_var('SELECT COUNT(*) FROM ' . table_name('remember')) === 425 &&
+    (int) $wpdb->get_var('SELECT COUNT(*) FROM ' . table_name('brute')) === 425,
+    '140 paths and 850 history rows validate using bounded primary-key queries (scans=' . $scan_queries . ')');
+$old_bulk = $wpdb->get_var($wpdb->prepare('SELECT path_id FROM ' . table_name('remember') .
+    ' WHERE BINARY path = BINARY %s ORDER BY id LIMIT 1', '/bulk/0/'));
+t($old_bulk === 'former_0', 'batched validation preserves detached history IDs');
+$wpdb->insert(table_name('remember'), ['path' => '/bulk/0/', 'path_id' => 'path_bulk_1',
+    'password_version' => 0, 'user_id' => str_repeat('z', 32),
+    'token' => str_repeat('z', 64), 'created' => '2026-01-01 00:00:00',
+    'expires' => '2027-01-01 00:00:00'], ['%s', '%s', '%d', '%s', '%s', '%s', '%s']);
+t(!run_migration() && get_option(ESP_Migrator::STATE_OPTION)['reason'] === 'path_mapping_ambiguous',
+    'batched validation rejects wrong active IDs after processing multiple batches');
+
 // The retired_ prefix cannot be assigned to an active path, even by
 // manually edited settings; otherwise a past credential could be revived.
 create_current(); $s = settings_fixture();
@@ -312,12 +356,49 @@ t(ESP_Updater::finish_update($setup, $lock), 'new-code post-processing succeeds 
 ESP_Protection_State::release_verification_lock($lock);
 t(get_option('esp_plugin_version') === ESP_VERSION, 'plugin marker advances only after required work verification');
 $prevent_cron = static function () { return false; };
+wp_clear_scheduled_hook('esp_update_retry');
 wp_clear_scheduled_hook(ESP_Config::DAILY_CLEANUP_HOOK); add_filter('pre_schedule_event', $prevent_cron);
 $lock = ESP_Protection_State::acquire_verification_lock();
 t(ESP_Updater::finish_update($setup, $lock), 'optional Cron failure retains PHP usability');
 ESP_Protection_State::release_verification_lock($lock);
+$retry_state = get_option(ESP_Updater::STATE_OPTION);
+t($retry_state['status'] === 'degraded' && (int) $retry_state['attempts'] === 0 &&
+    !wp_next_scheduled('esp_update_retry'),
+    'rejected retry scheduling leaves no event and does not spend the budget');
 remove_filter('pre_schedule_event', $prevent_cron);
-t(get_option(ESP_Updater::STATE_OPTION)['status'] === 'degraded', 'Cron failure remains separately visible');
+wp_set_current_user(1);
+t(current_user_can('manage_options'), 'fixture administrator may re-arm missing retries');
+ESP_Updater::recover_missing_retry();
+$retry_state = get_option(ESP_Updater::STATE_OPTION);
+t(wp_next_scheduled('esp_update_retry') !== false && (int) $retry_state['attempts'] === 1,
+    'admin access re-arms lost retry and counts only a successful reservation');
+ESP_Updater::recover_missing_retry();
+t((int) get_option(ESP_Updater::STATE_OPTION)['attempts'] === 1,
+    'existing retry event is never double-counted');
+wp_clear_scheduled_hook('esp_update_retry');
+
+// Also verify the WP_Error scheduling failure path and the five-attempt cap.
+$retry_state['attempts'] = 4;
+option_db(ESP_Updater::STATE_OPTION, $retry_state);
+$reject_retry = static function ($event) {
+    return $event->hook === 'esp_update_retry' ? new WP_Error('fixture_schedule_denied') : null;
+};
+add_filter('pre_schedule_event', $reject_retry);
+ESP_Updater::recover_missing_retry();
+t(!wp_next_scheduled('esp_update_retry') &&
+    (int) get_option(ESP_Updater::STATE_OPTION)['attempts'] === 4,
+    'WP_Error during scheduling also leaves retry budget intact');
+remove_filter('pre_schedule_event', $reject_retry);
+ESP_Updater::recover_missing_retry();
+t(wp_next_scheduled('esp_update_retry') !== false &&
+    (int) get_option(ESP_Updater::STATE_OPTION)['attempts'] === 5,
+    'recovered last retry consumes the fifth budget unit only after scheduling');
+wp_clear_scheduled_hook('esp_update_retry');
+ESP_Updater::recover_missing_retry();
+t(!wp_next_scheduled('esp_update_retry') &&
+    (int) get_option(ESP_Updater::STATE_OPTION)['attempts'] === 5,
+    'automatic retries stop at the budget cap');
+wp_set_current_user(0);
 create_current(); settings_fixture();
 $_SERVER['SERVER_SOFTWARE'] = 'nginx';
 $lock = ESP_Protection_State::acquire_verification_lock();
