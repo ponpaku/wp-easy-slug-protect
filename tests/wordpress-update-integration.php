@@ -376,21 +376,16 @@ ESP_Updater::recover_missing_retry();
 t((int) get_option(ESP_Updater::STATE_OPTION)['attempts'] === 1,
     'existing retry event is never double-counted');
 wp_clear_scheduled_hook('esp_update_retry');
+t(!wp_next_scheduled('esp_update_retry'), 'first retry reservation can be removed for failure injection');
 
 // Also verify the WP_Error scheduling failure path and the five-attempt cap.
 $retry_state['attempts'] = 4;
 option_db(ESP_Updater::STATE_OPTION, $retry_state);
-$reject_retry = static function ($event) {
-    return $event->hook === 'esp_update_retry' ? new WP_Error('fixture_schedule_denied') : null;
-};
+$reject_retry = static function () { return new WP_Error('fixture_schedule_denied'); };
 add_filter('pre_schedule_event', $reject_retry);
 ESP_Updater::recover_missing_retry();
-$after_wp_error_attempts = (int) get_option(ESP_Updater::STATE_OPTION)['attempts'];
-$after_wp_error_event = wp_next_scheduled('esp_update_retry');
-echo 'DIAG: after WP_Error attempts=' . $after_wp_error_attempts .
-    ', retry_event=' . var_export($after_wp_error_event, true) . ', state=' .
-    json_encode(get_option(ESP_Updater::STATE_OPTION)) . "\n";
-t($after_wp_error_event === false && $after_wp_error_attempts === 4,
+t(!wp_next_scheduled('esp_update_retry') &&
+    (int) get_option(ESP_Updater::STATE_OPTION)['attempts'] === 4,
     'WP_Error during scheduling also leaves retry budget intact');
 remove_filter('pre_schedule_event', $reject_retry);
 ESP_Updater::recover_missing_retry();
