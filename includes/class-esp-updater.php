@@ -31,12 +31,11 @@ final class ESP_Updater {
         add_action('admin_post_esp_retry_update', static function () use ($setup) {
             if (!current_user_can('manage_options')) { wp_die('Forbidden', '', ['response' => 403]); }
             check_admin_referer('esp_retry_update');
-            // No force-unlock or blind restart. Stuck file updates use #48's separate
-            // stopped-job confirmation. Only V1 data conversion needs this confirmation.
-            $maintenance = isset($_POST['maintenance_confirmed']) && $_POST['maintenance_confirmed'] === '1';
+            // No force-unlock or blind restart. Stuck file updates use
+            // #48's separate stopped-job confirmation. No V1 data conversion.
             $lock = ESP_Protection_State::acquire_verification_lock();
             if ($lock !== null) {
-                try { (new ESP_Migrator())->run($lock, $maintenance); }
+                try { (new ESP_Migrator())->run($lock); }
                 finally { ESP_Protection_State::release_verification_lock($lock); }
             }
             self::reset_retry_budget();
@@ -239,10 +238,8 @@ final class ESP_Updater {
         }
         if (!ESP_Protection_State::owns_verification_lock($lock)) { return false; }
         if (!$setup->update_check($lock)) {
-            // Pending fixed batches are safe to continue; unknown schema / SQL / IDs
-            // remain diagnostic-only and never receive unconditional retries.
-            $m = get_option(ESP_Migrator::STATE_OPTION, []);
-            if (($m['status'] ?? '') === 'pending') { self::schedule_retry(true); }
+            // Incompatible schemas and V1-specific conversion remain
+            // diagnostic-only; never queue an automatic migration retry.
             return false;
         }
         try {
@@ -354,13 +351,7 @@ final class ESP_Updater {
         try {
             $state = ESP_Migrator::read_option(self::STATE_OPTION, []);
             if (!is_array($state) || ($state['version'] ?? '') !== ESP_VERSION) { return; }
-            $migration = ESP_Migrator::read_option(ESP_Migrator::STATE_OPTION, []);
-            if (is_array($migration) && ($migration['version'] ?? '') === ESP_VERSION &&
-                ($migration['status'] ?? '') === 'pending') {
-                // V1 batches were already explicitly approved for maintenance
-                // before they could enter pending status.
-                self::schedule_retry(true);
-            } elseif (($state['status'] ?? '') === 'degraded' &&
+            if (($state['status'] ?? '') === 'degraded' &&
                 ($state['reason'] ?? '') === 'cron_unscheduled') {
                 self::schedule_retry();
             }
@@ -392,7 +383,15 @@ final class ESP_Updater {
         if (($m['status'] ?? '') === 'complete' && ($u['status'] ?? '') === 'complete' &&
             ($m['version'] ?? '') === ESP_VERSION && ($u['version'] ?? '') === ESP_VERSION &&
             get_option(ESP_Config::VERSION_OPTION_KEY) === ESP_VERSION) { return; }
-        echo '<div class="notice notice-warning"><p>' . esc_html__('Easy Slug Protect: 更新後の検証が完了していません。DB・Rewrite・Cronを確認してください。', ESP_Config::TEXT_DOMAIN) . '</p>';
+        $v1 = is_array($m) && ($m['reason'] ?? '') === 'v1_migration_required';
+        echo '<div class="notice notice-warning"><p>' .
+            ($v1
+                ? esc_html__('Easy Slug Protect: v1形式のデータベースが検出されました。v1固有のpath_id変換は通常更新では実行しません。', ESP_Config::TEXT_DOMAIN)
+                : esc_html__('Easy Slug Protect: 更新後の検証が完了していません。DB・Rewrite・Cronを確認してください。', ESP_Config::TEXT_DOMAIN))
+            . '</p>';
+        if ($v1) {
+            echo '<p>' . esc_html__('バックアップを取得し、管理者がv1専用の移行対応を行ってください。自動的にID・パスワード・認証トークンを書き換えることはありません。', ESP_Config::TEXT_DOMAIN) . '</p>';
+        }
         echo '<p>' . esc_html(sprintf('Last completed DB: %s / plugin: %s',
             (string) get_option('esp_db_version', 'unknown'),
             (string) get_option(ESP_Config::VERSION_OPTION_KEY, 'unknown'))) . '</p>';
@@ -404,10 +403,9 @@ final class ESP_Updater {
         echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
         wp_nonce_field('esp_retry_update');
         echo '<input type="hidden" name="action" value="esp_retry_update">';
-        if (($m['reason'] ?? '') === 'maintenance_confirmation_required') {
-            echo '<p><label><input type="checkbox" name="maintenance_confirmed" value="1" required> ' .
-                esc_html__('DBをバックアップし、通常アクセス・旧PHPワーカー・Cronを停止しました。旧形式のパスID移行を再開します。', ESP_Config::TEXT_DOMAIN) . '</label></p>';
+        if (!$v1) {
+            echo '<p><button class="button">' . esc_html__('更新後処理を再検証・再試行', ESP_Config::TEXT_DOMAIN) . '</button></p>';
         }
-        echo '<p><button class="button">' . esc_html__('更新後処理を再検証・再試行', ESP_Config::TEXT_DOMAIN) . '</button></p></form></div>';
+        echo '</form></div>';
     }
 }
