@@ -4,7 +4,6 @@ if (!defined('ABSPATH')) { exit; }
 /** Single-site schema/data migration. No network or update UI responsibilities. */
 final class ESP_Migrator {
     const STATE_OPTION = 'esp_migration_state';
-    const BATCH_SIZE = 200;
     private $lock;
     private $state = [];
     private $connection;
@@ -77,9 +76,9 @@ final class ESP_Migrator {
     }
 
     /**
-     * A single bounded invocation. Interrupted DDL is discovered from actual schema on
-     * resume. GET_LOCK is connection owned, has no lease to steal, and is shared with #48.
-     * $maintenance confirms drained old workers for legacy V1 data conversion only.
+     * Inspect first and mutate only supported additive schema differences.
+     * V1 path-ID conversion is deliberately not part of the automatic updater.
+     * GET_LOCK is connection owned and shared with #48.
      */
     public function run($held_lock = null, $maintenance = false) {
         if (is_multisite()) { return false; } // Network migration needs its own design/tests.
@@ -155,44 +154,30 @@ final class ESP_Migrator {
                 }
             }
             foreach ($this->definitions() as $kind => $def) { $this->validate_existing($kind, $tables[$kind], $def); }
+            // V1-specific path-ID migration is intentionally unsupported by
+            // normal updates, including an interrupted old V1 conversion.
+            // This guard precedes any DDL or settings writes.
+            if (!$clean && !$resuming_install &&
+                (!isset($tables['brute']['columns']['path_id']) ||
+                 !isset($tables['remember']['columns']['path_id']) ||
+                 ($marker !== null && (int) $marker <= 1 && $tables['session'] === null))) {
+                throw new RuntimeException('v1_migration_required');
+            }
             $paths = $this->path_map($settings['path']);
-            $legacy = $paths['changed'];
-            // Discover ambiguous existing links before changing even the first row.
             if (!$this->verify_references($paths['paths'])) {
                 throw new RuntimeException('path_reference_invalid');
             }
-            $this->preflight_path_rows($tables, $paths, $legacy);
+            $this->preflight_password_versions($tables, $paths);
             if (!$clean && !$resuming_install &&
-                (($marker === null && $present < 4 && !$legacy) ||
+                (($marker === null && $present < 4) ||
                  ((int) $marker >= 2 && $tables['session'] === null) ||
                  ((int) $marker >= 6 && $tables['limit'] === null))) {
                 $this->state['classification'] = 'partial_or_inconsistent';
                 throw new RuntimeException('partial_installation');
             }
-            if ($legacy && !$maintenance && empty($old['maintenance_confirmed'])) {
-                $this->checkpoint('v1', 'blocked', 'maintenance_confirmation_required');
-                return false;
-            }
-            if ($legacy && $maintenance) { $this->state['maintenance_confirmed'] = true; $this->checkpoint('v1'); }
-            // There is no v5 migration. These are explicit historical steps, not a loop
-            // over integers; the schema inspector validates every required field/index.
+            // Known additive v2-v4/v6 differences are safe to repair. No
+            // history rows are read or rewritten on a compatible installation.
             $this->apply_schema($tables, $clean || $resuming_install);
-            $this->checkpoint('v1');
-            $backfill = $legacy || ($old['status'] ?? '') === 'pending' || $this->missing_path_rows();
-            if ($backfill) {
-                if (($old['status'] ?? '') !== 'pending') { unset($this->state['cursors']); }
-                if (!$this->backfill_paths($paths['map'])) { return false; }
-            }
-            $this->verify_path_rows($paths['map']);
-            if ($legacy) {
-                $this->owns();
-                // Refuse concurrent settings edits instead of overwriting new passwords.
-                if (self::read_option(ESP_Config::OPTION_KEY) !== $settings) {
-                    throw new RuntimeException('settings_changed');
-                }
-                $settings['path'] = $paths['paths'];
-                self::write_option(ESP_Config::OPTION_KEY, $settings);
-            }
             $changed = false;
             foreach ($settings['path'] as &$path) {
                 if (!array_key_exists('password_version', $path)) {
@@ -204,12 +189,12 @@ final class ESP_Migrator {
             $this->checkpoint('v2_v3_v4_v6_verify');
             $this->verify_schema($this->inspect());
             $verified = $this->path_map(self::read_option(ESP_Config::OPTION_KEY)['path']);
-            if ($verified['changed'] || !$this->verify_references($verified['paths'])) {
+            if (!$this->verify_references($verified['paths'])) {
                 throw new RuntimeException('path_reference_invalid');
             }
             $this->owns();
             self::write_option('esp_db_version', ESP_Config::OPTION_DEFAULTS['db_version']);
-            unset($this->state['clean_install'], $this->state['maintenance_confirmed']);
+            unset($this->state['clean_install'], $this->state['maintenance_confirmed'], $this->state['cursors']);
             $this->checkpoint('complete', 'complete');
             return true;
         } catch (Throwable $error) {
@@ -218,7 +203,7 @@ final class ESP_Migrator {
                 'invalid_db_version', 'invalid_plugin_version', 'partial_installation', 'path_reference_invalid',
                 'path_mapping_ambiguous', 'password_version_ambiguous', 'settings_changed', 'schema_incompatible',
                 'schema_read_failed', 'schema_write_failed', 'schema_verification_failed',
-                'future_or_invalid_migration_state'];
+                'future_or_invalid_migration_state', 'v1_migration_required'];
             $reason = in_array($error->getMessage(), $known, true) ? $error->getMessage() : 'migration_exception';
             // Before classification no mutation can have begun. Persisting an
             // unclassified failure as migration evidence would make an empty
@@ -296,7 +281,7 @@ final class ESP_Migrator {
             throw new RuntimeException('schema_incompatible');
         }
         // Only additive, known historical differences are repairable automatically.
-        $allowed_missing = ['brute' => ['path_id'], 'remember' => ['path_id', 'password_version'],
+        $allowed_missing = ['brute' => [], 'remember' => ['password_version'],
             'session' => ['password_version'], 'limit' => ['attempt_times', 'last_attempt_token']];
         foreach ($def['columns'] as $name => $sql) {
             $actual = $table['columns'][$name] ?? null;
@@ -387,7 +372,7 @@ final class ESP_Migrator {
     }
 
     private function path_map($paths) {
-        $map = []; $new = []; $changed = false;
+        $map = []; $new = [];
         foreach ($paths as $key => $path) {
             if (!is_array($path) || !isset($path['path']) || !is_string($path['path']) ||
                 trim($path['path'], " /\t\n\r") === '' || isset($map[$path['path']])) {
@@ -399,11 +384,10 @@ final class ESP_Migrator {
                     throw new RuntimeException('path_mapping_ambiguous');
                 }
             } else {
-                if (!is_int($key)) { throw new RuntimeException('path_mapping_ambiguous'); }
-                // Deterministic across interruption, including after DDL but before settings
-                // are written. Existing assigned IDs always take precedence.
-                $id = 'path_' . substr(hash('sha256', $path['path']), 0, 32);
-                $path['id'] = $id; $changed = true;
+                // Never assign IDs to v1 settings automatically: credentials
+                // must not be rebound to a newly derived identifier.
+                if (is_int($key)) { throw new RuntimeException('v1_migration_required'); }
+                throw new RuntimeException('path_mapping_ambiguous');
             }
             // The retired_ namespace is reserved for non-authenticatable
             // historical rows, never for active protection identities.
@@ -412,134 +396,23 @@ final class ESP_Migrator {
             }
             $new[$id] = $path; $map[$path['path']] = $id;
         }
-        return ['map' => $map, 'paths' => $new, 'changed' => $changed];
+        return ['paths' => $new];
     }
 
-    private function backfill_paths($map) {
-        global $wpdb;
-        $active_ids = array_fill_keys(array_values($map), true);
-        foreach (['brute', 'remember'] as $kind) {
-            $cursor = (int) ($this->state['cursors'][$kind] ?? 0);
-            $rows = $wpdb->get_results($wpdb->prepare('SELECT id, path, path_id FROM ' .
-                $this->table($kind) . ' WHERE id > %d ORDER BY id LIMIT %d', $cursor, self::BATCH_SIZE), ARRAY_A);
-            if ($wpdb->last_error !== '' || !is_array($rows)) { throw new RuntimeException('schema_read_failed'); }
-            foreach ($rows as $row) {
-                $expected = $map[$row['path']] ?? null;
-                if ($expected !== null) {
-                    // Stale history IDs are inert; never rewrite them to the current
-                    // path ID. A different *active* ID, however, is an invalid link.
-                    if ($row['path_id'] !== '' && $row['path_id'] !== $expected &&
-                        isset($active_ids[$row['path_id']])) {
-                        throw new RuntimeException('path_mapping_ambiguous');
-                    }
-                    if ($row['path_id'] === '') {
-                        $this->sql($wpdb->prepare('UPDATE ' . $this->table($kind) . ' SET path_id = %s WHERE id = %d AND path_id = %s',
-                            $expected, $row['id'], ''));
-                    }
-                } elseif ($row['path_id'] === '') {
-                    // Do not leave deleted-path history unassigned: a later re-add
-                    // would otherwise bind its old credentials to the new path ID.
-                    // Assign a deterministic inert ID only to previously blank rows.
-                    $retired_id = 'retired_' . substr(hash('sha256', $row['path']), 0, 40);
-                    if (isset($active_ids[$retired_id])) { throw new RuntimeException('path_mapping_ambiguous'); }
-                    $this->sql($wpdb->prepare('UPDATE ' . $this->table($kind) . ' SET path_id = %s WHERE id = %d AND path_id = %s',
-                        $retired_id, $row['id'], ''));
-                }
-                $cursor = (int) $row['id'];
-            }
-            $this->state['cursors'][$kind] = $cursor;
-            $this->checkpoint('v1_backfill_' . $kind);
-            if (count($rows) === self::BATCH_SIZE) {
-                $this->checkpoint('v1_backfill_' . $kind, 'pending'); return false;
-            }
-        }
-        return true;
-    }
-
-    /**
-     * Permit detached historical IDs, but not a reference to another active
-     * path: remember authentication identifies its scope by path_id.
-     * After backfill, unassigned rows are also invalid for active paths.
+    /** Only v2-v4 password-version additions need row-level preflight.
+     * Query current IDs via their indexes, never enumerate authentication
+     * history. V1 without path_id is rejected before this method.
      */
-    private function assert_active_path_links($kind, $map, $require_assigned) {
-        global $wpdb;
-        if ($map === []) { return; }
-
-        // A single primary-key walk replaces one increasingly large IN(...) SQL
-        // statement per protected path. Memory and SQL size are bounded by the
-        // same fixed batch limit used by the V1 migration.
-        $active_ids = array_fill_keys(array_values($map), true);
-        $cursor = 0;
-        do {
-            $rows = $wpdb->get_results($wpdb->prepare('SELECT id, path, path_id FROM ' .
-                $this->table($kind) . ' WHERE id > %d ORDER BY id LIMIT %d',
-                $cursor, self::BATCH_SIZE), ARRAY_A);
-            if ($wpdb->last_error !== '' || !is_array($rows)) {
-                throw new RuntimeException('schema_read_failed');
-            }
-            foreach ($rows as $row) {
-                $cursor = (int) $row['id'];
-                $expected = $map[$row['path']] ?? null;
-                if ($expected === null) { continue; }
-                $actual = $row['path_id'];
-                if (($require_assigned && $actual === '') ||
-                    ($actual !== $expected && isset($active_ids[$actual]))) {
-                    throw new RuntimeException('path_mapping_ambiguous');
-                }
-            }
-        } while (count($rows) === self::BATCH_SIZE);
-    }
-
-    private function verify_path_rows($map) {
-        foreach (['brute', 'remember'] as $kind) {
-            $this->assert_active_path_links($kind, $map, true);
-        }
-    }
-
-    private function missing_path_rows() {
-        global $wpdb;
-        // This includes retired-path history even when no active paths remain.
-        foreach (['brute', 'remember'] as $kind) {
-            $row = $wpdb->get_var('SELECT id FROM ' . $this->table($kind) . " WHERE path_id = '' LIMIT 1");
-            if ($wpdb->last_error !== '') { throw new RuntimeException('schema_read_failed'); }
-            if ($row !== null) { return true; }
-        }
-        return false;
-    }
-
-    private function preflight_path_rows($tables, $paths, $legacy) {
+    private function preflight_password_versions($tables, $paths) {
         global $wpdb;
         foreach (['remember', 'session'] as $kind) {
             if ($tables[$kind] === null || isset($tables[$kind]['columns']['password_version'])) { continue; }
             foreach ($paths['paths'] as $id => $path) {
                 if ((int) ($path['password_version'] ?? 0) === 0) { continue; }
-                // A missing version column cannot reconstruct a nonzero password
-                // generation for an existing token. Do not silently expire that login
-                // by guessing zero, or revive it by guessing the current generation.
-                $by_id = isset($tables[$kind]['columns']['path_id']);
-                // A partial migration can have path_id='' rows even with the
-                // column present. Never guess their missing password generation.
-                $unassigned_remember = $kind === 'remember' && $by_id;
-                $where = $unassigned_remember
-                    ? " WHERE BINARY path_id = BINARY %s OR (path_id = '' AND BINARY path = BINARY %s)"
-                    : ($by_id ? ' WHERE BINARY path_id = BINARY %s' : ' WHERE BINARY path = BINARY %s');
-                $args = $unassigned_remember ? [$id, $path['path']] : [$by_id ? $id : $path['path']];
                 $row = $wpdb->get_var($wpdb->prepare('SELECT id FROM ' . $this->table($kind) .
-                    $where . ' LIMIT 1', $args));
+                    ' WHERE BINARY path_id = BINARY %s LIMIT 1', $id));
                 if ($wpdb->last_error !== '') { throw new RuntimeException('schema_read_failed'); }
                 if ($row !== null) { throw new RuntimeException('password_version_ambiguous'); }
-            }
-        }
-        foreach (['brute', 'remember'] as $kind) {
-            if (!isset($tables[$kind]['columns']['path_id'])) { continue; }
-            $this->assert_active_path_links($kind, $paths['map'], false);
-        }
-        if ($legacy && $tables['session'] !== null) {
-            $ids = $wpdb->get_col('SELECT DISTINCT path_id FROM ' . $this->table('session') .
-                ' LIMIT ' . (count($paths['paths']) + 1));
-            if ($wpdb->last_error !== '') { throw new RuntimeException('schema_read_failed'); }
-            foreach ($ids as $id) {
-                if (!isset($paths['paths'][$id])) { throw new RuntimeException('path_mapping_ambiguous'); }
             }
         }
     }
