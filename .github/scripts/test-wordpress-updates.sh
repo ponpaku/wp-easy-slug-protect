@@ -7,10 +7,18 @@ curl --fail --location --retry 2 https://raw.githubusercontent.com/wp-cli/builds
 php "$fixture_root/wp-cli.phar" --allow-root --path="$fixture_root/wordpress" config create --dbname=esp_wp44 --dbuser=root --dbpass= --dbhost=127.0.0.1 --skip-check
 php "$fixture_root/wp-cli.phar" --allow-root --path="$fixture_root/wordpress" core install --url=http://esp44.example.test --title=ESP44 --admin_user=esp-test --admin_password=disposable-ci-test-only --admin_email=esp@example.test --skip-email
 export ESP_WP_ROOT="$fixture_root/wordpress" ESP_ALLOW_DISPOSABLE_DB=1
+# Build once, or consume the exact ZIP already created for release.
+export ESP_TARGET_VERSION="${ESP_TARGET_VERSION:-$(sed -nE 's/^ \\* Version: ([0-9]+\\.[0-9]+\\.[0-9]+)$/\\1/p' easy-slug-protect.php)}"
+if [[ -z "${ESP_PR_ZIP:-}" ]]; then
+  python3 tools/build-release.py --tag "v$ESP_TARGET_VERSION"
+  export ESP_PR_ZIP="$PWD/dist/easy-slug-protect-$ESP_TARGET_VERSION.zip"
+fi
+python3 tools/build-release.py --tag "v$ESP_TARGET_VERSION" --verify-zip "$ESP_PR_ZIP"
+# Release archive must install, activate and boot in three fresh workers.
+for stage in install activate verify; do
+  ESP_SMOKE_STAGE="$stage" php tests/wordpress-release-smoke.php
+done
 # These are actual historical commits, not a synthetic version string.
-# The PR's installable ZIP is built from exactly the tested checkout.
-python3 tools/build-release.py
-export ESP_PR_ZIP="$PWD/dist/easy-slug-protect-0.7.40.zip"
 plugin_dir="$ESP_WP_ROOT/wp-content/plugins/easy-slug-protect"
 for version_sha in \
   "0.7.38:f2b8ca54130be4530bcb5e8a0663be12111a16b0" \
@@ -25,6 +33,13 @@ for version_sha in \
     ESP_LEGACY_STAGE="$stage" php tests/wordpress-legacy-upgrade-integration.php
   done
 done
+# Release workflow only needs tests which exercise the release ZIP itself.
+# The PR CI additionally runs the complete migration, simulated next release,
+# auto-update and rollback suites below.
+if [[ "${ESP_ONLY_RELEASE_GATES:-0}" == 1 ]]; then
+  echo "PASS: exact Stable Release ZIP boots and upgrades both historical versions"
+  exit 0
+fi
 php tests/wordpress-update-integration.php
 # Fresh PHP processes avoid the WP_CLI shortcut used by the migration fixture.
 for entry in ajax post cron; do
