@@ -19,6 +19,10 @@ final class ESP_Updater {
         // Also registered when the protection gate is pending/failed.
         add_filter('update_plugins_github.com', [self::class, 'update_metadata'], 10, 4);
         add_filter('plugins_api', [self::class, 'plugin_information'], 10, 3);
+        // Single non-Cron Plugin_Upgrader::upgrade() silently deactivates
+        // active plugins before replacing files and does not enable Core
+        // maintenance mode. Refuse only that path before any download.
+        add_filter('upgrader_pre_download', [self::class, 'refuse_unsafe_single_upgrade'], 1, 4);
         add_filter('upgrader_pre_download', [self::class, 'download_package'], 10, 4);
         add_filter('upgrader_source_selection', [self::class, 'validate_source'], 10, 4);
         add_action('esp_update_retry', static function () use ($setup) {
@@ -130,6 +134,29 @@ final class ESP_Updater {
                 'description' => esc_html__('URLの階層ごとにパスワード保護を行います。更新はGitHubの公開Stable Releaseから取得します。', ESP_Config::TEXT_DOMAIN),
                 'changelog' => '<pre>' . esc_html($r['notes']) . '</pre>',
             ]];
+    }
+
+    /**
+     * The usual AJAX bulk updater and Cron updater keep their Core
+     * maintenance handling. Only non-Cron Plugin_Upgrader::upgrade() installs
+     * a silent-deactivation pre-install callback without maintenance mode.
+     * Check that *actual registered callback* rather than guessing from a
+     * screen, filename or PHP class: bulk and single share that class.
+     */
+    public static function refuse_unsafe_single_upgrade($reply, $package, $upgrader, $extra = []) {
+        if (is_wp_error($reply) ||
+            ($extra['plugin'] ?? null) !== self::basename() ||
+            (isset($extra['action']) && $extra['action'] !== 'update') ||
+            (function_exists('wp_doing_cron') ? wp_doing_cron() :
+                (defined('DOING_CRON') && DOING_CRON))) {
+            return $reply;
+        }
+        if ($upgrader instanceof Plugin_Upgrader &&
+            has_filter('upgrader_pre_install', [$upgrader, 'deactivate_plugin_before_upgrade']) !== false) {
+            return new WP_Error('esp_unsafe_single_upgrade',
+                'ESP: this single-plugin update would temporarily disable protection; use the standard AJAX/bulk updater or external maintenance.');
+        }
+        return $reply;
     }
 
     public static function allowed_download_url($url) {
