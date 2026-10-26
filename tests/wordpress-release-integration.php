@@ -163,23 +163,27 @@ wp_clean_plugins_cache(); wp_update_plugins();
 $updates = get_site_transient('update_plugins');
 check_release(isset($updates->response[$plugin]) && $updates->response[$plugin]->new_version === '0.7.41', 'Core discovers the release via Update URI');
 $item = $updates->response[$plugin];
-// Core's non-Cron single upgrade registers a silent-deactivation callback
-// without maintenance. Reject it BEFORE the download/filename replacement.
-$single = new Plugin_Upgrader(new Automatic_Upgrader_Skin());
-$single_result = $single->upgrade($plugin);
-if (!is_wp_error($single_result) ||
-    $single_result->get_error_code() !== 'esp_unsafe_single_upgrade') {
-    echo 'Single upgrade diagnostic: ' . (is_wp_error($single_result)
-        ? $single_result->get_error_code() : var_export($single_result, true)) . "\n";
-    echo 'Active after single: ' . (is_plugin_active($plugin) ? 'yes' : 'no') . "\n";
-    echo 'Version after single: ' . get_plugin_data($installed . '/easy-slug-protect.php')['Version'] . "\n";
+// Core's non-Cron single upgrade registers silent deactivation without
+// maintenance. Core may report NULL for a pre-download WP_Error, so observe
+// the filter itself and assert that neither plugin state nor bytes changed.
+if (!$automatic) {
+    $single_blocked = false;
+    $observe_single = static function ($reply) use (&$single_blocked) {
+        if (is_wp_error($reply) && $reply->get_error_code() === 'esp_unsafe_single_upgrade') {
+            $single_blocked = true;
+        }
+        return $reply;
+    };
+    add_filter('upgrader_pre_download', $observe_single, 2, 4);
+    $single = new Plugin_Upgrader(new Automatic_Upgrader_Skin());
+    $single_result = $single->upgrade($plugin);
+    remove_filter('upgrader_pre_download', $observe_single, 2);
+    check_release($single_blocked && $single_result !== true &&
+        is_plugin_active($plugin) &&
+        get_plugin_data($installed . '/easy-slug-protect.php')['Version'] === '0.7.40' &&
+        get_option(ESP_Protection_State::RUNTIME_STATE_OPTION)['state'] === 'READY',
+        'non-Cron single upgrader refuses silent deactivation before changing ESP');
 }
-check_release(is_wp_error($single_result) &&
-    $single_result->get_error_code() === 'esp_unsafe_single_upgrade' &&
-    is_plugin_active($plugin) &&
-    get_plugin_data($installed . '/easy-slug-protect.php')['Version'] === '0.7.40' &&
-    get_option(ESP_Protection_State::RUNTIME_STATE_OPTION)['state'] === 'READY',
-    'non-Cron single upgrader refuses silent deactivation before changing ESP');
 $rollback = getenv('ESP_TEST_FATAL_ROLLBACK') === '1';
 class FatalFixtureAutomaticUpdater extends WP_Automatic_Updater {
     protected function has_fatal_error() { return true; }
