@@ -163,6 +163,16 @@ wp_clean_plugins_cache(); wp_update_plugins();
 $updates = get_site_transient('update_plugins');
 check_release(isset($updates->response[$plugin]) && $updates->response[$plugin]->new_version === '0.7.41', 'Core discovers the release via Update URI');
 $item = $updates->response[$plugin];
+// Core's non-Cron single upgrade registers a silent-deactivation callback
+// without maintenance. Reject it BEFORE the download/filename replacement.
+$single = new Plugin_Upgrader(new Automatic_Upgrader_Skin());
+$single_result = $single->upgrade($plugin);
+check_release(is_wp_error($single_result) &&
+    $single_result->get_error_code() === 'esp_unsafe_single_upgrade' &&
+    is_plugin_active($plugin) &&
+    get_plugin_data($installed . '/easy-slug-protect.php')['Version'] === '0.7.40' &&
+    get_option(ESP_Protection_State::RUNTIME_STATE_OPTION)['state'] === 'READY',
+    'non-Cron single upgrader refuses silent deactivation before changing ESP');
 $rollback = getenv('ESP_TEST_FATAL_ROLLBACK') === '1';
 class FatalFixtureAutomaticUpdater extends WP_Automatic_Updater {
     protected function has_fatal_error() { return true; }
