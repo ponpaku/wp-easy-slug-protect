@@ -5,13 +5,17 @@
  *
  * ESP_LEGACY_STAGE=prepare|install|verify
  * ESP_LEGACY_VERSION=0.7.38|0.7.39
- * ESP_PR_ZIP=/absolute/path/to/easy-slug-protect-0.7.40.zip
+ * ESP_PR_ZIP=/absolute/path/to/easy-slug-protect-<target>.zip
+ * ESP_TARGET_VERSION=<released version>
  */
 $stage = getenv('ESP_LEGACY_STAGE');
 $old_version = getenv('ESP_LEGACY_VERSION');
+$target_version = getenv('ESP_TARGET_VERSION') ?: '0.7.40';
 if (getenv('ESP_ALLOW_DISPOSABLE_DB') !== '1' || !getenv('ESP_WP_ROOT') ||
     !in_array($stage, ['prepare', 'install', 'verify'], true) ||
-    !in_array($old_version, ['0.7.38', '0.7.39'], true)) { exit(1); }
+    !in_array($old_version, ['0.7.38', '0.7.39'], true) ||
+    !preg_match('/^[0-9]+[.][0-9]+[.][0-9]+$/D', $target_version) ||
+    version_compare($target_version, $old_version, '<=')) { exit(1); }
 define('WP_DISABLE_FATAL_ERROR_HANDLER', true);
 define('FS_METHOD', 'direct');
 define('WP_ADMIN', true);
@@ -141,19 +145,19 @@ if ($stage === 'install') {
     WP_Filesystem();
     $upgrader = new Plugin_Upgrader(new Automatic_Upgrader_Skin());
     $result = $upgrader->install($zip, ['overwrite_package' => true]);
-    legacy_check($result === true, 'Core Plugin_Upgrader::install overwrite succeeds: ' . $old_version . ' -> 0.7.40');
+    legacy_check($result === true, 'Core Plugin_Upgrader::install overwrite succeeds: ' . $old_version . ' -> ' . $target_version);
     legacy_check(is_plugin_active($plugin) && is_file($file),
         'overwrite leaves same plugin basename active');
     $header = get_plugin_data($file);
-    legacy_check($header['Version'] === '0.7.40' && ESP_VERSION === $old_version,
+    legacy_check($header['Version'] === $target_version && ESP_VERSION === $old_version,
         'new PHP files installed but updater process still executes old code');
     echo "Overwrote original {$old_version} with PR release ZIP.\n";
     exit(0);
 }
 // Verify only under a fresh PHP worker after the real Core overwrite.
 // wp-load already executed plugins_loaded with the installed 0.7.40 active.
-legacy_check(defined('ESP_VERSION') && ESP_VERSION === '0.7.40',
-    'fresh worker loads actual PR 0.7.40 code');
+legacy_check(defined('ESP_VERSION') && ESP_VERSION === $target_version,
+    'fresh worker loads actual PR ' . $target_version . ' code');
 legacy_check(is_plugin_active($plugin), 'updated plugin is active');
 wp_set_current_user(1);
 if (!did_action('wp_loaded')) { do_action('wp_loaded'); }
@@ -178,4 +182,4 @@ legacy_check($verified &&
     get_option('esp_plugin_version') === ESP_VERSION &&
     get_option('esp_update_state')['status'] === 'complete',
     'fresh PR worker verifies real preexisting schema and commits ready version');
-echo "PASS: real upstream {$old_version} -> PR 0.7.40 Core ZIP upgrade verified.\n";
+echo "PASS: real upstream {$old_version} -> PR {$target_version} Core ZIP upgrade verified.\n";
