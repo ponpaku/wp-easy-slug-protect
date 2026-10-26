@@ -76,8 +76,8 @@ v1特殊移行対象は管理画面で `v1_migration_required` を通知する�
 
 1. DB、プラグインファイル、uploads/.htaccess と第三者ルールをセットでバックアップし、保守環境で復旧を試す。WordPress のファイル一時バックアップは DB 復旧ではない。保護機能本体のファイルが存在しなくなった状態でCoreの10分期限付きmaintenanceを放置する障害やCDNキャッシュの機密性は本PRだけでは保証しない。
 2. **初回ZIP上書き（Q01）は通常更新の保証対象外。** 0.7.39以前には新Updaterがない。公開HTTPと直メディア/CDNをWebサーバー・WAFなどで外部遮断し、旧PHPワーカー・Cronを排出。バックアップ後に管理下で0.7.40 ZIPを上書き、有効状態・DB・設定・Rewrite・実HTTPの非露出を検証してから外部遮断解除する。導入失敗時も外部遮断を維持しバックアップから復旧する。0.7.39 には更新検出機能がないため、0.7.40 導入までは手動 ZIP が必要。**このPRのGitHub Stable Release更新検出は、ESPプラグインが有効な場合のみ保証する。** 無効化中はESP本体がロードされず `update_plugins_github.com` フックを登録できないため、WordPress標準更新一覧でのStable検出を保証しない。無効化中の導入は管理者が配布ZIPを確認して手動更新する。通常利用では、正常に管理画面検証が完了するまで自動更新の運用へ移さない。
-3. main でレビュー・検証後、`python3 tools/build-release.py --tag v0.7.40` でビルド。タグ、ヘッダー、ESP_VERSION、Update URI、必須ファイル、easy-slug-protect/easy-slug-protect.php を検査する。ZIP は追跡済み runtime ファイルのみを含む。tests、docs、CI、.git、ビルドツール、README を含めない。
-4. v* タグの workflow は main の祖先であることを確認して **draft** Release と専用 `easy-slug-protect-<version>.zip`/SHA-256 を作る。自動では公開しない。workflow_dispatch/タグ作成は今回実行していない。
+3. main でレビュー・検証後、`python3 tools/build-release.py --tag v0.7.40` でビルド。タグ、ヘッダー、ESP_VERSION、Update URI を照合し、起動コードの `require_once ESP_PATH . '...'` を読み取って起動必須ファイルを抽出する。各ファイルが追跡済みの通常ファイルであることを確認し、**ZIP収録ファイル一覧・ディレクトリ構造・全ファイルの内容がGitのワークツリーと完全一致**することをビルド直後に確認する。tests、docs、CI、.git、ビルドツール、README を含めない。必要な起動ファイルが欠ける場合は ZIP を配布しない。
+4. v* タグの workflow は main の祖先であることを確認した後、ZIPを**一度だけビルド**し、内部ファイルの欠損・重複・余分な項目・ソースからの改変を拒否。SHA-256、ZIP展開後の全PHP構文を検査し、同一ZIPを使い捨てWordPressに **実インストール→有効化→別PHPで起動**。さらに実0.7.38/0.7.39からCoreのZIP上書き・旧データ保持・新コード検証を実行する。欠損 `class-esp-core.php`、改変したPHP、余分なZIP内項目を、新しい正当なSHA-256でも拒否する負例テストを通す。いずれか失敗なら **Draft Releaseは作成しない**。全合格ZIPとchecksumだけをActions artifactで別の作成ジョブへ渡し、そこでは再ビルドせず同一バイトを検査してDraft Releaseに添付し、添付後もGitHubから再取得してバイト照合する。**公開は自動で行わない。** workflow_dispatch/タグ作成は今回実行していない。将来版でもバージョンはタグとヘッダーから取得する。
 5. 配布担当者が内容・バックアップ/復旧・対象環境の実 HTTP・CI を確認後、Stable として公開し latest に指定する。タグ/Release の書込権限を最小化し、GitHub の tag ruleset、保護された main、必須レビューを設定する。設定済みとの主張はしない。
 6. 次の Stable へ標準AJAX/bulk経路で手動更新・利用者設定に従うCron自動更新を確認する。非Cronの単体 Plugin_Upgrader::upgrade() はCoreの一時無効化が保護を途切れさせるため事前拒否し、外部保守遮断なしには使用しない。draft/prerelease や同版・旧版、欠落 asset は更新対象にしない。
 
@@ -85,7 +85,7 @@ GitHub の source 自動生成 ZIP にはフォールバックしない。公開
 
 標準 download_url とアップグレーダーを使い、独自のファイル置換エンジンは作らない。最初の URL は固定 repository の正規 asset URL。リダイレクトは HTTPS の GitHub 同 repository releases/download と release-assets.githubusercontent.com のみ、3 回まで、認証情報/別 port/fragment を拒否。ZIP は 20 MiB 上限、取得後 size/SHA-256、展開後のヘッダー/ESP_VERSION/必須ファイルを検証する。Requires PHP / Requires at least が宣言されている場合は配置前に実行環境と照合し、不適合・不正な要件を拒否する (Core の各種 upgrade と bulk/install の検査差異を補完)。最低要件がない版に独自の最低値は加えない。
 
-**配布元侵害の限界:** API と asset は同じ GitHub の信頼境界。SHA-256 は破損/取り違え検知であり、repository/Release 権限侵害者が ZIP と digest を同時に差し替える攻撃の独立した署名ではない。独立署名/別経路の attestations は未実装。
+**配布元侵害の限界:** Releaseの検査済みZIPとchecksumを手動で差し替えない運用と、タグ・Draft Releaseを扱う権限の最小化が必要。GitHub管理者による公開後の資産差替えをWordPress実行時のSHA-256照合だけで防ぐことはできない。API と asset は同じ GitHub の信頼境界。SHA-256 は破損/取り違え検知であり、repository/Release 権限侵害者が ZIP と digest を同時に差し替える攻撃の独立した署名ではない。独立署名/別経路の attestations は未実装。
 
 途中失敗時は標準アップグレーダーのファイル復元を使い、新コードの DB 移行を旧 PHP の完了フックで走らせない。新コードで DB/完了版が進んだ後の手動ダウングレードは互換性不明として停止する。必要なら保守停止下でファイル・DB・Rewrite の **同じバックアップ時点** を復元し、その版の動作を検証する。版印だけを消す/小さくする復旧手順は採らない。非互換の destructive migration は通常自動更新に載せない。
 
@@ -93,7 +93,7 @@ GitHub の source 自動生成 ZIP にはフォールバックしない。公開
 
 `tests/wordpress-update-integration.php` は opt-in した esp_ で始まる使い捨て DB 上で実行する。GET_LOCK取得後の接続切断と別プロセスのUPDATING書込を挟み、旧所有者の状態書戻しがDBで拒否されることも検証する。 初回DB検査に一度だけSQL読取エラーを発生させ、Cronから管理者操作なしでruntimeがFAILED→READYへ復旧すること、スキーマ不整合は自動再試行しないことを検証する。新規/既存版印なし、v1特殊移行対象の診断とデータ非変更、v2/v3/v4の既知の追加補修、現行互換DBでの履歴読取0件、未来版、列/索引、SQL read/write 故障、実 ALTER 権限拒否、複数接続/切断/旧所有者を確認する。通常の marker/path/schema テストも新しい責務へ移管し、既存の保護・Rewrite・認可・認証・アンインストール回帰を維持する。
 
-`.github/scripts/test-wordpress-updates.sh` は WordPress 7.1.3 と使い捨て DB で、**実際の旧ソース2版からPR版ZIPへの上書き試験**も実行する。`0.7.38`（main直前の親コミット `f2b8ca5`）と `0.7.39`（main `b6315e8`）を `git archive` で導入し、旧コードでDB・設定・パスワード・brute/remember/session行・保護投稿/メディアメタを作成する。PRの `tools/build-release.py` が作る `easy-slug-protect-0.7.40.zip` を **WordPress Core `Plugin_Upgrader::install(..., overwrite_package=true)`** で上書き後、別PHPプロセスの新コードでruntime READY・完了版印・元データ同一性を検証する。2026-10-26時点のCIで2経路とも成功。旧PHPのプロセス中に新PHPクラスへ切替えたと誤認しない。**これらは使い捨て環境内の実Core ZIP上書きであり、実Web管理画面UI・並行HTTP・外部遮断・異常終了/バックアップ復旧を実証した意味ではない。**
+`.github/scripts/test-wordpress-updates.sh` は WordPress 7.1.3 と使い捨て DB で、**実際の旧ソース2版からPR版ZIPへの上書き試験**も実行する。完成した同一ZIPの新規Core install/activate/別PHPでの起動試験も行い、ビルドとは独立したZIPを受け取って試験する方式をRelease Actionから共有する。`0.7.38`（main直前の親コミット `f2b8ca5`）と `0.7.39`（main `b6315e8`）を `git archive` で導入し、旧コードでDB・設定・パスワード・brute/remember/session行・保護投稿/メディアメタを作成する。PRの `tools/build-release.py` が作る `easy-slug-protect-0.7.40.zip` を **WordPress Core `Plugin_Upgrader::install(..., overwrite_package=true)`** で上書き後、別PHPプロセスの新コードでruntime READY・完了版印・元データ同一性を検証する。2026-10-26時点のCIで2経路とも成功。旧PHPのプロセス中に新PHPクラスへ切替えたと誤認しない。**これらは使い捨て環境内の実Core ZIP上書きであり、実Web管理画面UI・並行HTTP・外部遮断・異常終了/バックアップ復旧を実証した意味ではない。**
 
 `.github/scripts/test-wordpress-updates.sh` は WordPress 7.1.3 と使い捨て DB で移行試験に加え、標準 Plugin_Upgrader/WP_Automatic_Updater に synthetic 0.7.41 asset を渡す。標準/任意フォルダ × bulk手動/自動の 4 経路に加え、実際の単体upgrade()を実行し無効化前に拒否されること、Core の no_update/利用者設定、破損 ZIP、別 PHP worker による後処理、Core の fatal 判定後の実ファイル復元を確認する。GitHub API/asset と Core の loopback は fixture 応答。実際の fatal 判定自体は注入し、PHP 致命エラーの実 loopback を合格と主張しない。
 
