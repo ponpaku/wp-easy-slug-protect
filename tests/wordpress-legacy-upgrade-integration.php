@@ -52,9 +52,20 @@ if ($stage === 'prepare') {
     update_option('active_plugins', []);
     require $file;
     legacy_check(ESP_VERSION === $old_version, 'real upstream PHP version matches ' . $old_version);
-    new Easy_Slug_Protect(); // Load original dependencies and original Setup.
+    // 0.7.39 has a public dependency loader: activate it BEFORE booting its
+    // runtime gate (which correctly rejects a site before tables exist).
+    // 0.7.38 has a private loader and still uses its original constructor.
+    $loader = new ReflectionMethod(Easy_Slug_Protect::class, 'load_dependencies');
+    if ($loader->isPublic()) {
+        Easy_Slug_Protect::load_dependencies();
+    } else {
+        new Easy_Slug_Protect();
+    }
     $setup = new ESP_Setup();
-    $setup->activate();
+    $activation = $setup->activate();
+    if ($old_version === '0.7.39') {
+        legacy_check($activation === true, 'original 0.7.39 activation verifies before legacy fixture data');
+    }
     legacy_check((int) get_option('esp_db_version') === 6,
         'original ' . $old_version . ' installed actual schema v6');
     $settings = get_option('esp_settings');
