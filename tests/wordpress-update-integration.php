@@ -363,6 +363,44 @@ $wpdb = $main_db;
 t(ESP_Protection_State::owns_verification_lock($held), 'stale/nonowner release cannot free current lock');
 ESP_Protection_State::release_verification_lock($held);
 
+// Runtime state writes use lock-owned CAS, not a checked-then-unconditional
+// update_option(). Force the same reconnect window as R02: the old owner
+// checked the lock but dies before its SQL executes; another owner writes.
+create_current(); settings_fixture();
+option_db(ESP_Protection_State::RUNTIME_STATE_OPTION,
+    ['state' => 'READY', 'version' => ESP_VERSION]);
+$held = ESP_Protection_State::acquire_verification_lock();
+t(is_array($held), 'runtime CAS fixture obtains owner A');
+$runtime_write = new ReflectionMethod(ESP_Protection_State::class, 'set_runtime_state');
+$injected_cas = false;
+$other_acquired = false;
+$intercept_cas = static function ($sql) use (&$injected_cas, &$other_acquired, $held, $other_db) {
+    if (!$injected_cas && preg_match('/^UPDATE\\s+`?[^\\s`]*options`?\\s+SET\\s+option_value/i', trim($sql)) &&
+        strpos($sql, "'esp_runtime_state'") !== false &&
+        strpos($sql, 'IS_USED_LOCK') !== false) {
+        $injected_cas = true;
+        $killed = $other_db->query('KILL CONNECTION ' . (int) $held['connection']);
+        $owner = $other_db->get_var($other_db->prepare('SELECT GET_LOCK(%s, 2)', $held['name']));
+        $other_acquired = $killed !== false && (string) $owner === '1';
+        if ($other_acquired) {
+            $other_db->query($other_db->prepare(
+                "UPDATE `{$other_db->options}` SET option_value = %s WHERE option_name = %s",
+                maybe_serialize(['state' => 'UPDATING', 'version' => ESP_VERSION, 'since' => 123]),
+                ESP_Protection_State::RUNTIME_STATE_OPTION));
+        }
+    }
+    return $sql;
+};
+add_filter('query', $intercept_cas);
+$stale_runtime_written = $runtime_write->invoke(null, 'FAILED', $held);
+remove_filter('query', $intercept_cas);
+$winner = ESP_Migrator::read_option(ESP_Protection_State::RUNTIME_STATE_OPTION);
+t($injected_cas && $other_acquired && !$stale_runtime_written &&
+    $winner['state'] === 'UPDATING' && $winner['since'] === 123,
+    'reconnected stale runtime writer cannot overwrite new lock owner UPDATING state');
+ESP_Protection_State::release_verification_lock($held);
+$other_db->get_var($other_db->prepare('SELECT RELEASE_LOCK(%s)', $held['name']));
+
 // DDL permission failure must not advance the completion marker.
 create_current(); settings_fixture(); option_db('esp_db_version', 2);
 $wpdb->query('ALTER TABLE ' . table_name('remember') . ' DROP COLUMN password_version');
