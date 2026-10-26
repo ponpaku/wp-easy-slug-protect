@@ -8,7 +8,7 @@ php "$fixture_root/wp-cli.phar" --allow-root --path="$fixture_root/wordpress" co
 php "$fixture_root/wp-cli.phar" --allow-root --path="$fixture_root/wordpress" core install --url=http://esp44.example.test --title=ESP44 --admin_user=esp-test --admin_password=disposable-ci-test-only --admin_email=esp@example.test --skip-email
 export ESP_WP_ROOT="$fixture_root/wordpress" ESP_ALLOW_DISPOSABLE_DB=1
 # Build once, or consume the exact ZIP already created for release.
-export ESP_TARGET_VERSION="${ESP_TARGET_VERSION:-$(sed -nE 's/^ \\* Version: ([0-9]+\\.[0-9]+\\.[0-9]+)$/\\1/p' easy-slug-protect.php)}"
+export ESP_TARGET_VERSION="${ESP_TARGET_VERSION:-$(awk '/^ [*] Version:/ {print $3; exit}' easy-slug-protect.php)}"
 if [[ -z "${ESP_PR_ZIP:-}" ]]; then
   python3 tools/build-release.py --tag "v$ESP_TARGET_VERSION"
   export ESP_PR_ZIP="$PWD/dist/easy-slug-protect-$ESP_TARGET_VERSION.zip"
