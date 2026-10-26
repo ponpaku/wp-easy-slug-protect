@@ -118,6 +118,8 @@ jobs:
       - name: Build installable WordPress ZIP
         run: |
           python3 tools/build-release.py
+          python3 tools/test-release-package.py
+          (cd dist && sha256sum -c *.sha256)
           if python3 tools/build-release.py --tag v999.0.0; then
             echo 'Mismatched tag accepted' >&2
             exit 1
