@@ -1,0 +1,163 @@
+<?php
+/**
+ * Real upstream-version -> PR ZIP upgrade. Every stage is a fresh PHP process.
+ * Never run outside a disposable WordPress/MySQL database named esp_*.
+ *
+ * ESP_LEGACY_STAGE=prepare|install|verify
+ * ESP_LEGACY_VERSION=0.7.38|0.7.39
+ * ESP_PR_ZIP=/absolute/path/to/easy-slug-protect-0.7.40.zip
+ */
+$stage = getenv('ESP_LEGACY_STAGE');
+$old_version = getenv('ESP_LEGACY_VERSION');
+if (getenv('ESP_ALLOW_DISPOSABLE_DB') !== '1' || !getenv('ESP_WP_ROOT') ||
+    !in_array($stage, ['prepare', 'install', 'verify'], true) ||
+    !in_array($old_version, ['0.7.38', '0.7.39'], true)) { exit(1); }
+define('WP_DISABLE_FATAL_ERROR_HANDLER', true);
+define('FS_METHOD', 'direct');
+define('WP_ADMIN', true);
+if ($stage !== 'verify') {
+    define('WP_INSTALLING', true); // Bootstrap without a prior fixture's plugin.
+} else {
+    define('WP_CLI', true); // Permit trusted migration in the fresh new PHP worker.
+}
+$_SERVER['SERVER_SOFTWARE'] = 'Apache/2.4';
+require rtrim(getenv('ESP_WP_ROOT'), '/') . '/wp-load.php';
+wp_installing(false);
+if (strpos(DB_NAME, 'esp_') !== 0) { throw new RuntimeException('Refusing non-disposable database'); }
+require_once ABSPATH . 'wp-admin/includes/admin.php';
+require_once ABSPATH . 'wp-admin/includes/plugin.php';
+require_once ABSPATH . 'wp-admin/includes/file.php';
+require_once ABSPATH . 'wp-admin/includes/class-wp-upgrader.php';
+function legacy_check($valid, $message) {
+    if (!$valid) { throw new RuntimeException('FAIL: ' . $message); }
+    echo 'PASS: ' . $message . "\n";
+}
+function legacy_rows($kind) {
+    global $wpdb;
+    $allowed = ['esp_login_attempts', 'esp_login_remember', 'esp_login_session'];
+    if (!in_array($kind, $allowed, true)) { throw new RuntimeException('Unknown table'); }
+    return $wpdb->get_results('SELECT * FROM `' . $wpdb->prefix . $kind . '` ORDER BY id', ARRAY_A);
+}
+$plugin = 'easy-slug-protect/easy-slug-protect.php';
+$file = WP_PLUGIN_DIR . '/' . $plugin;
+$zip = getenv('ESP_PR_ZIP');
+if ($stage === 'prepare') {
+    legacy_check(is_file($file), 'legacy source exists for ' . $old_version);
+    foreach (['esp_login_attempts', 'esp_login_remember', 'esp_login_session', 'esp_login_limits'] as $name) {
+        $wpdb->query('DROP TABLE IF EXISTS `' . $wpdb->prefix . $name . '`');
+    }
+    $wpdb->query("DELETE FROM {$wpdb->options} WHERE option_name LIKE 'esp\\_%'");
+    $wpdb->query("DELETE FROM {$wpdb->postmeta} WHERE meta_key = '_esp_media_protected_path_id'");
+    wp_cache_flush();
+    update_option('active_plugins', []);
+    require $file;
+    legacy_check(ESP_VERSION === $old_version, 'real upstream PHP version matches ' . $old_version);
+    new Easy_Slug_Protect(); // Load original dependencies and original Setup.
+    $setup = new ESP_Setup();
+    $setup->activate();
+    legacy_check((int) get_option('esp_db_version') === 6,
+        'original ' . $old_version . ' installed actual schema v6');
+    $settings = get_option('esp_settings');
+    legacy_check(is_array($settings), 'original settings exist');
+    $settings['path'] = [
+        'path_original' => [
+            'id' => 'path_original', 'path' => '/esp-legacy-secret/',
+            'password' => wp_hash_password('legacy-original-password'),
+            'password_version' => 2,
+        ],
+    ];
+    update_option('esp_settings', $settings);
+    $wpdb->insert($wpdb->prefix . 'esp_login_attempts', [
+        'ip_address' => '192.0.2.1', 'path' => '/esp-legacy-secret/',
+        'path_id' => 'path_original', 'time' => '2026-01-01 12:00:00',
+    ]);
+    $wpdb->insert($wpdb->prefix . 'esp_login_remember', [
+        'path' => '/esp-legacy-secret/', 'path_id' => 'path_original',
+        'password_version' => 2, 'user_id' => str_repeat('u', 32),
+        'token' => str_repeat('r', 64), 'created' => '2026-01-01 00:00:00',
+        'expires' => '2030-01-01 00:00:00',
+    ]);
+    $wpdb->insert($wpdb->prefix . 'esp_login_session', [
+        'path_id' => 'path_original', 'password_version' => 2,
+        'token' => str_repeat('s', 64),
+        'created' => '2026-01-01 00:00:00', 'expires' => '2030-01-01 00:00:00',
+    ]);
+    $post = wp_insert_post(['post_type' => 'page', 'post_status' => 'publish',
+        'post_title' => 'ESP Legacy Secret', 'post_name' => 'esp-legacy-secret',
+        'post_content' => 'ESP_LEGACY_PRIVATE_BYTES']);
+    legacy_check(is_int($post) && $post > 0, 'legacy protected page exists');
+    $meta_id = wp_insert_post(['post_type' => 'attachment', 'post_status' => 'inherit',
+        'post_title' => 'ESP legacy protected media', 'post_mime_type' => 'text/plain']);
+    legacy_check(is_int($meta_id) && $meta_id > 0, 'legacy protected attachment exists');
+    add_post_meta($meta_id, '_esp_media_protected_path_id', 'path_original');
+    $uploads = wp_upload_dir();
+    wp_mkdir_p($uploads['basedir']);
+    file_put_contents($uploads['basedir'] . '/esp-legacy-private.txt', 'ESP_LEGACY_PRIVATE_MEDIA');
+    update_attached_file($meta_id, $uploads['basedir'] . '/esp-legacy-private.txt');
+    // Snapshot original real rows, not PR-generated historical fixtures.
+    $snapshot = [
+        'settings' => get_option('esp_settings'),
+        'brute' => legacy_rows('esp_login_attempts'),
+        'remember' => legacy_rows('esp_login_remember'),
+        'session' => legacy_rows('esp_login_session'),
+        'protected_meta_id' => $meta_id,
+        'protected_post_id' => $post,
+    ];
+    legacy_check(count($snapshot['brute']) === 1 &&
+        count($snapshot['remember']) === 1 && count($snapshot['session']) === 1 &&
+        get_post_meta($meta_id, '_esp_media_protected_path_id', true) === 'path_original',
+        'real legacy SQL history, session and protected media fixture are saved');
+    update_option('esp_test_legacy_upgrade_snapshot', $snapshot, false);
+    update_option('active_plugins', [$plugin]);
+    legacy_check(is_plugin_active($plugin), 'legacy version remains active before ZIP upgrade');
+    echo "Prepared original {$old_version} installation.\n";
+    exit(0);
+}
+if ($stage === 'install') {
+    legacy_check(is_plugin_active($plugin) && is_file($file),
+        'original plugin remains active at ZIP upgrade entry');
+    require $file;
+    legacy_check(ESP_VERSION === $old_version, 'ZIP upgrader starts in original PHP process');
+    new Easy_Slug_Protect();
+    legacy_check(is_string($zip) && is_file($zip), 'PR release ZIP exists');
+    WP_Filesystem();
+    $upgrader = new Plugin_Upgrader(new Automatic_Upgrader_Skin());
+    $result = $upgrader->install($zip, ['overwrite_package' => true]);
+    legacy_check($result === true, 'Core Plugin_Upgrader::install overwrite succeeds: ' . $old_version . ' -> 0.7.40');
+    legacy_check(is_plugin_active($plugin) && is_file($file),
+        'overwrite leaves same plugin basename active');
+    $header = get_plugin_data($file);
+    legacy_check($header['Version'] === '0.7.40' && ESP_VERSION === $old_version,
+        'new PHP files installed but updater process still executes old code');
+    echo "Overwrote original {$old_version} with PR release ZIP.\n";
+    exit(0);
+}
+// Verify only under a fresh PHP worker after the real Core overwrite.
+// wp-load already executed plugins_loaded with the installed 0.7.40 active.
+legacy_check(defined('ESP_VERSION') && ESP_VERSION === '0.7.40',
+    'fresh worker loads actual PR 0.7.40 code');
+legacy_check(is_plugin_active($plugin), 'updated plugin is active');
+wp_set_current_user(1);
+if (!did_action('wp_loaded')) { do_action('wp_loaded'); }
+$setup = new ESP_Setup();
+$verified = ESP_Protection_State::verify_and_commit($setup);
+$snapshot = get_option('esp_test_legacy_upgrade_snapshot');
+legacy_check(is_array($snapshot), 'original pre-upgrade snapshot survives');
+$settings = get_option('esp_settings');
+legacy_check($settings === $snapshot['settings'] &&
+    wp_check_password('legacy-original-password', $settings['path']['path_original']['password']),
+    'original path ID, password hash and settings survive unchanged');
+legacy_check(legacy_rows('esp_login_attempts') === $snapshot['brute'] &&
+    legacy_rows('esp_login_remember') === $snapshot['remember'] &&
+    legacy_rows('esp_login_session') === $snapshot['session'],
+    'original brute, remember and active session rows survive byte-equivalent');
+legacy_check(get_post_meta($snapshot['protected_meta_id'], '_esp_media_protected_path_id', true) === 'path_original' &&
+    get_post($snapshot['protected_post_id'])->post_content === 'ESP_LEGACY_PRIVATE_BYTES',
+    'protected page and attachment metadata still reference original path ID');
+legacy_check($verified &&
+    get_option('esp_runtime_state')['state'] === 'READY' &&
+    get_option('esp_db_version') == 6 &&
+    get_option('esp_plugin_version') === ESP_VERSION &&
+    get_option('esp_update_state')['status'] === 'complete',
+    'fresh PR worker verifies real preexisting schema and commits ready version');
+echo "PASS: real upstream {$old_version} -> PR 0.7.40 Core ZIP upgrade verified.\n";
