@@ -3,24 +3,88 @@ on:
   push:
     tags: ['v[0-9]*']
 permissions:
-  contents: write
+  contents: read
+
 jobs:
-  release-draft:
+  verify-release-zip:
     runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
+          MYSQL_DATABASE: esp_wp44
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1"
+          --health-interval=5s --health-timeout=5s --health-retries=20
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Require a reviewed main commit
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mysqli
+          coverage: none
+      - name: Require reviewed main ancestor and build tagged package
         env:
           TAG: ${{ github.ref_name }}
         run: |
           git fetch origin main
           git merge-base --is-ancestor HEAD origin/main
           python3 tools/build-release.py --tag "$TAG"
-      - name: Create draft for maintainer review (never publish automatically)
+      - name: Reject incomplete or tampered release packages
+        run: |
+          python3 tools/test-release-package.py
+          (cd dist && sha256sum -c *.sha256)
+      - name: Lint every PHP file inside the distribution ZIP
+        run: |
+          mkdir -p "${RUNNER_TEMP}/esp-release-inspect"
+          unzip -q dist/*.zip -d "${RUNNER_TEMP}/esp-release-inspect"
+          find "${RUNNER_TEMP}/esp-release-inspect" -name '*.php' -print0 | xargs -0 -r -n1 php -l
+      - name: Install/activate exact ZIP and upgrade actual 0.7.38 and 0.7.39
+        env:
+          ESP_ONLY_RELEASE_GATES: '1'
+          ESP_TARGET_VERSION: ${{ github.ref_name }}
+        run: |
+          export ESP_TARGET_VERSION="${ESP_TARGET_VERSION#v}"
+          export ESP_PR_ZIP="$PWD/dist/easy-slug-protect-$ESP_TARGET_VERSION.zip"
+          bash .github/scripts/test-wordpress-updates.sh
+      - name: Preserve only verified ZIP and checksum
+        uses: actions/upload-artifact@v4
+        with:
+          name: verified-stable-release
+          path: |
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+  create-release-draft:
+    needs: [verify-release-zip]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: verified-stable-release
+          path: dist
+      - name: Recheck byte-identical verified ZIP (never rebuild)
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          (cd dist && sha256sum -c *.sha256)
+          python3 tools/build-release.py --tag "$TAG" --verify-zip "dist/easy-slug-protect-${TAG#v}.zip"
+      - name: Create draft release (never publish automatically)
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
           gh release create "$TAG" dist/*.zip dist/*.sha256 --draft --verify-tag --title "$TAG" --generate-notes
+          mkdir -p "${RUNNER_TEMP}/esp-release-downloaded"
+          gh release download "$TAG" --pattern '*.zip' --pattern '*.sha256' --dir "${RUNNER_TEMP}/esp-release-downloaded"
+          cmp "dist/easy-slug-protect-${TAG#v}.zip" "${RUNNER_TEMP}/esp-release-downloaded/easy-slug-protect-${TAG#v}.zip"
+          cmp "dist/easy-slug-protect-${TAG#v}.zip.sha256" "${RUNNER_TEMP}/esp-release-downloaded/easy-slug-protect-${TAG#v}.zip.sha256"
