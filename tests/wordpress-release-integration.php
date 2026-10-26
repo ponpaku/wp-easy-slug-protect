@@ -167,6 +167,13 @@ $item = $updates->response[$plugin];
 // without maintenance. Reject it BEFORE the download/filename replacement.
 $single = new Plugin_Upgrader(new Automatic_Upgrader_Skin());
 $single_result = $single->upgrade($plugin);
+if (!is_wp_error($single_result) ||
+    $single_result->get_error_code() !== 'esp_unsafe_single_upgrade') {
+    echo 'Single upgrade diagnostic: ' . (is_wp_error($single_result)
+        ? $single_result->get_error_code() : var_export($single_result, true)) . "\n";
+    echo 'Active after single: ' . (is_plugin_active($plugin) ? 'yes' : 'no') . "\n";
+    echo 'Version after single: ' . get_plugin_data($installed . '/easy-slug-protect.php')['Version'] . "\n";
+}
 check_release(is_wp_error($single_result) &&
     $single_result->get_error_code() === 'esp_unsafe_single_upgrade' &&
     is_plugin_active($plugin) &&
