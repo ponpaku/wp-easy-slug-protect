@@ -35,7 +35,7 @@ class BootTestDB {
     public $state_on_acquire = null;
     public function prepare($query, ...$args) {
         if (strpos($query, 'SET option_value = %s') !== false &&
-            strpos($query, 'esp_runtime_state') !== false) {
+            strpos($query, 'UPDATE `wp_options`') !== false) {
             $this->pending_runtime_value = $args[0];
             $this->pending_runtime_old = $args[2];
         }
