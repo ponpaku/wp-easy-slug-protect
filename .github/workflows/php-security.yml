@@ -102,6 +102,8 @@ jobs:
           --health-interval=5s --health-timeout=5s --health-retries=20
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Real 0.7.38 / 0.7.39 historical source for upgrade fixtures.
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.3'
