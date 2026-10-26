@@ -63,6 +63,10 @@ class BootTestDB {
         if (!$this->online) { return false; }
         if (strpos($sql, 'UPDATE `wp_options`') === 0 ||
             strpos($sql, 'INSERT IGNORE INTO `wp_options`') === 0) {
+            if (!empty($GLOBALS['reject_update'])) {
+                $this->last_error = 'Simulated DB write failure';
+                return false;
+            }
             if ($this->lock_owner !== $this->lock_connection) { return 0; }
             $existing = array_key_exists('esp_runtime_state', $GLOBALS['options']);
             if (strpos($sql, 'INSERT IGNORE') === 0 && $existing) { return 0; }
