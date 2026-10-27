@@ -16,6 +16,9 @@ cleanup() {
     docker logs "$container" >&2 || true
   fi
   if [[ $started -eq 1 ]]; then
+    # WordPress/Apache may create www-data-owned uploads in the bind mount.
+    # Restore the host runner's ownership before deleting the disposable tree.
+    docker exec "$container" chown -R "$(id -u):$(id -g)" /var/www/html >/dev/null 2>&1 || true
     docker rm -f "$container" >/dev/null 2>&1 || true
   fi
   rm -rf "$fixture_root"
