@@ -20,9 +20,15 @@ for stage in install activate verify; do
 done
 # These are actual historical commits, not a synthetic version string.
 plugin_dir="$ESP_WP_ROOT/wp-content/plugins/easy-slug-protect"
-for version_sha in \
-  "0.7.38:f2b8ca54130be4530bcb5e8a0663be12111a16b0" \
-  "0.7.39:b6315e837e50c4ed8713c5fb60f7f0ea2b87b323"; do
+legacy_versions=(
+  "0.7.38:f2b8ca54130be4530bcb5e8a0663be12111a16b0"
+  "0.7.39:b6315e837e50c4ed8713c5fb60f7f0ea2b87b323"
+)
+# Verify real 0.7.40 -> next Stable; do not include the same version as its target.
+if php -r 'exit(version_compare($argv[1], "0.7.40", ">") ? 0 : 1);' "$ESP_TARGET_VERSION"; then
+  legacy_versions+=("0.7.40:8c7fca0f46ab69c3d29b08a0ac554d93f18afec5")
+fi
+for version_sha in "${legacy_versions[@]}"; do
   version="${version_sha%%:*}"
   sha="${version_sha#*:}"
   rm -rf "$plugin_dir"
@@ -37,7 +43,7 @@ done
 # The PR CI additionally runs the complete migration, simulated next release,
 # auto-update and rollback suites below.
 if [[ "${ESP_ONLY_RELEASE_GATES:-0}" == 1 ]]; then
-  echo "PASS: exact Stable Release ZIP boots and upgrades both historical versions"
+  echo "PASS: exact Stable Release ZIP boots and upgrades tested historical versions"
   exit 0
 fi
 php tests/wordpress-update-integration.php
@@ -45,6 +51,9 @@ php tests/wordpress-update-integration.php
 for entry in ajax post cron; do
   ESP_TEST_ADMIN_ENTRY="$entry" php tests/wordpress-unauthorized-update-test.php
 done
+# The mocked release in the fixture is always the next patch version.
+patch="${ESP_TARGET_VERSION##*.}"
+export ESP_EXPECT_VERSION="${ESP_TARGET_VERSION%.*}.$((10#$patch + 1))"
 for fixture_folder in easy-slug-protect esp44-custom; do
   for automatic in 0 1; do
     ESP_TEST_FOLDER="$fixture_folder" ESP_TEST_AUTOMATIC="$automatic" php tests/wordpress-release-integration.php
@@ -52,4 +61,4 @@ for fixture_folder in easy-slug-protect esp44-custom; do
   done
 done
 ESP_TEST_AUTOMATIC=1 ESP_TEST_FATAL_ROLLBACK=1 php tests/wordpress-release-integration.php
-ESP_EXPECT_VERSION=0.7.40 php tests/wordpress-updated-code-check.php
+ESP_EXPECT_VERSION="$ESP_TARGET_VERSION" php tests/wordpress-updated-code-check.php
