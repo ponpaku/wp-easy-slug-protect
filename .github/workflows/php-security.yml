@@ -88,23 +88,46 @@ jobs:
           ESP_TEST_DB_PASSWORD: test-password
           ESP_TEST_DB_NAME: esp_test
         run: php tests/security-verification-mysql-lock-test.php
+  wordpress-integration:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
+          MYSQL_DATABASE: esp_wp44
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Real 0.7.38 / 0.7.39 historical source for upgrade fixtures.
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mysqli
+          coverage: none
+      - name: Real WordPress schema, release and upgrader fixtures
+        run: bash .github/scripts/test-wordpress-updates.sh
   package-plugin:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Build installable WordPress ZIP
         run: |
-          mkdir -p dist/easy-slug-protect
-          rsync -a --exclude=.git --exclude=.github --exclude=tests --exclude=dist --exclude=README.md --exclude=.gitignore ./ dist/easy-slug-protect/
-          test -f dist/easy-slug-protect/easy-slug-protect.php
-          grep -q '^ \* Version: ' dist/easy-slug-protect/easy-slug-protect.php
-          (cd dist && zip -qr easy-slug-protect.zip easy-slug-protect)
-          unzip -t dist/easy-slug-protect.zip
-          unzip -Z1 dist/easy-slug-protect.zip | grep -Fq 'easy-slug-protect/easy-slug-protect.php'
+          python3 tools/build-release.py
+          python3 tools/test-release-package.py
+          (cd dist && sha256sum -c *.sha256)
+          if python3 tools/build-release.py --tag v999.0.0; then
+            echo 'Mismatched tag accepted' >&2
+            exit 1
+          fi
       - name: Upload WordPress installation ZIP
         uses: actions/upload-artifact@v4
         with:
           name: easy-slug-protect-wordpress-zip
-          path: dist/easy-slug-protect.zip
+          path: dist/*.zip
           if-no-files-found: error
           retention-days: 30

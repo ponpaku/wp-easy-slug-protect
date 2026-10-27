@@ -34,7 +34,11 @@ final class ESP_Protection_State {
      * @return array{state: string|null, version: string|null}
      */
     private static function get_runtime_state() {
-        $stored = get_option(self::RUNTIME_STATE_OPTION, null);
+        return self::normalize_runtime_state(get_option(self::RUNTIME_STATE_OPTION, null));
+    }
+
+    /** Apply identical validation to WordPress cached reads and direct SQL snapshots. */
+    private static function normalize_runtime_state($stored) {
         if ($stored === null) {
             return ['state' => null, 'version' => null];
         }
@@ -201,6 +205,10 @@ final class ESP_Protection_State {
             trim((string) ($_SERVER['SERVER_SOFTWARE'] ?? '')) === '') {
             return false;
         }
+        if (class_exists('ESP_Updater') && !ESP_Updater::can_finish_now()) {
+            ESP_Updater::schedule_retry();
+            return false;
+        }
         return self::verify_and_commit($setup, true);
     }
 
@@ -300,8 +308,9 @@ final class ESP_Protection_State {
         if (!in_array($state, self::VALID_STATES, true)) {
             return false;
         }
-        // 検証・更新開始・shutdown復旧を同じDBロックで直列化する。
-        // 検証中の呼出しは所有中のロックを渡し、自己デッドロックを避ける。
+        // The same MySQL connection owns the lock and performs the write.
+        // wpdb may reconnect/replay a query; server-side ownership and the
+        // exact previous option bytes are therefore part of the SQL predicate.
         $lock = $held_lock ?? self::acquire_verification_lock($lock_timeout);
         if ($lock === null) {
             return false;
@@ -310,8 +319,15 @@ final class ESP_Protection_State {
             if (!self::owns_verification_lock($lock)) {
                 return false;
             }
-            self::refresh_runtime_state_cache();
-            $current = self::get_runtime_state();
+            global $wpdb;
+            $sql = $wpdb->prepare("SELECT option_value FROM `{$wpdb->options}` WHERE option_name = %s",
+                self::RUNTIME_STATE_OPTION);
+            $stored = $wpdb->get_row($sql, ARRAY_A);
+            if ($wpdb->last_error !== '') {
+                return false;
+            }
+            $current = self::normalize_runtime_state(
+                $stored === null ? null : maybe_unserialize($stored['option_value']));
             if (($expected_state !== null && $current['state'] !== $expected_state) ||
                 self::is_stale_worker($current) ||
                 ($state === 'UPDATING' && $current['state'] === 'UPDATING') ||
@@ -327,14 +343,42 @@ final class ESP_Protection_State {
             if ($state === 'UPDATING') {
                 $runtime['since'] = time();
             }
-            // 共有状態をautoloadさせない。alloptionsの旧スナップショットを
-            // 別リクエストが書き戻すことで状態が巻き戻るのを防ぐ。
-            update_option(self::RUNTIME_STATE_OPTION, $runtime, false);
-            if (function_exists('wp_set_option_autoload_values')) {
-                wp_set_option_autoload_values([self::RUNTIME_STATE_OPTION => false]);
+            $value = maybe_serialize($runtime);
+            if ($stored === null) {
+                // No option exists yet: an atomic conditional INSERT. An
+                // intervening insert must not become an unconditional UPDATE.
+                $write = $wpdb->prepare(
+                    "INSERT IGNORE INTO `{$wpdb->options}` (option_name, option_value, autoload)
+                     SELECT %s, %s, 'no'
+                     WHERE IS_USED_LOCK(%s) = CONNECTION_ID() AND CONNECTION_ID() = %d",
+                    self::RUNTIME_STATE_OPTION, $value, $lock['name'], $lock['connection']);
+            } else {
+                // The comparison is on serialized bytes, not PHP's cached
+                // state; a second writer may have changed state since SELECT.
+                $write = $wpdb->prepare(
+                    "UPDATE `{$wpdb->options}` SET option_value = %s, autoload = 'no'
+                     WHERE option_name = %s AND BINARY option_value = BINARY %s
+                       AND IS_USED_LOCK(%s) = CONNECTION_ID() AND CONNECTION_ID() = %d",
+                    $value, self::RUNTIME_STATE_OPTION, $stored['option_value'],
+                    $lock['name'], $lock['connection']);
             }
-            return self::owns_verification_lock($lock) &&
-                get_option(self::RUNTIME_STATE_OPTION, null) === $runtime;
+            $written = $wpdb->query($write);
+            // A zero-row UPDATE is permissible only for a byte-identical
+            // no-op. In every other case it indicates a lost lock or CAS race.
+            if ($written === false || ($written !== 1 &&
+                ($stored === null || $stored['option_value'] !== $value))) {
+                return false;
+            }
+            if (!self::owns_verification_lock($lock)) {
+                return false;
+            }
+            self::refresh_runtime_state_cache();
+            $saved = $wpdb->get_row($sql, ARRAY_A);
+            if ($wpdb->last_error !== '' || $saved === null ||
+                $saved['option_value'] !== $value || !self::owns_verification_lock($lock)) {
+                return false;
+            }
+            return true;
         } finally {
             if ($held_lock === null) {
                 self::release_verification_lock($lock);
@@ -391,7 +435,7 @@ final class ESP_Protection_State {
      * タイムアウトで「所有中のロックを削除」する実装はしない。
      * DB接続終了時にはサーバーが自動解放する。
      */
-    private static function acquire_verification_lock($timeout = 0) {
+    public static function acquire_verification_lock($timeout = 0) {
         global $wpdb;
         if (!is_object($wpdb) || !isset($wpdb->prefix)) {
             return null;
@@ -414,7 +458,7 @@ final class ESP_Protection_State {
      * wpdb が途中で自動再接続した場合はロックを失ったものと扱う。
      * 他の検証が獲得した新しいロックを解放したりREADY確定したりしない。
      */
-    private static function owns_verification_lock($lock) {
+    public static function owns_verification_lock($lock) {
         global $wpdb;
         $owner = $wpdb->get_var($wpdb->prepare('SELECT IS_USED_LOCK(%s)', $lock['name']));
         $connection = $wpdb->get_var('SELECT CONNECTION_ID()');
@@ -423,7 +467,7 @@ final class ESP_Protection_State {
             (string) $connection === $lock['connection'];
     }
 
-    private static function release_verification_lock($lock) {
+    public static function release_verification_lock($lock) {
         global $wpdb;
         if (self::owns_verification_lock($lock)) {
             $wpdb->get_var($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $lock['name']));
@@ -479,7 +523,7 @@ final class ESP_Protection_State {
             if ($downgrade) {
                 error_log('ESP: plugin downgrade requires explicit compatibility review');
             } else {
-                $ready = $setup->check_plugin_version() === true;
+                $ready = $setup->check_plugin_version($lock) === true;
             }
             // バージョン移行の途中でDBが再接続されていれば以後は触らない。
             if (!self::owns_verification_lock($lock)) {

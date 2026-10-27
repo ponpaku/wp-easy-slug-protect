@@ -2,6 +2,9 @@
 /** Advisory lock tests using two actual MySQL connections, through wpdb-style methods. */
 define('ABSPATH', __DIR__ . '/');
 define('ESP_VERSION', '0.7.39');
+define('ARRAY_A', 'ARRAY_A');
+function maybe_serialize($value) { return serialize($value); }
+function maybe_unserialize($value) { return unserialize($value); }
 class ESP_Config {
     const VERSION_OPTION_KEY = 'esp_plugin_version';
 }
@@ -22,6 +25,7 @@ function db_connect() {
 }
 class VerificationTestWPDB {
     public $prefix = 'esp_test_';
+    public $options = 'esp_test_runtime_option';
     public $last_error = '';
     private $connection;
     public function __construct($db) { $this->connection = $db; }
@@ -41,10 +45,18 @@ class VerificationTestWPDB {
         $result->free();
         return $row[0] ?? null;
     }
+    public function get_row($sql, $output = null) {
+        $result = $this->connection->query($sql);
+        $this->last_error = $result === false ? $this->connection->error : '';
+        if ($result === false) { return null; }
+        $row = $result->fetch_assoc();
+        $result->free();
+        return $row ?: null;
+    }
     public function query($sql) {
         $result = $this->connection->query($sql);
         $this->last_error = $result === false ? $this->connection->error : '';
-        return $result !== false;
+        return $result === false ? false : $this->connection->affected_rows;
     }
 }
 function get_option($name, $default = null) {
@@ -98,7 +110,8 @@ $release->invoke(null, $lockC);
 // 状態の書込みも同じGET_LOCKを使う。2つの実MySQL接続で競合を再現。
 verify($a->query("CREATE TABLE IF NOT EXISTS esp_test_runtime_option (
     option_name varchar(191) NOT NULL PRIMARY KEY,
-    option_value longtext NOT NULL
+    option_value longtext NOT NULL,
+    autoload varchar(20) NOT NULL DEFAULT 'no'
 ) ENGINE=InnoDB"), 'create isolated runtime-state test options table');
 $set = $class->getMethod('set_runtime_state');
 $wpdb = new VerificationTestWPDB($a);

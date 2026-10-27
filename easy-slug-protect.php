@@ -3,7 +3,8 @@
  * Plugin Name: Easy Slug Protect
  * Plugin URI: https://github.com/ponpaku/wp-easy-slug-protect
  * Description: URLの階層（スラッグ）ごとにシンプルなパスワード保護を実現するプラグイン
- * Version: 0.7.39
+ * Version: 0.7.40
+ * Update URI: https://github.com/ponpaku/wp-easy-slug-protect
  * Author: ponpaku
  * Text Domain: easy-slug-protect
  * Domain Path: /languages
@@ -15,7 +16,7 @@ if (!defined('ABSPATH')) {
 }
 
 // プラグインの基本定数を定義
-define('ESP_VERSION', '0.7.39');
+define('ESP_VERSION', '0.7.40');
 define('ESP_PATH', plugin_dir_path(__FILE__));
 define('ESP_URL', plugin_dir_url(__FILE__));
 
@@ -50,6 +51,8 @@ class Easy_Slug_Protect {
         // コアクラスの読み込み
         require_once ESP_PATH . 'includes/class-esp-core.php';
         require_once ESP_PATH . 'includes/class-esp-setup.php';
+        require_once ESP_PATH . 'includes/class-esp-migrator.php';
+        require_once ESP_PATH . 'includes/class-esp-updater.php';
         require_once ESP_PATH . 'includes/class-esp-protection-state.php';
         require_once ESP_PATH . 'includes/class-esp-authorization-cache.php';
         require_once ESP_PATH . 'includes/class-esp-auth.php';
@@ -99,6 +102,7 @@ class Easy_Slug_Protect {
         }
         // 更新イベントと明示的な復旧経路は、PENDING状態でも登録する。
         // 通常のページ表示では、バージョン／DB／Rewriteの厳密検査をしない。
+        ESP_Updater::register($this->setup);
         ESP_Protection_State::register_runtime_hooks($this->setup);
         $ready = ESP_Protection_State::boot($this->setup);
 
@@ -176,7 +180,7 @@ function esp_activate() {
     // 通常起動と同じ依存クラスを明示的にロードしてから厳密検証する。
     Easy_Slug_Protect::load_dependencies();
     $setup = new ESP_Setup();
-    if (!$setup->activate()) {
+    if (!ESP_Updater::during_activation(static function () use ($setup) { return $setup->activate(); })) {
         wp_die(
             __('Easy Slug Protect: 保護状態の初期検証に失敗しました。有効化を中止し、DBとuploads/.htaccessを確認してください。', ESP_Config::TEXT_DOMAIN),
             '',

@@ -25,13 +25,60 @@ class BootTestDB {
     public $legacy_schema_valid = true;
     public $queries = 0;
     public $prefix = 'wp_';
+    public $options = 'wp_options';
+    public $pending_runtime_value = null;
+    public $pending_runtime_old = null;
     public $lock_busy = false;
     public $lock_connection = 17;
     public $lock_owner = null;
     public $complete_on_acquire = false;
     public $state_on_acquire = null;
     public function prepare($query, ...$args) {
-        return str_replace('%s', "'" . ($args[0] ?? '') . "'", $query);
+        if (strpos($query, 'SET option_value = %s') !== false &&
+            strpos($query, 'UPDATE `wp_options`') !== false) {
+            $this->pending_runtime_value = $args[0];
+            $this->pending_runtime_old = $args[2];
+        }
+        if (strpos($query, 'INSERT IGNORE INTO') !== false &&
+            strpos($query, 'SELECT %s, %s') !== false) {
+            $this->pending_runtime_value = $args[1];
+            $this->pending_runtime_old = null;
+        }
+        $i = 0;
+        return preg_replace_callback('/%[sd]/', static function ($m) use ($args, &$i) {
+            $value = $args[$i++];
+            return $m[0] === '%d' ? (string) (int) $value : "'" . addslashes((string) $value) . "'";
+        }, $query);
+    }
+    public function get_row($sql, $output = null) {
+        $this->queries++;
+        $this->last_error = $this->online ? '' : 'Disconnected';
+        if (!$this->online) { return null; }
+        if (!array_key_exists('esp_runtime_state', $GLOBALS['options'])) { return null; }
+        return ['option_value' => serialize($GLOBALS['options']['esp_runtime_state'])];
+    }
+    public function query($sql) {
+        $this->queries++;
+        $this->last_error = $this->online ? '' : 'Disconnected';
+        if (!$this->online) { return false; }
+        if (strpos($sql, 'UPDATE `wp_options`') === 0 ||
+            strpos($sql, 'INSERT IGNORE INTO `wp_options`') === 0) {
+            if (!empty($GLOBALS['reject_update'])) {
+                $this->last_error = 'Simulated DB write failure';
+                return false;
+            }
+            if ($this->lock_owner !== $this->lock_connection) { return 0; }
+            $existing = array_key_exists('esp_runtime_state', $GLOBALS['options']);
+            if (strpos($sql, 'INSERT IGNORE') === 0 && $existing) { return 0; }
+            if (strpos($sql, 'UPDATE') === 0 &&
+                (!$existing || serialize($GLOBALS['options']['esp_runtime_state']) !== $this->pending_runtime_old)) {
+                return 0;
+            }
+            $GLOBALS['options']['esp_runtime_state'] = unserialize($this->pending_runtime_value);
+            $GLOBALS['last_runtime_autoload'] = false;
+            return 1;
+        }
+        return 1;
     }
     public function get_col($query) {
         $this->queries++;
@@ -123,6 +170,8 @@ function esc_html($value) { return (string) $value; }
 function esc_url($url) { return $url; }
 function admin_url($uri) { return '/wp-admin/' . $uri; }
 function wp_nonce_field($action) { echo '<input name="_wpnonce" value="test" />'; }
+function maybe_serialize($value) { return serialize($value); }
+function maybe_unserialize($value) { return unserialize($value); }
 function get_option($name, $default = null) {
     return array_key_exists($name, $GLOBALS['options']) ? $GLOBALS['options'][$name] : $default;
 }
