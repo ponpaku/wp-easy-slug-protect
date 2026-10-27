@@ -55,7 +55,9 @@ jobs:
             TAG="$(sed -n 's/^tag=//p' "$REQUEST")"
             TARGET_SHA="$(sed -n 's/^tag_commit=//p' "$REQUEST")"
             ZIP_SHA="$(sed -n 's/^zip_sha256=//p' "$REQUEST")"
-            [[ "$REQUEST" == ".github/release-publication-requests/${TAG}.txt" ]]
+            [[ "$TAG" =~ ^v(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)$ ]]
+            [[ "$REQUEST" == ".github/release-publication-requests/${TAG}.txt" ||
+               "$REQUEST" == ".github/release-publication-requests/${TAG}.retry-1.txt" ]]
             [[ "$(cat "$REQUEST")" == "$(printf 'tag=%s\ntag_commit=%s\nzip_sha256=%s\n' "$TAG" "$TARGET_SHA" "$ZIP_SHA")" ]]
           else
             echo 'Unsupported publication event' >&2
@@ -80,7 +82,12 @@ jobs:
         run: |
           set -euo pipefail
           ZIP="easy-slug-protect-${TAG#v}.zip"
-          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > "$RUNNER_TEMP/esp-draft.json"
+          # The draft-by-tag REST endpoint returns 404 even when a draft exists.
+          # Authenticated listing includes drafts; locate exactly one matching tag.
+          gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$RUNNER_TEMP/esp-releases.json"
+          jq -e --arg tag "$TAG" '
+            [.[] | select(.tag_name == $tag)] | if length == 1 then .[0] else error("Release missing or duplicated") end
+          ' "$RUNNER_TEMP/esp-releases.json" > "$RUNNER_TEMP/esp-draft.json"
           jq -e --arg tag "$TAG" --arg zip "$ZIP" --arg sha "sha256:$ZIP_SHA" '
             .tag_name == $tag and .draft == true and .prerelease == false
             and .published_at == null
