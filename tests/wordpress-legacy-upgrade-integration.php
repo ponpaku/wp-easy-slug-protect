@@ -73,7 +73,12 @@ if ($stage === 'prepare') {
         new Easy_Slug_Protect();
     }
     $setup = new ESP_Setup();
-    $activation = $setup->activate();
+    // Since v0.7.40, the real activation hook establishes a trusted
+    // activation context for DB migration and mandatory post-install work.
+    // Invoking ESP_Setup::activate() directly skips this authorization.
+    $activation = $old_version === '0.7.40'
+        ? ESP_Updater::during_activation(static function () use ($setup) { return $setup->activate(); })
+        : $setup->activate();
     if (in_array($old_version, ['0.7.39', '0.7.40'], true)) {
         legacy_check($activation === true, 'original ' . $old_version . ' activation verifies before legacy fixture data');
     }
