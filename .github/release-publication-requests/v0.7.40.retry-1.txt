@@ -1,0 +1,3 @@
+tag=v0.7.40
+tag_commit=8c7fca0f46ab69c3d29b08a0ac554d93f18afec5
+zip_sha256=dd0e7a1e1ce3a4734aec022313cc3799fe04bb7c9adabe9272291e1090efe2e5
