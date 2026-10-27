@@ -1,13 +1,29 @@
 name: Build stable release draft
 on:
+  # A reviewed tag continues to use the original release entry point.
   push:
     tags: ['v[0-9]*']
+    # A reviewed one-file release request also allows a release to be
+    # initiated entirely through GitHub when workflow dispatch is unavailable.
+    branches: [main]
+    paths:
+      - '.github/release-requests/*.txt'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v0.7.40); creates a Draft, never publishes'
+        type: string
+        required: true
+        default: 'v0.7.40'
 permissions:
   contents: read
 
 jobs:
   verify-release-zip:
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.package.outputs.tag }}
+      source_sha: ${{ steps.package.outputs.source_sha }}
     services:
       mysql:
         image: mysql:8.0
@@ -27,12 +43,37 @@ jobs:
           php-version: '8.3'
           extensions: mysqli
           coverage: none
-      - name: Require reviewed main ancestor and build tagged package
+      - name: Require reviewed main commit, identify tag and build release ZIP
+        id: package
         env:
-          TAG: ${{ github.ref_name }}
+          DISPATCH_TAG: ${{ inputs.tag }}
         run: |
+          set -euo pipefail
           git fetch origin main
           git merge-base --is-ancestor HEAD origin/main
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            [[ "$GITHUB_REF_NAME" == main ]]
+            TAG="$DISPATCH_TAG"
+          elif [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            TAG="$GITHUB_REF_NAME"
+          elif [[ "$GITHUB_REF_TYPE" == branch && "$GITHUB_REF_NAME" == main ]]; then
+            # Accept exactly one *new* release request file in this commit.
+            mapfile -t requests < <(git diff-tree --no-commit-id --name-only --diff-filter=A -r HEAD -- .github/release-requests/)
+            [[ "${#requests[@]}" -eq 1 ]]
+            TAG="$(basename "${requests[0]}" .txt)"
+            [[ "${requests[0]}" == ".github/release-requests/${TAG}.txt" ]]
+            [[ "$(cat "${requests[0]}")" == "$TAG" ]]
+          else
+            echo "Unsupported release trigger" >&2
+            exit 1
+          fi
+          [[ "$TAG" =~ ^v(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)$ ]]
+          if [[ "$GITHUB_REF_TYPE" != tag ]]; then
+            # Never create releases from unmerged branch tips.
+            [[ "$(git rev-parse HEAD)" == "$(git rev-parse origin/main)" ]]
+          fi
+          printf 'tag=%s\n' "$TAG" >> "$GITHUB_OUTPUT"
+          printf 'source_sha=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           python3 tools/build-release.py --tag "$TAG"
       - name: Reject incomplete or tampered release packages
         run: |
@@ -46,7 +87,7 @@ jobs:
       - name: Install/activate exact ZIP and upgrade actual 0.7.38 and 0.7.39
         env:
           ESP_ONLY_RELEASE_GATES: '1'
-          ESP_TARGET_VERSION: ${{ github.ref_name }}
+          ESP_TARGET_VERSION: ${{ steps.package.outputs.tag }}
         run: |
           export ESP_TARGET_VERSION="${ESP_TARGET_VERSION#v}"
           export ESP_PR_ZIP="$PWD/dist/easy-slug-protect-$ESP_TARGET_VERSION.zip"
@@ -68,21 +109,42 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
           name: verified-stable-release
           path: dist
       - name: Recheck byte-identical verified ZIP (never rebuild)
         env:
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ needs.verify-release-zip.outputs.tag }}
+          SOURCE_SHA: ${{ needs.verify-release-zip.outputs.source_sha }}
         run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
           (cd dist && sha256sum -c *.sha256)
           python3 tools/build-release.py --tag "$TAG" --verify-zip "dist/easy-slug-protect-${TAG#v}.zip"
-      - name: Create draft release (never publish automatically)
+      - name: Ensure verified commit is tagged (never overwrite an existing tag)
+        env:
+          TAG: ${{ needs.verify-release-zip.outputs.tag }}
+          SOURCE_SHA: ${{ needs.verify-release-zip.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
+            git fetch origin "refs/tags/$TAG:refs/tags/$TAG"
+            [[ "$(git rev-parse "${TAG}^{commit}")" == "$SOURCE_SHA" ]]
+          else
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git tag -a "$TAG" "$SOURCE_SHA" -m "$TAG"
+            git push origin "refs/tags/$TAG"
+          fi
+      - name: Create draft release and verify downloaded bytes (never publish automatically)
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ needs.verify-release-zip.outputs.tag }}
         run: |
+          set -euo pipefail
           gh release create "$TAG" dist/*.zip dist/*.sha256 --draft --verify-tag --title "$TAG" --generate-notes
           mkdir -p "${RUNNER_TEMP}/esp-release-downloaded"
           gh release download "$TAG" --pattern '*.zip' --pattern '*.sha256' --dir "${RUNNER_TEMP}/esp-release-downloaded"
