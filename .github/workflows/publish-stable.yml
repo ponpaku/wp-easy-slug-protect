@@ -1,0 +1,114 @@
+name: Publish verified stable release
+on:
+  # A reviewed one-time file authorizes publication without shell access.
+  push:
+    branches: [main]
+    paths: ['.github/release-publication-requests/*.txt']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Draft tag to publish, e.g. v0.7.40'
+        type: string
+        required: true
+      tag_commit:
+        description: 'Exact commit SHA pointed to by the release tag'
+        type: string
+        required: true
+      zip_sha256:
+        description: 'SHA-256 of verified release ZIP, 64 lowercase hex digits'
+        type: string
+        required: true
+permissions:
+  contents: read
+
+jobs:
+  publish-stable:
+    if: github.repository == 'ponpaku/wp-easy-slug-protect'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check exact one-time publication authorization and pinned tag
+        id: request
+        env:
+          DISPATCH_TAG: ${{ inputs.tag }}
+          DISPATCH_TAG_COMMIT: ${{ inputs.tag_commit }}
+          DISPATCH_ZIP_SHA256: ${{ inputs.zip_sha256 }}
+        run: |
+          set -euo pipefail
+          git fetch origin main --tags
+          [[ "$GITHUB_REF_NAME" == main ]]
+          [[ "$(git rev-parse HEAD)" == "$(git rev-parse origin/main)" ]]
+
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            TAG="$DISPATCH_TAG"
+            TARGET_SHA="$DISPATCH_TAG_COMMIT"
+            ZIP_SHA="$DISPATCH_ZIP_SHA256"
+          elif [[ "$GITHUB_EVENT_NAME" == push ]]; then
+            # A modified or deleted marker never authorizes publication.
+            mapfile -t requests < <(git diff-tree --no-commit-id --name-only --diff-filter=A -r HEAD -- .github/release-publication-requests/)
+            [[ "${#requests[@]}" -eq 1 ]]
+            REQUEST="${requests[0]}"
+            TAG="$(sed -n 's/^tag=//p' "$REQUEST")"
+            TARGET_SHA="$(sed -n 's/^tag_commit=//p' "$REQUEST")"
+            ZIP_SHA="$(sed -n 's/^zip_sha256=//p' "$REQUEST")"
+            [[ "$REQUEST" == ".github/release-publication-requests/${TAG}.txt" ]]
+            [[ "$(cat "$REQUEST")" == "$(printf 'tag=%s\ntag_commit=%s\nzip_sha256=%s\n' "$TAG" "$TARGET_SHA" "$ZIP_SHA")" ]]
+          else
+            echo 'Unsupported publication event' >&2
+            exit 1
+          fi
+
+          [[ "$TAG" =~ ^v(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)$ ]]
+          [[ "$TARGET_SHA" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$ZIP_SHA" =~ ^[a-f0-9]{64}$ ]]
+          [[ "$(git rev-parse "refs/tags/${TAG}^{commit}")" == "$TARGET_SHA" ]]
+          git merge-base --is-ancestor "$TARGET_SHA" origin/main
+          VERSION="${TAG#v}"
+          [[ "$(git show "$TARGET_SHA:easy-slug-protect.php" | sed -n 's/^ \* Version: //p' | head -n 1)" == "$VERSION" ]]
+          printf 'tag=%s\n' "$TAG" >> "$GITHUB_OUTPUT"
+          printf 'zip_sha256=%s\n' "$ZIP_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Check Draft metadata, GitHub asset digest, and actual ZIP bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.request.outputs.tag }}
+          ZIP_SHA: ${{ steps.request.outputs.zip_sha256 }}
+        run: |
+          set -euo pipefail
+          ZIP="easy-slug-protect-${TAG#v}.zip"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > "$RUNNER_TEMP/esp-draft.json"
+          jq -e --arg tag "$TAG" --arg zip "$ZIP" --arg sha "sha256:$ZIP_SHA" '
+            .tag_name == $tag and .draft == true and .prerelease == false
+            and .published_at == null
+            and (.assets | length) == 2
+            and ([.assets[] | select(.name == $zip and .state == "uploaded"
+                   and .digest == $sha and .size > 0 and .size <= 20971520)] | length) == 1
+            and ([.assets[] | select(.name == ($zip + ".sha256") and .state == "uploaded")] | length) == 1
+          ' "$RUNNER_TEMP/esp-draft.json" >/dev/null
+          mkdir -p "$RUNNER_TEMP/esp-publish-audit"
+          gh release download "$TAG" --pattern '*.zip' --pattern '*.sha256' --dir "$RUNNER_TEMP/esp-publish-audit"
+          (cd "$RUNNER_TEMP/esp-publish-audit"
+            printf '%s  %s\n' "$ZIP_SHA" "$ZIP" | sha256sum -c -
+            sha256sum -c "$ZIP.sha256"
+            unzip -tq "$ZIP")
+
+      - name: Publish audited Draft as latest Stable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.request.outputs.tag }}
+          ZIP_SHA: ${{ steps.request.outputs.zip_sha256 }}
+        run: |
+          set -euo pipefail
+          gh release edit "$TAG" --draft=false --prerelease=false --latest
+          gh api "repos/$GITHUB_REPOSITORY/releases/latest" > "$RUNNER_TEMP/esp-published.json"
+          ZIP="easy-slug-protect-${TAG#v}.zip"
+          jq -e --arg tag "$TAG" --arg zip "$ZIP" --arg sha "sha256:$ZIP_SHA" '
+            .tag_name == $tag and .draft == false and .prerelease == false
+            and (.published_at != null)
+            and ([.assets[] | select(.name == $zip and .digest == $sha)] | length) == 1
+          ' "$RUNNER_TEMP/esp-published.json" >/dev/null
+          echo "Published latest Stable Release: $TAG"
