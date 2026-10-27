@@ -77,7 +77,6 @@ class ESP_Media_Deriver {
             $disposition = $this->should_inline($mime_type) ? 'inline' : 'attachment';
             header('Content-Disposition: ' . $disposition . '; filename="' . basename($file_path) . '"');
 
-            
 
             if ($is_head) {
                 exit;
@@ -439,7 +438,6 @@ class ESP_Media_Deriver {
         $disposition = $this->should_inline($mime_type) ? 'inline' : 'attachment';
         header('Content-Disposition: ' . $disposition . '; filename="' . basename($file_path) . '"');
 
-        
 
         $fp = @fopen($file_path, 'rb');
         if ($fp === false) {

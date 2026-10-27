@@ -104,6 +104,11 @@ try {
         !isset($headers['x-litespeed-cache-control']) &&
         !isset($headers['x-accel-expires']), 'public JPEG keeps long-lived cache');
 
+    [$status, $body, $headers] = media_request($port, 'php', false, 'HEAD');
+    verify_cache($status === 200 && $body === '' &&
+        ($headers['cache-control'] ?? '') === 'public, max-age=31536000',
+        'public PHP HEAD keeps long-lived cache and no bytes');
+
     [$status, $body, $headers] = media_request($port, 'php', false, 'GET', 'bytes=0-31');
     verify_cache($status === 206 && $body === substr($bytes, 0, 32) &&
         ($headers['cache-control'] ?? '') === 'public, max-age=31536000',
