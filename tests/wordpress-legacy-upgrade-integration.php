@@ -4,7 +4,7 @@
  * Never run outside a disposable WordPress/MySQL database named esp_*.
  *
  * ESP_LEGACY_STAGE=prepare|install|verify
- * ESP_LEGACY_VERSION=0.7.38|0.7.39
+ * ESP_LEGACY_VERSION=0.7.38|0.7.39|0.7.40
  * ESP_PR_ZIP=/absolute/path/to/easy-slug-protect-<target>.zip
  * ESP_TARGET_VERSION=<released version>
  */
@@ -13,7 +13,7 @@ $old_version = getenv('ESP_LEGACY_VERSION');
 $target_version = getenv('ESP_TARGET_VERSION') ?: '0.7.40';
 if (getenv('ESP_ALLOW_DISPOSABLE_DB') !== '1' || !getenv('ESP_WP_ROOT') ||
     !in_array($stage, ['prepare', 'install', 'verify'], true) ||
-    !in_array($old_version, ['0.7.38', '0.7.39'], true) ||
+    !in_array($old_version, ['0.7.38', '0.7.39', '0.7.40'], true) ||
     !preg_match('/^[0-9]+[.][0-9]+[.][0-9]+$/D', $target_version) ||
     version_compare($target_version, $old_version, '<=')) { exit(1); }
 define('WP_DISABLE_FATAL_ERROR_HANDLER', true);
@@ -74,8 +74,8 @@ if ($stage === 'prepare') {
     }
     $setup = new ESP_Setup();
     $activation = $setup->activate();
-    if ($old_version === '0.7.39') {
-        legacy_check($activation === true, 'original 0.7.39 activation verifies before legacy fixture data');
+    if (in_array($old_version, ['0.7.39', '0.7.40'], true)) {
+        legacy_check($activation === true, 'original ' . $old_version . ' activation verifies before legacy fixture data');
     }
     legacy_check((int) get_option('esp_db_version') === 6,
         'original ' . $old_version . ' installed actual schema v6');
