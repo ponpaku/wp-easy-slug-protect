@@ -39,6 +39,16 @@ if (is_link($installed)) { unlink($installed); } elseif (is_dir($installed)) { $
 copy_runtime(dirname(__DIR__), $installed);
 require "$installed/easy-slug-protect.php";
 Easy_Slug_Protect::load_dependencies();
+// The fixture always models the *next* patch release, independently of the
+// version currently in the checkout. v0.7.41 itself must be testable.
+$installed_version = ESP_VERSION;
+$segments = explode('.', $installed_version);
+if (count($segments) !== 3 || array_filter($segments, static function ($x) { return !ctype_digit($x); })) {
+    throw new RuntimeException('Invalid installed SemVer');
+}
+$segments[2] = (string) ((int) $segments[2] + 1);
+$next_version = implode('.', $segments);
+$next_tag = 'v' . $next_version;
 $_SERVER['SERVER_SOFTWARE'] = 'Apache/2.4';
 wp_set_current_user(1);
 $setup = new ESP_Setup();
@@ -63,19 +73,19 @@ $session = $wpdb->get_results('SELECT * FROM ' . $wpdb->prefix . ESP_Config::DB_
 $package_root = sys_get_temp_dir() . '/esp44-release-' . getmypid();
 wp_mkdir_p($package_root); copy_runtime(dirname(__DIR__), "$package_root/easy-slug-protect");
 $main = "$package_root/easy-slug-protect/easy-slug-protect.php";
-file_put_contents($main, str_replace(['Version: 0.7.40', "ESP_VERSION', '0.7.40"], ['Version: 0.7.41', "ESP_VERSION', '0.7.41"], file_get_contents($main)));
-$zip = "$package_root/easy-slug-protect-0.7.41.zip";
+file_put_contents($main, str_replace(['Version: ' . $installed_version, "ESP_VERSION', '" . $installed_version], ['Version: ' . $next_version, "ESP_VERSION', '" . $next_version], file_get_contents($main)));
+$zip = "$package_root/easy-slug-protect-$next_version.zip";
 $archive = new PclZip($zip);
 check_release($archive->create("$package_root/easy-slug-protect", PCLZIP_OPT_REMOVE_PATH, $package_root) !== 0, 'build synthetic next-release ZIP');
-$record = ['tag_name' => 'v0.7.41', 'draft' => false, 'prerelease' => false,
-    'html_url' => ESP_Updater::URI . '/releases/tag/v0.7.41', 'published_at' => '2026-10-24T00:00:00Z', 'body' => '<script>unsafe()</script> release notes',
-    'assets' => [['name' => 'easy-slug-protect-0.7.41.zip', 'state' => 'uploaded', 'size' => filesize($zip),
+$record = ['tag_name' => $next_tag, 'draft' => false, 'prerelease' => false,
+    'html_url' => ESP_Updater::URI . '/releases/tag/' . $next_tag, 'published_at' => '2026-10-24T00:00:00Z', 'body' => '<script>unsafe()</script> release notes',
+    'assets' => [['name' => 'easy-slug-protect-' . $next_version . '.zip', 'state' => 'uploaded', 'size' => filesize($zip),
         'digest' => 'sha256:' . hash_file('sha256', $zip),
-        'browser_download_url' => ESP_Updater::URI . '/releases/download/v0.7.41/easy-slug-protect-0.7.41.zip']]];
-check_release(ESP_Updater::parse_release($record)['version'] === '0.7.41', 'public stable release with dedicated digest-bearing asset accepted');
+        'browser_download_url' => ESP_Updater::URI . '/releases/download/' . $next_tag . '/easy-slug-protect-' . $next_version . '.zip']]];
+check_release(ESP_Updater::parse_release($record)['version'] === $next_version, 'public stable release with dedicated digest-bearing asset accepted');
 $bad_records = [];
 foreach (['draft', 'prerelease'] as $field) { $b = $record; $b[$field] = true; $bad_records[] = $b; }
-foreach (['v0.7.41-rc.1', 'v01.2.3', 'latest', '../0.7.41'] as $tag) { $b = $record; $b['tag_name'] = $tag; $bad_records[] = $b; }
+foreach ([$next_tag . '-rc.1', 'v01.2.3', 'latest', '../' . $next_version] as $tag) { $b = $record; $b['tag_name'] = $tag; $bad_records[] = $b; }
 $b = $record; $b['assets'] = []; $bad_records[] = $b;
 $b = $record; unset($b['assets'][0]['digest']); $bad_records[] = $b;
 $b = $record; $b['assets'][0]['browser_download_url'] = 'https://evil.example/asset.zip'; $bad_records[] = $b;
@@ -128,7 +138,7 @@ $sentinel = (object) ['untouched' => true];
 check_release(ESP_Updater::plugin_information($sentinel, 'plugin_information', (object) ['slug' => 'other']) === $sentinel,
     'plugin details handler leaves unrelated plugins untouched');
 $info = plugins_api('plugin_information', (object) ['slug' => ESP_Updater::slug(), 'plugin' => $plugin]);
-check_release($info->version === '0.7.41' && strpos($info->sections['changelog'], '<script>') === false, 'native plugin details expose escaped release notes');
+check_release($info->version === $next_version && strpos($info->sections['changelog'], '<script>') === false, 'native plugin details expose escaped release notes');
 $headers = get_plugin_data($installed . '/easy-slug-protect.php');
 check_release(ESP_Updater::update_metadata('sentinel', $headers, 'other/main.php') === 'sentinel', 'shared GitHub-host hook targets exact basename');
 $older = $record; $older['tag_name'] = 'v0.7.39'; $older['html_url'] = ESP_Updater::URI . '/releases/tag/v0.7.39';
@@ -161,7 +171,7 @@ check_release(is_wp_error($incompatible) && $incompatible->get_error_code() === 
 file_put_contents($main, $main_before_requirement);
 wp_clean_plugins_cache(); wp_update_plugins();
 $updates = get_site_transient('update_plugins');
-check_release(isset($updates->response[$plugin]) && $updates->response[$plugin]->new_version === '0.7.41', 'Core discovers the release via Update URI');
+check_release(isset($updates->response[$plugin]) && $updates->response[$plugin]->new_version === $next_version, 'Core discovers the release via Update URI');
 $item = $updates->response[$plugin];
 // Core's non-Cron single upgrade registers silent deactivation without
 // maintenance. Core may report NULL for a pre-download WP_Error, so observe
@@ -180,7 +190,7 @@ if (!$automatic) {
     remove_filter('upgrader_pre_download', $observe_single, 2);
     check_release($single_blocked && $single_result !== true &&
         is_plugin_active($plugin) &&
-        get_plugin_data($installed . '/easy-slug-protect.php')['Version'] === '0.7.40' &&
+        get_plugin_data($installed . '/easy-slug-protect.php')['Version'] === $installed_version &&
         get_option(ESP_Protection_State::RUNTIME_STATE_OPTION)['state'] === 'READY',
         'non-Cron single upgrader refuses silent deactivation before changing ESP');
 }
@@ -205,11 +215,11 @@ if ($automatic) {
     check_release(is_array($result) && !is_wp_error($result[$plugin]) && $result[$plugin] !== false, 'Core manual bulk/AJAX updater installs verified release');
 }
 check_release(is_plugin_active($plugin) && is_file($installed . '/easy-slug-protect.php') &&
-    get_plugin_data($installed . '/easy-slug-protect.php')['Version'] === ($rollback ? '0.7.40' : '0.7.41'), 'update preserves folder, basename and active status');
+    get_plugin_data($installed . '/easy-slug-protect.php')['Version'] === ($rollback ? $installed_version : $next_version), 'update preserves folder, basename and active status');
 check_release(get_option('esp_settings') === $settings &&
     $wpdb->get_results('SELECT * FROM ' . $wpdb->prefix . ESP_Config::DB_TABLES['session'], ARRAY_A) === $session,
     'file update preserves settings, path passwords and session bytes');
-check_release(get_option('esp_plugin_version') === '0.7.40', 'old PHP never records new-code post-processing as complete');
+check_release(get_option('esp_plugin_version') === $installed_version, 'old PHP never records new-code post-processing as complete');
 ESP_Protection_State::mark_verification_required();
 check_release(get_option('esp_runtime_state')['state'] === 'VERIFY_REQUIRED', 'old PHP only schedules new-code verification');
 $wp_filesystem->delete($package_root, true);

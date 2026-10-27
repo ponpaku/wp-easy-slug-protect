@@ -84,7 +84,7 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/esp-release-inspect"
           unzip -q dist/*.zip -d "${RUNNER_TEMP}/esp-release-inspect"
           find "${RUNNER_TEMP}/esp-release-inspect" -name '*.php' -print0 | xargs -0 -r -n1 php -l
-      - name: Install/activate exact ZIP and upgrade actual 0.7.38 and 0.7.39
+      - name: Install/activate exact ZIP and upgrade actual 0.7.38/0.7.39/0.7.40 when applicable
         env:
           ESP_ONLY_RELEASE_GATES: '1'
           ESP_TARGET_VERSION: ${{ steps.package.outputs.tag }}
