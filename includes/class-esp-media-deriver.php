@@ -60,11 +60,14 @@ class ESP_Media_Deriver {
             // 本文を読み込まず終了する（Webサーバー委譲は上で処理済み）。
             $is_head = strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET')) === 'HEAD';
             $range = !$is_head && isset($_SERVER['HTTP_RANGE']) ? $_SERVER['HTTP_RANGE'] : '';
-            // 200/206/416・GET/HEADすべてに同じキャッシュ方針を適用。
-            $this->set_cache_headers($mime_type, $protected);
+            // 保護ファイルは、不正Rangeの416でもブラウザー・共有キャッシュへの保存を禁止。
+            // 公開ファイルは成功応答だけに従来のキャッシュ方針を適用する。
+            if ($protected) {
+                $this->set_cache_headers($mime_type, true);
+            }
             if ($range) {
                 // Rangeヘッダーがある場合は分割配信
-                if (!$this->deliver_with_range($file_path, $file_size, $mime_type, $range)) {
+                if (!$this->deliver_with_range($file_path, $file_size, $mime_type, $range, $protected)) {
                     return false;
                 }
                 exit;
@@ -76,7 +79,9 @@ class ESP_Media_Deriver {
 
             $disposition = $this->should_inline($mime_type) ? 'inline' : 'attachment';
             header('Content-Disposition: ' . $disposition . '; filename="' . basename($file_path) . '"');
-
+            if (!$protected) {
+                $this->set_cache_headers($mime_type, false);
+            }
 
             if ($is_head) {
                 exit;
@@ -309,9 +314,10 @@ class ESP_Media_Deriver {
      * @param int    $file_size ファイルサイズ
      * @param string $mime_type MIMEタイプ
      * @param string $range     Rangeヘッダー
+     * @param bool $protected  保護ファイルか
      * @return bool 成功時true
      */
-    private function deliver_with_range($file_path, $file_size, $mime_type, $range) {
+    private function deliver_with_range($file_path, $file_size, $mime_type, $range, $protected) {
         // Rangeヘッダーを単位と値に分割
         list($size_unit, $range_orig) = explode('=', $range, 2);
 
@@ -437,7 +443,9 @@ class ESP_Media_Deriver {
 
         $disposition = $this->should_inline($mime_type) ? 'inline' : 'attachment';
         header('Content-Disposition: ' . $disposition . '; filename="' . basename($file_path) . '"');
-
+        if (!$protected) {
+            $this->set_cache_headers($mime_type, false);
+        }
 
         $fp = @fopen($file_path, 'rb');
         if ($fp === false) {

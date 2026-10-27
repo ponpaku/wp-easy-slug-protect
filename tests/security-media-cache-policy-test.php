@@ -114,6 +114,10 @@ try {
         ($headers['cache-control'] ?? '') === 'public, max-age=31536000',
         'public PHP Range keeps long-lived cache');
 
+    [$status, $body, $headers] = media_request($port, 'php', false, 'GET', 'bytes=invalid');
+    verify_cache($status === 416 && $body === '' && !isset($headers['cache-control']),
+        'invalid public Range does not introduce a long-lived cache policy');
+
     [$status, $body, $headers] = media_request($port, 'delegate', true);
     verify_cache($status === 200 && $body === '' &&
         ($headers['x-sendfile'] ?? '') === __FILE__,
