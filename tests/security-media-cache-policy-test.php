@@ -13,8 +13,23 @@ if (PHP_SAPI === 'cli-server') {
         }
     }
     function wp_check_filetype($path) { return ['type' => 'image/jpeg']; }
+    class ESP_Config { const LITESPEED_QUERY_KEY = 'esp_test_key'; }
+    class ESP_Media_Protection {
+        public static function get_litespeed_key_value() { return 'test-key'; }
+    }
     require __DIR__ . '/../includes/class-esp-media-deriver.php';
-    (new ESP_Media_Deriver())->deliver(__FILE__, ($_GET['protected'] ?? '') === '1');
+    $delivery = new ESP_Media_Deriver();
+    $mode = $_GET['mode'] ?? 'php';
+    $protected = ($_GET['protected'] ?? '') === '1';
+    if ($mode === 'nginx' || $mode === 'litespeed') {
+        // Exercise the internal redirect response headers without a real external server.
+        $method = new ReflectionMethod('ESP_Media_Deriver', 'attempt_web_server_delivery');
+        $method->setAccessible(true);
+        $method->invoke($delivery, ['type' => $mode, 'path' => '/internal/fixture.jpg'],
+            __FILE__, $protected);
+        exit;
+    }
+    $delivery->deliver(__FILE__, $protected);
     exit;
 }
 
@@ -131,6 +146,25 @@ try {
     verify_cache(!isset($headers['x-litespeed-cache-control']) &&
         !isset($headers['x-accel-expires']) &&
         !isset($headers['cache-control']), 'public X-Sendfile does not impose cache policy');
+
+    foreach (['nginx' => ['x-accel-redirect', '/internal/fixture.jpg'],
+              'litespeed' => ['x-litespeed-location', '/internal/fixture.jpg?esp_test_key=test-key']] as
+             $mode => $expected) {
+        [$status, $body, $headers] = media_request($port, $mode, true);
+        verify_cache($status === 200 && $body === '' &&
+            ($headers[$expected[0]] ?? '') === $expected[1],
+            "$mode protected internal redirect emits expected header");
+        protected_headers($headers, "$mode internal redirect");
+
+        [$status, $body, $headers] = media_request($port, $mode, false);
+        verify_cache($status === 200 && $body === '' &&
+            ($headers[$expected[0]] ?? '') === $expected[1],
+            "$mode public internal redirect remains available");
+        verify_cache(!isset($headers['cache-control']) &&
+            !isset($headers['x-litespeed-cache-control']) &&
+            !isset($headers['x-accel-expires']),
+            "$mode public internal redirect does not impose cache policy");
+    }
 } finally {
     proc_terminate($process);
     foreach ($pipes as $pipe) { fclose($pipe); }
