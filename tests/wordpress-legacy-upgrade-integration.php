@@ -80,6 +80,12 @@ if ($stage === 'prepare') {
         ? ESP_Updater::during_activation(static function () use ($setup) { return $setup->activate(); })
         : $setup->activate();
     if (in_array($old_version, ['0.7.39', '0.7.40'], true)) {
+        if ($activation !== true) {
+            foreach (['esp_runtime_state', 'esp_migration_state', 'esp_update_state',
+                'esp_db_version', 'esp_plugin_version', 'esp_rewrite_policy_version'] as $diagnostic) {
+                fwrite(STDERR, 'activation diag ' . $diagnostic . ': ' . var_export(get_option($diagnostic), true) . "\n");
+            }
+        }
         legacy_check($activation === true, 'original ' . $old_version . ' activation verifies before legacy fixture data');
     }
     legacy_check((int) get_option('esp_db_version') === 6,
