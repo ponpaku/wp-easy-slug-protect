@@ -25,7 +25,7 @@
 1. php tests/security-media-cache-policy-test.php — PHPローカルHTTPサーバーで保護/公開のGET/HEAD/Range 206/416とX-Sendfile委譲ヘッダーを検証。
 2. php tests/security-head-delivery-test.php — HEADの本文不在、GETとRangeの内容。
 3. php tests/security-rewrite-failclosed-test.php — Rewrite更新時のfail-closed・共存。
-4. .github/scripts/test-wordpress-updates.sh — 既存のDisposable Apache/WordPress実HTTPテストで、保護メディアの本文一致、ログイン/ログアウトとno-store、公開メディアの非回帰を検証。
+4. .github/scripts/test-wordpress-apache-http.sh — 独立したGitHub Actions `wordpress-apache-http`ジョブで使い捨てMySQL/Apache/WordPressを起動し、`wordpress-http-prepare.php`でTXT/JPEGを作成後、`wordpress-http-check.py`で認証前・認証後・ログアウト後のGET/HEAD/Range、ヘッダーと本文を検証。
 
 ## 残る実環境の検証（PRだけで完了扱いにしない）
 
@@ -41,5 +41,5 @@
 ## 既知の非対象・リスク
 
 - #42のResolver未実装により、一部WordPress標準派生ファイルは帰属を識別できない。帰属未解決時の既存通常配信は#43で是正する。#31全体を修正完了と扱わない。
-- PHP未到達の静的配信や既に共有キャッシュに存在する過去レスポンスは、コードのCache-Control変更だけでは保護できない。
+- ローカルApache実HTTP試験はCDN・共有キャッシュ・LiteSpeed・Nginxの代用ではない。PHP未到達の静的配信や、既に共有キャッシュに存在する過去レスポンスは、コードのCache-Control変更だけでは保護できない。
 - CFM等の第三者独自配信は仕様上保証しない。サイト側でその経路を使う場合の影響は運用者が引き受ける。
