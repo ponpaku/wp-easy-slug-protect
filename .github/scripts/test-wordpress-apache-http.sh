@@ -66,4 +66,23 @@ docker exec "$container" grep -q '# BEGIN ESP Media Protection' \
 # Real Apache requests including Rewrite, WordPress auth, headers and bytes.
 ESP42_PDF_MANIFEST="$fixture_root/wordpress/wp-content/uploads/.esp42-pdf-fixture.json" \
   python3 tests/wordpress-http-check.py
+
+# #63: exercise actual WordPress dbDelta/backfill and opt-in strict PHP delivery.
+docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+  php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-ci.php
+assert_http() {
+  local path="$1" expected="$2"
+  local status
+  status="$(curl --silent --show-error --output "$fixture_root/http-probe-body" \
+    --write-out '%{http_code}' --max-time 10 "http://127.0.0.1:8094/wp-content/uploads/$path")"
+  if [[ "$status" != "$expected" ]]; then
+    echo "Issue 63 HTTP probe $path: expected $expected, got $status" >&2
+    cat "$fixture_root/http-probe-body" >&2
+    exit 1
+  fi
+}
+assert_http esp31-protected-150x150.jpg 302
+assert_http esp31-public-150x150.jpg 200
+assert_http esp63-unregistered.jpg 403
+echo 'PASS: issue 63 real WordPress/Apache strict index HTTP smoke suite'
 echo 'PASS: disposable Apache/WordPress media HTTP regression suite'
