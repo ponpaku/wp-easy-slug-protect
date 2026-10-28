@@ -8,6 +8,10 @@ if (getenv('ESP_ALLOW_DISPOSABLE_DB') !== '1' || !getenv('ESP_WP_ROOT')) { exit(
 define('WP_INSTALLING', true);
 require rtrim(getenv('ESP_WP_ROOT'), '/') . '/wp-load.php';
 wp_installing(false);
+// WP_INSTALLING intentionally skips normal active-plugin boot in this fixture.
+// Load the plugin dependencies explicitly, like wordpress-http-prepare.php.
+require WP_PLUGIN_DIR . '/esp44-custom/easy-slug-protect.php';
+Easy_Slug_Protect::load_dependencies();
 if (strpos(DB_NAME, 'esp_') !== 0 ||
     !class_exists('ESP_Media_Index') || !class_exists('ESP_Protection_State')) {
     throw new RuntimeException('Unsafe or missing WP/ESP environment');
