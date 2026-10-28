@@ -26,6 +26,8 @@ jobs:
         run: php tests/security-schema-test.php
       - name: Test missing migration marker compatibility
         run: php tests/security-migration-marker-test.php
+      - name: Test WordPress media file resolver
+        run: php tests/security-media-file-resolver-test.php
       - name: Test AVIF media protection and rewrite coverage
         run: php tests/security-avif-test.php
       - name: Test HEAD-only PHP media delivery
