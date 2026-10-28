@@ -3,6 +3,8 @@
 declare(strict_types=1);
 define('ABSPATH', __DIR__ . '/');
 define('ARRAY_A', 'ARRAY_A');
+define('ESP_VERSION', 'test');
+class ESP_Protection_State { const RUNTIME_STATE_OPTION = 'esp_test_runtime'; }
 require dirname(__DIR__) . '/includes/class-esp-media-index.php';
 
 function esp63_assert($ok, $message) {
@@ -79,7 +81,8 @@ $db->query("SET SESSION sql_mode = 'STRICT_ALL_TABLES'");
 $wpdb = new ESP63_DB($db);
 $GLOBALS['wpdb'] = $wpdb;
 $options = [
-    ESP_Media_Index::SCHEMA_OPTION => '1',
+    ESP_Media_Index::SCHEMA_OPTION => '2',
+    ESP_Protection_State::RUNTIME_STATE_OPTION => ['state'=>'READY', 'version'=>ESP_VERSION],
     ESP_Media_Index::READY_OPTION => '1',
     ESP_Media_Index::ENABLE_OPTION => '1',
 ];
@@ -140,7 +143,10 @@ try {
         active_generation BIGINT UNSIGNED NOT NULL DEFAULT 0,
         pending_count INT UNSIGNED NOT NULL DEFAULT 0,
         changed_at BIGINT UNSIGNED NOT NULL DEFAULT 0,
-        KEY status (status)
+        retry_after BIGINT UNSIGNED NOT NULL DEFAULT 0,
+        failure_count INT UNSIGNED NOT NULL DEFAULT 0,
+        KEY status (status),
+        KEY retry_queue (status,pending_count,retry_after,changed_at)
     ) ENGINE=InnoDB");
     $metadata = serialize(['file'=>'2026/10/cat.jpg',
         'sizes'=>['thumb'=>['file'=>'cat-150x150.jpg']],
