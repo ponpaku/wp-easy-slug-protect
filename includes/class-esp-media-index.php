@@ -622,11 +622,142 @@ final class ESP_Media_Index {
         }
     }
 
-    /** Bounded incremental backfill and continuous audit, never HTTP request path. */
+    /**
+     * Keep failed individual attachments dirty, but give them a bounded retry
+     * window. A later normal metadata mutation resets their failure counters.
+     * Persisting retry state uses revision CAS, so concurrent new mutations
+     * are not accidentally postponed.
+     */
+    private static function postpone_failed_rebuild($id) {
+        global $wpdb;
+        $state = self::table(self::state_table());
+        $row = $wpdb->get_row($wpdb->prepare(
+            "SELECT revision,status,pending_count,failure_count FROM $state
+             WHERE attachment_id=%d", $id), ARRAY_A);
+        if ($wpdb->last_error !== '' || !$row) { return false; }
+        if ($row['status'] !== 'dirty' || (int)$row['pending_count'] !== 0) {
+            return true; // a concurrent writer already changed its eligibility
+        }
+        $failures = (int)$row['failure_count'];
+        $delay = min(self::RETRY_MAX_SECONDS,
+            self::RETRY_BASE_SECONDS * (1 << min($failures, 6)));
+        $updated = $wpdb->query($wpdb->prepare(
+            "UPDATE $state SET failure_count=failure_count+1, retry_after=%d
+             WHERE attachment_id=%d AND revision=%d AND status='dirty'
+               AND pending_count=0",
+            time() + $delay, $id, $row['revision']));
+        if ($updated === false || $wpdb->last_error !== '') { return false; }
+        return true; // zero updated means revision changed concurrently
+    }
+
+    /** A row-level failure must not starve unrelated healthy attachments. */
+    private static function rebuild_in_batch($id) {
+        if (self::reindex_attachment($id, true)) { return true; }
+        error_log('ESP: Media index retry scheduled for attachment ' . $id);
+        return self::postpone_failed_rebuild($id);
+    }
+
+    /**
+     * Remove ownership belonging to a deleted/non-attachment post. Invariant:
+     * state is dirtied BEFORE deleting file rows; state is deleted LAST. If
+     * interrupted, either old paths remain blocked, or there are no paths.
+     * The same connection-scoped lock serializes against normal reindex.
+     */
+    private static function purge_orphan($id) {
+        global $wpdb;
+        $state = self::table(self::state_table());
+        $files = self::table(self::files_table());
+        $lock_name = 'esp63_' . substr(hash('sha256', $wpdb->prefix . ':' . $id), 0, 40);
+        $lock = $wpdb->get_var($wpdb->prepare('SELECT GET_LOCK(%s, 2)', $lock_name));
+        if ($wpdb->last_error !== '' || (string)$lock !== '1') { return false; }
+        try {
+            $type = $wpdb->get_var($wpdb->prepare(
+                "SELECT post_type FROM {$wpdb->posts} WHERE ID=%d", $id));
+            if ($wpdb->last_error !== '') { return false; }
+            if ($type === 'attachment') { return true; } // was restored; let normal scan handle it
+            if ($wpdb->query($wpdb->prepare(
+                "UPDATE $state SET status='dirty',revision=revision+1,
+                 retry_after=0 WHERE attachment_id=%d", $id)) === false) {
+                return false;
+            }
+            if ($wpdb->query($wpdb->prepare(
+                "DELETE FROM $files WHERE attachment_id=%d", $id)) === false) {
+                return false;
+            }
+            return $wpdb->query($wpdb->prepare(
+                "DELETE FROM $state WHERE attachment_id=%d", $id)) !== false;
+        } finally {
+            $wpdb->get_var($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $lock_name));
+        }
+    }
+
+    /**
+     * Incremental orphan collection, including failed deletion hooks and file
+     * rows missing a state row. Do not publish global READY until *both*
+     * sources of orphan evidence have been checked clean.
+     */
+    private static function reconcile_orphans() {
+        global $wpdb;
+        $state = self::table(self::state_table());
+        $files = self::table(self::files_table());
+        $orphans = $wpdb->get_col($wpdb->prepare(
+            "SELECT s.attachment_id FROM $state s
+             LEFT JOIN {$wpdb->posts} p ON p.ID=s.attachment_id
+               AND p.post_type='attachment'
+             WHERE p.ID IS NULL LIMIT %d", self::BATCH_SIZE));
+        if (!is_array($orphans) || $wpdb->last_error !== '') { return false; }
+        foreach ($orphans as $id) {
+            if (!self::purge_orphan((int)$id)) { return false; }
+        }
+        // A crash or legacy index may leave file rows without state; these
+        // must not be invisible to resolve() or the READY revalidation.
+        $unowned = $wpdb->get_col($wpdb->prepare(
+            "SELECT DISTINCT f.attachment_id FROM $files f
+             LEFT JOIN $state s ON s.attachment_id=f.attachment_id
+             WHERE s.attachment_id IS NULL LIMIT %d", self::BATCH_SIZE));
+        if (!is_array($unowned) || $wpdb->last_error !== '') { return false; }
+        foreach ($unowned as $id) {
+            $type = $wpdb->get_var($wpdb->prepare(
+                "SELECT post_type FROM {$wpdb->posts} WHERE ID=%d", $id));
+            if ($wpdb->last_error !== '') { return false; }
+            if ($type === 'attachment') {
+                if (!self::rebuild_in_batch((int)$id)) { return false; }
+            } elseif (!self::purge_orphan((int)$id)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** The ONLY place allowed to restore global READY after an audit cycle. */
+    private static function coverage_is_complete() {
+        global $wpdb;
+        $state = self::table(self::state_table());
+        $files = self::table(self::files_table());
+        $checks = [
+            "SELECT p.ID FROM {$wpdb->posts} p
+             LEFT JOIN $state s ON p.ID=s.attachment_id
+             WHERE p.post_type='attachment' AND
+               (s.attachment_id IS NULL OR s.status<>'ready'
+                OR s.pending_count<>0) LIMIT 1",
+            "SELECT s.attachment_id FROM $state s
+             LEFT JOIN {$wpdb->posts} p ON p.ID=s.attachment_id
+               AND p.post_type='attachment'
+             WHERE p.ID IS NULL LIMIT 1",
+            "SELECT f.attachment_id FROM $files f
+             LEFT JOIN $state s ON s.attachment_id=f.attachment_id
+             WHERE s.attachment_id IS NULL LIMIT 1",
+        ];
+        foreach ($checks as $sql) {
+            $found = $wpdb->get_var($sql);
+            if ($wpdb->last_error !== '' || $found !== null) { return false; }
+        }
+        return true;
+    }
+
+    /** Bounded incremental backfill and continuous audit; never HTTP path. */
     public static function run_batch() {
         global $wpdb;
-        // Never perform index schema changes or a rebuild while the plugin's
-        // existing protection-state upgrade/verification has not completed.
         $runtime = get_option(ESP_Protection_State::RUNTIME_STATE_OPTION, null);
         if (!is_array($runtime) || ($runtime['state'] ?? '') !== 'READY' ||
             ($runtime['version'] ?? '') !== ESP_VERSION) { return; }
@@ -634,57 +765,44 @@ final class ESP_Media_Index {
             error_log('ESP: Media index schema install failed');
             return;
         }
-        // Prioritize changed attachments over the expensive full scan.
-        // Dirty rows are visible to this connection only after an external
-        // metadata transaction commits. Never rebuild in-flight mutations.
-        $state_table = self::table(self::state_table());
+        // First remove orphans. Individual corrupt attachments can be retried
+        // later, but a DB outage or failed orphan purge must halt the cycle.
+        if (!self::reconcile_orphans()) { return; }
+        $state = self::table(self::state_table());
         $dirty_ids = $wpdb->get_col($wpdb->prepare(
-            "SELECT attachment_id FROM $state_table
-             WHERE status='dirty' AND pending_count=0
-             ORDER BY changed_at ASC LIMIT %d", self::BATCH_SIZE));
+            "SELECT attachment_id FROM $state
+             WHERE status='dirty' AND pending_count=0 AND retry_after<=%d
+             ORDER BY changed_at ASC LIMIT %d", time(), self::BATCH_SIZE));
         if (!is_array($dirty_ids) || $wpdb->last_error !== '') { return; }
-        foreach ($dirty_ids as $dirty_id) {
-            if (!self::reindex_attachment((int)$dirty_id, true)) { return; }
+        foreach ($dirty_ids as $id) {
+            if (!self::rebuild_in_batch((int)$id)) { return; }
         }
+
+        // The full audit advances even when an individual attachment cannot
+        // rebuild. Its dirty record and retry_after preserve the problem.
         $cursor = max(0, (int)get_option(self::CURSOR_OPTION, 0));
         $ids = $wpdb->get_col($wpdb->prepare(
             "SELECT ID FROM {$wpdb->posts} WHERE post_type='attachment'
              AND ID>%d ORDER BY ID ASC LIMIT %d", $cursor, self::BATCH_SIZE));
         if (!is_array($ids) || $wpdb->last_error !== '') { return; }
         if (!$ids) {
-            $state = self::table(self::state_table());
-            $missing = $wpdb->get_var("SELECT p.ID FROM {$wpdb->posts} p
-                LEFT JOIN $state s ON p.ID=s.attachment_id
-                WHERE p.post_type='attachment' AND (s.attachment_id IS NULL OR
-                s.status<>'ready' OR s.pending_count<>0) LIMIT 1");
-            if ($wpdb->last_error === '' && $missing === null) {
-                update_option(self::READY_OPTION, '1', false);
-            } else {
-                update_option(self::READY_OPTION, '0', false);
-            }
+            update_option(self::READY_OPTION,
+                self::coverage_is_complete() ? '1' : '0', false);
             update_option(self::CURSOR_OPTION, 0, false);
             return;
         }
         foreach ($ids as $id) {
             $id = (int)$id;
-            $state = self::table(self::state_table());
             $current = $wpdb->get_row($wpdb->prepare(
-                "SELECT status,pending_count,changed_at FROM $state WHERE attachment_id=%d",
-                $id), ARRAY_A);
+                "SELECT status,pending_count,retry_after FROM $state
+                 WHERE attachment_id=%d", $id), ARRAY_A);
             if ($wpdb->last_error !== '') { return; }
-            // Never let Cron claim an in-flight WP mutation as completed.
-            if ($current && (int)$current['pending_count'] > 0 &&
-                time() - (int)$current['changed_at'] < 900) {
+            if ($current && ((int)$current['pending_count'] > 0 ||
+                ($current['status'] === 'dirty' &&
+                 (int)$current['retry_after'] > time()))) {
                 continue;
             }
-            if ($current && (int)$current['pending_count'] > 0) {
-                // Stuck mutation: must not silently reset pending and publish.
-                // Operator intervention / explicit recovery is required.
-                error_log('ESP: Media index pending mutation requires investigation: ' . $id);
-                continue;
-            }
-            if (!self::reindex_attachment($id, true)) { return; }
-            $cursor = $id;
+            if (!self::rebuild_in_batch($id)) { return; }
         }
         update_option(self::CURSOR_OPTION, (int)end($ids), false);
     }
