@@ -121,14 +121,16 @@ try {
     esp63_sql("CREATE TABLE $files (
         path_hash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
         file_path TEXT NOT NULL, attachment_id BIGINT UNSIGNED NOT NULL,
+        generation BIGINT UNSIGNED NOT NULL DEFAULT 0,
         protected_path_id VARCHAR(191) NOT NULL DEFAULT '',
-        PRIMARY KEY(path_hash,attachment_id),
+        PRIMARY KEY(path_hash,attachment_id,generation),
         KEY attachment_id(attachment_id),KEY protected_path_id(protected_path_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
     esp63_sql("CREATE TABLE $state (
         attachment_id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
         status VARCHAR(16) NOT NULL DEFAULT 'dirty',
         revision BIGINT UNSIGNED NOT NULL DEFAULT 0,
+        active_generation BIGINT UNSIGNED NOT NULL DEFAULT 0,
         pending_count INT UNSIGNED NOT NULL DEFAULT 0,
         changed_at BIGINT UNSIGNED NOT NULL DEFAULT 0,
         KEY status (status)
