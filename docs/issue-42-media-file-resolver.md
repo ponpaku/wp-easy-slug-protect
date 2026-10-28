@@ -16,9 +16,9 @@
 ## 設計
 
 1. `wp_upload_dir()['basedir']` と対象ファイルを実体パスへ正規化し、ディレクトリ区切りを含めて境界を検証。uploadsルート自体のsymlinkは許容。配信入口`validate_file_path()`は3回以内でURLデコードした後、不正パスを「削って直す」代わりに拒否し、ルート以下にsymlinkコンポーネントがあれば拒否する。
-2. WordPress命名規則の限定的な接尾辞（`-幅x高さ`、`-scaled`、`-rotated`、`-e数字`、`-pdf`、`-poster`）を外した親候補を生成。媒体間変換に対応する候補拡張子リストはResolver内1か所に限定。名前は候補選別のみ。
+2. WordPress命名規則の限定的な接尾辞（`-幅x高さ`、WordPress重複回避の`-1`等の有界数値、`-scaled`、`-rotated`、`-e数字`、`-pdf`、`-poster`、`-video`、`-animated`）を外した親候補を生成。媒体間変換に対応する候補拡張子リストはResolver内1か所に限定。名前は候補選別のみ。
 3. `_wp_attached_file` と`wp_posts.post_type='attachment'`をJOINして一括検索。`LIMIT 65`で64レコード超をエラーとする。候補パスは最大160件、接尾辞剥離は最大4回、`sizes`照合は128項目まで。
-4. DB照合順序が大小文字を同一視しても、取得した`meta_value`をPHP側で厳密比較。`wp_get_attachment_metadata($id, true)` の現行`file`、`sizes[*].file`、`original_image`、`source_image`、`animated_video`、`animated_video_poster`だけを照合。旧バックアップ・`_wp_sideloaded_file`は所有証拠としない。
+4. DB照合順序が大小文字を同一視しても、取得した`meta_value`をPHP側で厳密比較。`wp_get_attachment_metadata($id, true)` の現行`file`、`sizes[*].file`、`original_image`、`source_image`、`animated_video`、`animated_video_poster`だけを照合。PDFはWordPress標準のメタデータに`file`がない場合に限り、検証済みの`_wp_attached_file`のディレクトリを基準に`sizes[*].file`を厳密照合（拡張子PDF限定）。旧バックアップ・`_wp_sideloaded_file`は所有証拠としない。
 5. 単一所有者ならresolved、2件以上ならambiguous、DB・上限の問題ならerror。永続索引や専用DBテーブルを導入しない。
 
 ## #43までの配信互換性
