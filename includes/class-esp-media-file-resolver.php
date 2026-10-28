@@ -245,9 +245,16 @@ final class ESP_Media_File_Resolver {
      * null means the bounded check could not finish safely.
      */
     private static function matches_metadata($metadata, $attached, $requested) {
-        $directory = dirname($attached);
+        // The current metadata file determines the relative base for sizes
+        // and companions. Inconsistent or unsafe roots are not ownership proof.
+        if (!isset($metadata['file']) ||
+            !self::valid_relative_path($metadata['file']) ||
+            dirname($metadata['file']) !== dirname($attached)) {
+            return false;
+        }
+        $directory = dirname($metadata['file']);
         $directory = $directory === '.' ? '' : $directory . '/';
-        if (isset($metadata['file']) && $metadata['file'] === $requested) {
+        if ($metadata['file'] === $requested) {
             return true;
         }
 

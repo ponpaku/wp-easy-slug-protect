@@ -147,6 +147,11 @@ try {
     $metadata[70] = ['file' => '2026/10/staging.jpg',
         'sizes' => [], 'original_image' => 'not-this.jpg'];
     expect_status($resolver, '2026/10/staging-200x200.jpg', 'unresolved');
+    // A metadata-relative path must not be interpreted from an unrelated root.
+    $wpdb->records[] = ['id' => 71, 'path' => '2026/10/mismatch.jpg'];
+    $metadata[71] = ['file' => '2026/11/mismatch.jpg',
+        'sizes' => ['thumbnail' => ['file' => 'mismatch-80x80.webp']]];
+    expect_status($resolver, '2026/10/mismatch-80x80.webp', 'unresolved');
 
     $wpdb->failed = true;
     expect_status($resolver, '2026/10/photo-150x150.jpg', 'error');
