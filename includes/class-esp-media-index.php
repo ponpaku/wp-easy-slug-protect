@@ -17,6 +17,8 @@ final class ESP_Media_Index {
     const CURSOR_OPTION = 'esp_media_index_v1_cursor';
     const BATCH_HOOK = 'esp_media_index_v1_batch';
     const BATCH_SIZE = 200;
+    const RETRY_BASE_SECONDS = 60;
+    const RETRY_MAX_SECONDS = 3600;
     const MAX_METADATA_SIZES = 128;
     const MAX_PATHS = 160;
     const PROTECTION_META = '_esp_media_protected_path_id';
@@ -48,7 +50,7 @@ final class ESP_Media_Index {
         return (string)get_option(self::READY_OPTION, '0') === '1';
     }
     private static function installed() {
-        return (string)get_option(self::SCHEMA_OPTION, '0') === '1';
+        return (string)get_option(self::SCHEMA_OPTION, '0') === '2';
     }
 
     public static function register() {
@@ -114,15 +116,18 @@ final class ESP_Media_Index {
             active_generation bigint(20) unsigned NOT NULL DEFAULT 0,
             pending_count int(11) unsigned NOT NULL DEFAULT 0,
             changed_at bigint(20) unsigned NOT NULL DEFAULT 0,
+            retry_after bigint(20) unsigned NOT NULL DEFAULT 0,
+            failure_count int(11) unsigned NOT NULL DEFAULT 0,
             PRIMARY KEY  (attachment_id),
-            KEY status (status)
+            KEY status (status),
+            KEY retry_queue (status,pending_count,retry_after,changed_at)
         ) $charset;");
         foreach ([$files, $state] as $table) {
             $row = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($table)));
             if ($wpdb->last_error !== '' || $row !== $table) { return false; }
         }
-        return update_option(self::SCHEMA_OPTION, '1', false) ||
-            (string)get_option(self::SCHEMA_OPTION) === '1';
+        return update_option(self::SCHEMA_OPTION, '2', false) ||
+            (string)get_option(self::SCHEMA_OPTION) === '2';
     }
 
     /** WordPress metadata paths are relative to the uploads root. */
@@ -395,12 +400,13 @@ final class ESP_Media_Index {
     public static function on_attachment_deleting($id) {
         if (!self::installed()) { return; }
         if (!self::mark_dirty((int)$id)) {
-            // delete_attachment is an action with no cancellation return. If
-            // global invalidation also fails, abort the operation rather than
-            // let a stale, still-READY mapping survive a file deletion.
+            // No cancellable WordPress action here. Record the deletion even
+            // when we have to fall back to global invalidation. Recovery
+            // MUST remove orphaned rows before READY can be republished.
             if (!self::invalidate_global()) {
                 throw new RuntimeException('ESP media index: cannot fence attachment deletion');
             }
+            self::$deleting[(int)$id] = false;
             return;
         }
         self::$deleting[(int)$id] = true;
@@ -408,7 +414,13 @@ final class ESP_Media_Index {
     }
     public static function on_post_deleted($id) {
         if (!isset(self::$deleting[(int)$id])) { return; }
+        $fenced = self::$deleting[(int)$id];
         unset(self::$deleting[(int)$id]);
+        if (!$fenced) {
+            // The pre-delete state write failed. Keep global coverage invalid;
+            // the orphan collector can now purge the deleted attachment.
+            return;
+        }
         self::finish_local((int)$id);
         self::complete_mutation((int)$id);
     }
@@ -445,7 +457,8 @@ final class ESP_Media_Index {
           (attachment_id,status,revision,pending_count,changed_at)
           VALUES (%d,'dirty',1,1,%d)
           ON DUPLICATE KEY UPDATE status='dirty',
-          revision=revision+1, pending_count=pending_count+1,changed_at=VALUES(changed_at)",
+          revision=revision+1, pending_count=pending_count+1,
+          retry_after=0, failure_count=0, changed_at=VALUES(changed_at)",
           $id, time());
         return $wpdb->query($sql) !== false && $wpdb->last_error === '';
     }
