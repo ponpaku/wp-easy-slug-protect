@@ -115,6 +115,10 @@ try {
     expect_status($resolver, '2026/10/report-pdf-150x150.jpg', 'resolved', 20);
     expect_status($resolver, '2026/10/clip.mp4', 'resolved', 30);
     expect_status($resolver, '2026/10/clip-poster.jpg', 'resolved', 30);
+    $metadata[30]['animated_video'] = 'clip-animated.mp4';
+    $metadata[30]['animated_video_poster'] = 'clip.gif-poster.jpg';
+    expect_status($resolver, '2026/10/clip-animated.mp4', 'resolved', 30);
+    expect_status($resolver, '2026/10/clip.gif-poster.jpg', 'resolved', 30);
     expect_status($resolver, '2026/10/edited-250x250.png', 'resolved', 40);
     expect_status($resolver, '2026/10/unknown-150x150.avif', 'unresolved');
     expect_status($resolver, '2026/11/photo-150x150.jpg', 'unresolved');

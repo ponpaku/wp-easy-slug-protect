@@ -181,7 +181,7 @@ final class ESP_Media_File_Resolver {
         while (count($stems) < self::MAX_STEMS) {
             $last = $stems[count($stems) - 1];
             $next = preg_replace(
-                '/(?:-[1-9][0-9]*x[1-9][0-9]*|-scaled|-rotated|-e[0-9]{8,16}|-pdf|-poster)$/i',
+                '/(?:-[1-9][0-9]*x[1-9][0-9]*|-scaled|-rotated|-e[0-9]{8,16}|-pdf|-poster|-video|-animated)$/i',
                 '', $last, 1, $replaced
             );
             if ($replaced !== 1 || $next === '') {
@@ -192,6 +192,12 @@ final class ESP_Media_File_Resolver {
         $paths = [$relative];
         $edit_prefixes = [];
         foreach ($stems as $candidate_stem) {
+            // A companion may retain the source extension in its stem
+            // (e.g. "clip.gif-poster.jpg"). Inspect only the exact original.
+            if (in_array(strtolower(pathinfo($candidate_stem, PATHINFO_EXTENSION)),
+                self::PARENT_EXTENSIONS, true)) {
+                $paths[] = $directory . $candidate_stem;
+            }
             foreach (self::PARENT_EXTENSIONS as $extension) {
                 $paths[] = $directory . $candidate_stem . '.' . $extension;
             }
