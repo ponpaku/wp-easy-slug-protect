@@ -256,17 +256,20 @@ final class ESP_Media_Index {
                 !ctype_digit((string)$row['attachment_id']) ||
                 (int)$row['attachment_id'] <= 0 ||
                 !is_string($row['protected_path_id']) ||
-                ($row['live_protected_path'] !== null &&
-                 !is_string($row['live_protected_path'])) ||
-                $row['protected_path_id'] !== (string)($row['live_protected_path'] ?? '') ||
                 $row['status'] !== 'ready' || (int)$row['pending_count'] !== 0) {
                 return ['status' => 'error'];
             }
             // Published state can retain old generation rows until cleanup.
-            // While dirty, *all* old/new rows are blockers to prevent a
-            // temporary multiple-owner path from falsely becoming public.
+            // While dirty, *all* old/new rows block access, even when stale.
+            // Once ready, inactive generations are deliberately ignored,
+            // including their old protection IDs (which may now disagree).
             if ((string)$row['generation'] !== (string)$row['active_generation']) {
                 continue;
+            }
+            if (($row['live_protected_path'] !== null &&
+                 !is_string($row['live_protected_path'])) ||
+                $row['protected_path_id'] !== (string)($row['live_protected_path'] ?? '')) {
+                return ['status' => 'error'];
             }
             // A duplicate postmeta row can yield the same owner twice.
             $id = (int)$row['attachment_id'];
