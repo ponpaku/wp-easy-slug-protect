@@ -24,6 +24,8 @@ final class ESP_Media_Index {
     private static $scheduled = false;
     private static $deleting = [];
     private static $by_mid = [];
+    /** Pre-hooks whose metadata mutation did not produce a post-hook (e.g. no-op). */
+    private static $local_pending = [];
 
     public static function files_table() {
         global $wpdb;
@@ -64,6 +66,7 @@ final class ESP_Media_Index {
         add_filter('cron_schedules', [self::class, 'cron_intervals']);
         add_action(self::BATCH_HOOK, [self::class, 'run_batch']);
         add_action('init', [self::class, 'schedule'], 20);
+        add_action('shutdown', [self::class, 'finish_noop_writes'], 1);
     }
     public static function cron_intervals($schedules) {
         $schedules['esp_media_index_five_minutes'] = [
@@ -251,11 +254,15 @@ final class ESP_Media_Index {
         if ($check !== null || !self::relevant($meta_key) || !self::installed()) { return $check; }
         // WordPress delete_metadata(..., delete_all=true) may mutate every post.
         // Without an exact finite affected set, do not admit it in strict mode.
-        if ($extra === true && (int)$post_id === 0) {
+        if ($extra === true) {
             return self::enabled() ? false : null;
         }
         if (get_post_type((int)$post_id) !== 'attachment') { return $check; }
-        return self::mark_dirty((int)$post_id) ? null : (self::enabled() ? false : null);
+        if (self::mark_dirty((int)$post_id)) {
+            self::track_local((int)$post_id);
+            return null;
+        }
+        return self::enabled() ? false : null;
     }
     public static function guard_by_mid($check, $meta_id, $meta_value, $meta_key = false) {
         if ($check !== null || !self::installed()) { return $check; }
@@ -264,6 +271,7 @@ final class ESP_Media_Index {
         if (!self::relevant($old->meta_key) && !self::relevant($meta_key)) { return $check; }
         if (self::mark_dirty((int)$old->post_id)) {
             self::$by_mid[(int)$meta_id] = (int)$old->post_id;
+            self::track_local((int)$old->post_id);
             return null;
         }
         return self::enabled() ? false : null;
@@ -272,7 +280,11 @@ final class ESP_Media_Index {
         if ($check !== null || !self::installed()) { return $check; }
         $old = get_metadata_by_mid('post', $meta_id);
         if (!is_object($old) || !self::relevant($old->meta_key)) { return $check; }
-        return self::mark_dirty((int)$old->post_id) ? null : (self::enabled() ? false : null);
+        if (self::mark_dirty((int)$old->post_id)) {
+            self::track_local((int)$old->post_id);
+            return null;
+        }
+        return self::enabled() ? false : null;
     }
     public static function on_meta_saved($meta_id, $post_id, $meta_key, $meta_value) {
         if (!self::installed()) { return; }
@@ -280,22 +292,53 @@ final class ESP_Media_Index {
         unset(self::$by_mid[(int)$meta_id]);
         if (!self::relevant($meta_key) && $was_by_mid === null) { return; }
         if (get_post_type((int)$post_id) !== 'attachment') { return; }
+        self::finish_local((int)$post_id);
         self::complete_mutation((int)$post_id);
     }
     public static function on_attachment_created($id) {
-        if (self::installed()) { self::mark_dirty((int)$id); self::complete_mutation((int)$id); }
+        if (self::installed() && self::mark_dirty((int)$id)) {
+            self::track_local((int)$id);
+            self::finish_local((int)$id);
+            self::complete_mutation((int)$id);
+        }
     }
     public static function on_attachment_deleting($id) {
         if (self::installed() && self::mark_dirty((int)$id)) {
             self::$deleting[(int)$id] = true;
+            self::track_local((int)$id);
         }
     }
     public static function on_post_deleted($id) {
         if (!isset(self::$deleting[(int)$id])) { return; }
         unset(self::$deleting[(int)$id]);
+        self::finish_local((int)$id);
         self::complete_mutation((int)$id);
     }
 
+    private static function track_local($id) {
+        self::$local_pending[$id] = (self::$local_pending[$id] ?? 0) + 1;
+    }
+    private static function finish_local($id) {
+        if (!empty(self::$local_pending[$id])) {
+            --self::$local_pending[$id];
+            if (self::$local_pending[$id] === 0) { unset(self::$local_pending[$id]); }
+        }
+    }
+    /**
+     * Core may return false for no-op metadata updates without emitting an
+     * after-hook. Never leave those attachments in a perpetual pending state.
+     * The originating PHP request is ending; another request's pending count
+     * remains independently tracked in the DB.
+     */
+    public static function finish_noop_writes() {
+        $pending = self::$local_pending;
+        self::$local_pending = [];
+        foreach ($pending as $id => $count) {
+            for ($i = 0; $i < $count; ++$i) {
+                self::complete_mutation((int)$id);
+            }
+        }
+    }
     private static function mark_dirty($id) {
         global $wpdb;
         if ($id <= 0) { return false; }
