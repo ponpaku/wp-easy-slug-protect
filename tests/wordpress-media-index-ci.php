@@ -133,8 +133,8 @@ $wpdb->query("INSERT INTO $probe_table (id) VALUES (1)");
 if (!update_post_meta($id, ESP_Media_Index::PROTECTION_META, 'transaction_test')) {
     throw new RuntimeException('external transaction WordPress metadata update failed');
 }
-if (ESP_Media_Index::reindex_attachment($id) !== false) {
-    throw new RuntimeException('reindex committed external transaction');
+if (!ESP_Media_Index::reindex_attachment($id)) {
+    throw new RuntimeException('rebuild inside external transaction failed');
 }
 $wpdb->query('ROLLBACK');
 wp_cache_delete($id, 'post_meta');
