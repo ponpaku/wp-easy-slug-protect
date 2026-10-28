@@ -220,6 +220,26 @@ try {
     esp63_assert(ESP_Media_Index::reindex_attachment(11), 'second attachment index');
     esp63_assert(ESP_Media_Index::resolve($uploads . '/2026/10/cat-150x150.jpg')['status']
         === 'ambiguous', 'overlapping owners cannot silently publish');
+    // Generation staging: a dirty protected competing owner must remain a
+    // blocker while new-generation rows are partly written. Deleting old
+    // rows first would make the ready/public owner look unique here.
+    esp63_assert(ESP_Media_Index::guard_meta(null, 11,
+        '_wp_attached_file', '2026/10/cat-150x150.jpg') === null,
+        'pre-fence competing owner');
+    esp63_assert(ESP_Media_Index::resolve($uploads . '/2026/10/cat-150x150.jpg')['status']
+        === 'error', 'old generation still blocks during rebuild');
+    $stage_generation = (int)$wpdb->get_var("SELECT revision FROM $state WHERE attachment_id=11");
+    esp63_sql("INSERT INTO $files (path_hash,file_path,attachment_id,generation,protected_path_id)
+        VALUES ('" . hash('sha256', '2026/10/cat-150x150.jpg') . "',
+                '2026/10/cat-150x150.jpg',11,$stage_generation,'')");
+    esp63_assert(ESP_Media_Index::resolve($uploads . '/2026/10/cat-150x150.jpg')['status']
+        === 'error', 'staged new generation cannot hide dirty owner');
+    esp63_sql("DELETE FROM $files WHERE attachment_id=11 AND generation=$stage_generation");
+    ESP_Media_Index::on_meta_saved(33,11,'_wp_attached_file','2026/10/cat-150x150.jpg');
+    esp63_assert(ESP_Media_Index::reindex_attachment(11),
+        'publish competing owner only after full rebuild');
+    esp63_assert(ESP_Media_Index::resolve($uploads . '/2026/10/cat-150x150.jpg')['status']
+        === 'ambiguous', 'published competing owners remain ambiguous');
     ESP_Media_Index::on_attachment_deleting(11);
     esp63_sql('DELETE FROM esp63_postmeta WHERE post_id=11');
     esp63_sql('DELETE FROM esp63_posts WHERE ID=11');
