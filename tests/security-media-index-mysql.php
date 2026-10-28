@@ -167,6 +167,27 @@ try {
     esp63_assert(ESP_Media_Index::resolve($uploads . '/2026/10/cat.jpg')['status']
         === 'resolved', 'restored protection metadata agrees with index');
 
+    // Deterministic two-writer interleaving: the first writer's completion
+    // cannot publish while another WordPress metadata mutation is pending.
+    esp63_assert(ESP_Media_Index::guard_meta(null, 10,
+        '_esp_media_protected_path_id', 'writer_A') === null,
+        'first mutation marks pending');
+    esp63_assert(ESP_Media_Index::guard_meta(null, 10,
+        '_esp_media_protected_path_id', 'writer_B') === null,
+        'second mutation increments pending');
+    esp63_sql("UPDATE esp63_postmeta SET meta_value='writer_A'
+        WHERE post_id=10 AND meta_key='_esp_media_protected_path_id'");
+    ESP_Media_Index::on_meta_saved(30, 10, '_esp_media_protected_path_id', 'writer_A');
+    esp63_assert(ESP_Media_Index::resolve($uploads . '/2026/10/cat.jpg')['status']
+        === 'error', 'first completion cannot publish with second pending');
+    esp63_sql("UPDATE esp63_postmeta SET meta_value='writer_B'
+        WHERE post_id=10 AND meta_key='_esp_media_protected_path_id'");
+    ESP_Media_Index::on_meta_saved(31, 10, '_esp_media_protected_path_id', 'writer_B');
+    $settled = ESP_Media_Index::resolve($uploads . '/2026/10/cat.jpg');
+    esp63_assert($settled['status'] === 'resolved' &&
+        $settled['protected_path_id'] === 'writer_B',
+        'last completion publishes latest metadata');
+
     // Duplicate owners, including protected + public, are ambiguous.
     esp63_sql("INSERT INTO esp63_posts (ID,post_type) VALUES (11,'attachment')");
     esp63_sql("INSERT INTO esp63_postmeta(post_id,meta_key,meta_value) VALUES
