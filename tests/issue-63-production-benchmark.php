@@ -285,6 +285,14 @@ try {
             FROM information_schema.tables WHERE table_schema=DATABASE()
             AND table_name IN ('esp63_posts','esp63_postmeta','esp63_media_index')")
             ->fetch_assoc()['bytes'];
+        // Separate production index overhead from the three-table baseline+
+        // prototype aggregate; the previous metric alone omitted both new
+        // production tables and was misleading for a storage comparison.
+        $production_index_bytes = (int)$mysqli->query("SELECT
+            COALESCE(SUM(data_length+index_length),0) AS bytes
+            FROM information_schema.tables WHERE table_schema=DATABASE()
+            AND table_name IN ('esp63_esp_media_files_v1','esp63_esp_media_file_state_v1')")
+            ->fetch_assoc()['bytes'];
         $count_row = $mysqli->query('SELECT COUNT(*) AS n FROM esp63_media_index')->fetch_assoc();
         if ((int)$count_row['n'] !== $size * 5) {
             throw new RuntimeException('Unexpected dedicated index row count');
@@ -301,7 +309,8 @@ try {
             'seed_seconds' => round($seed_secs, 2),
             'resolver_pr62' => $baseline,
             'dedicated_index' => $indexed,
-            'db_size_bytes_estimate' => $db_bytes,
+            'baseline_plus_prototype_bytes_estimate' => $db_bytes,
+            'production_index_bytes_estimate' => $production_index_bytes,
         ];
         foreach (array_merge($targets, $original_targets) as $path) { @unlink($path); }
         echo $size . " originals: main p95 " . $main_original['p95_ms'] .
