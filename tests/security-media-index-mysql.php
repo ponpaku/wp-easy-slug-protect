@@ -15,6 +15,7 @@ final class ESP63_DB {
     public $postmeta = 'esp63_postmeta';
     public $last_error = '';
     public $dbh;
+    public $fail_state_write = false;
     private $db;
     public function __construct($db) { $this->db = $db; $this->dbh = $db; }
     public function esc_like($str) { return addcslashes($str, '_%\\'); }
@@ -32,6 +33,11 @@ final class ESP63_DB {
     }
     public function query($sql) {
         $this->last_error = '';
+        if ($this->fail_state_write &&
+            strpos($sql, 'INSERT INTO esp63_esp_media_file_state_v1') !== false) {
+            $this->last_error = 'injected index state failure';
+            return false;
+        }
         try { return $this->db->query($sql); }
         catch (Throwable $e) { $this->last_error = $e->getMessage(); return false; }
     }
@@ -79,7 +85,13 @@ function get_post_type($id) {
     global $wpdb;
     return $wpdb->get_var($wpdb->prepare("SELECT post_type FROM {$wpdb->posts} WHERE ID=%d", $id));
 }
-function get_metadata_by_mid($type, $id) { return false; }
+function get_metadata_by_mid($type, $id) {
+    global $wpdb;
+    $row = $wpdb->get_row($wpdb->prepare(
+        "SELECT post_id, meta_key, meta_value FROM {$wpdb->postmeta} WHERE meta_id=%d",
+        $id), ARRAY_A);
+    return $row ? (object)$row : false;
+}
 $uploads = sys_get_temp_dir() . '/esp63-prod-' . getmypid();
 @mkdir($uploads . '/2026/10', 0700, true);
 $GLOBALS['uploads'] = $uploads;
@@ -152,6 +164,10 @@ try {
     esp63_sql("UPDATE esp63_postmeta SET meta_value='secret_B'
         WHERE post_id=10 AND meta_key='_esp_media_protected_path_id'");
     ESP_Media_Index::on_meta_saved(20,10,'_esp_media_protected_path_id','secret_B');
+    esp63_assert(ESP_Media_Index::resolve($uploads . '/2026/10/cat.jpg')['status']
+        === 'error', 'post-hook leaves index dirty until independent worker');
+    esp63_assert(ESP_Media_Index::reindex_attachment(10),
+        'independent reindex after committed metadata update');
     $changed = ESP_Media_Index::resolve($uploads . '/2026/10/cat.jpg');
     esp63_assert($changed['status'] === 'resolved' &&
         $changed['protected_path_id'] === 'secret_B', 'post-update protection visible');
@@ -183,6 +199,10 @@ try {
     esp63_sql("UPDATE esp63_postmeta SET meta_value='writer_B'
         WHERE post_id=10 AND meta_key='_esp_media_protected_path_id'");
     ESP_Media_Index::on_meta_saved(31, 10, '_esp_media_protected_path_id', 'writer_B');
+    esp63_assert(ESP_Media_Index::resolve($uploads . '/2026/10/cat.jpg')['status']
+        === 'error', 'second post-hook still does not publish');
+    esp63_assert(ESP_Media_Index::reindex_attachment(10),
+        'worker publishes only after both writers complete');
     $settled = ESP_Media_Index::resolve($uploads . '/2026/10/cat.jpg');
     esp63_assert($settled['status'] === 'resolved' &&
         $settled['protected_path_id'] === 'writer_B',
@@ -199,6 +219,7 @@ try {
     esp63_sql('DELETE FROM esp63_postmeta WHERE post_id=11');
     esp63_sql('DELETE FROM esp63_posts WHERE ID=11');
     ESP_Media_Index::on_post_deleted(11);
+    esp63_assert(ESP_Media_Index::reindex_attachment(11), 'worker removes deleted attachment');
     esp63_assert(ESP_Media_Index::resolve($uploads . '/2026/10/cat-150x150.jpg')['status']
         === 'resolved', 'deleted overlapping owner removed');
 
@@ -222,6 +243,72 @@ try {
     esp63_assert(ESP_Media_Index::resolve($uploads . '/2026/10/cat.jpg')['status']
         === 'resolved', 'restored index resolves');
 
+    // R02: never start/commit a nested transaction. The dirty marker and
+    // WordPress metadata share the caller's transaction and roll back together.
+    esp63_sql("CREATE TABLE esp63_external_txn (id INT PRIMARY KEY) ENGINE=InnoDB");
+    esp63_sql('START TRANSACTION');
+    esp63_sql('INSERT INTO esp63_external_txn VALUES (1)');
+    esp63_assert(ESP_Media_Index::guard_meta(null,10,
+        '_esp_media_protected_path_id','txn_rollback') === null,
+        'external transaction: pre-hook participates without COMMIT');
+    esp63_sql("UPDATE esp63_postmeta SET meta_value='txn_rollback'
+        WHERE post_id=10 AND meta_key='_esp_media_protected_path_id'");
+    ESP_Media_Index::on_meta_saved(101,10,'_esp_media_protected_path_id','txn_rollback');
+    esp63_assert(!ESP_Media_Index::reindex_attachment(10),
+        'worker refuses to start transaction on another transaction');
+    esp63_sql('ROLLBACK');
+    esp63_assert((int)$wpdb->get_var('SELECT COUNT(*) FROM esp63_external_txn') === 0,
+        'external INSERT was not implicitly committed');
+    $rolled = ESP_Media_Index::resolve($uploads . '/2026/10/cat.jpg');
+    esp63_assert($rolled['status'] === 'resolved' &&
+        $rolled['protected_path_id'] === 'writer_B',
+        'rolled back metadata and dirty marker together');
+    esp63_sql('START TRANSACTION');
+    esp63_sql('INSERT INTO esp63_external_txn VALUES (2)');
+    esp63_assert(ESP_Media_Index::guard_meta(null,10,
+        '_esp_media_protected_path_id','txn_committed') === null,
+        'external transaction second pre-hook');
+    esp63_sql("UPDATE esp63_postmeta SET meta_value='txn_committed'
+        WHERE post_id=10 AND meta_key='_esp_media_protected_path_id'");
+    ESP_Media_Index::on_meta_saved(102,10,'_esp_media_protected_path_id','txn_committed');
+    esp63_sql('COMMIT');
+    esp63_assert((int)$wpdb->get_var('SELECT COUNT(*) FROM esp63_external_txn') === 1,
+        'external COMMIT controlled by caller');
+    esp63_assert(ESP_Media_Index::resolve($uploads . '/2026/10/cat.jpg')['status']
+        === 'error', 'committed change is dirty before worker runs');
+    esp63_assert(ESP_Media_Index::reindex_attachment(10), 'worker indexes committed transaction');
+    esp63_assert(ESP_Media_Index::resolve($uploads . '/2026/10/cat.jpg')['protected_path_id']
+        === 'txn_committed', 'worker published committed protection');
+
+    // R03: fail only state-table writes, not WordPress postmeta or option
+    // writes. Bypass hooks in compatibility mode only after global invalidation.
+    $mid = (int)$wpdb->get_var("SELECT meta_id FROM esp63_postmeta WHERE post_id=10
+        AND meta_key='_wp_attached_file'");
+    $options[ESP_Media_Index::ENABLE_OPTION] = '0';
+    $options[ESP_Media_Index::READY_OPTION] = '1';
+    $wpdb->fail_state_write = true;
+    esp63_assert(ESP_Media_Index::guard_by_mid(null, $mid, '2026/10/new.jpg') === null,
+        'by-mid failure admitted only after compatibility invalidation');
+    esp63_assert($options[ESP_Media_Index::READY_OPTION] === '0',
+        'failed by-mid pre-fence revokes global READY');
+    $options[ESP_Media_Index::READY_OPTION] = '1';
+    esp63_assert(ESP_Media_Index::guard_delete_by_mid(null, $mid) === null &&
+        $options[ESP_Media_Index::READY_OPTION] === '0',
+        'failed by-mid delete revokes READY');
+    $options[ESP_Media_Index::READY_OPTION] = '1';
+    ESP_Media_Index::on_attachment_deleting(10);
+    esp63_assert($options[ESP_Media_Index::READY_OPTION] === '0',
+        'failed attachment deletion revokes READY');
+    $options[ESP_Media_Index::ENABLE_OPTION] = '1';
+    $options[ESP_Media_Index::READY_OPTION] = '1';
+    esp63_assert(ESP_Media_Index::guard_by_mid(null, $mid, '2026/10/new.jpg') === false &&
+        $options[ESP_Media_Index::READY_OPTION] === '0',
+        'strict mode rejects by-mid update on pre-fence failure');
+    $wpdb->fail_state_write = false;
+    $options[ESP_Media_Index::READY_OPTION] = '1';
+    esp63_assert(ESP_Media_Index::resolve($uploads . '/2026/10/cat.jpg')['status']
+        === 'resolved', 'correct mapping remains usable after fault reset');
+
     file_put_contents($uploads . '/2026/10/unknown.jpg', 'unregistered');
     esp63_assert(ESP_Media_Index::resolve($uploads . '/2026/10/unknown.jpg')['status']
         === 'unresolved', 'unregistered is not automatically known-public');
@@ -229,7 +316,7 @@ try {
 } finally {
     foreach (glob($uploads . '/2026/10/*') as $file) { @unlink($file); }
     @rmdir($uploads . '/2026/10'); @rmdir($uploads . '/2026'); @rmdir($uploads);
-    foreach ([$files,$state,'esp63_postmeta','esp63_posts'] as $table) {
+    foreach ([$files,$state,'esp63_postmeta','esp63_posts','esp63_external_txn'] as $table) {
         $db->query("DROP TABLE IF EXISTS $table");
     }
     $db->close();
