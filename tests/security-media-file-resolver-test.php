@@ -93,12 +93,17 @@ try {
                 'medium' => ['file' => 'photo-300x200.webp'],
                 'avif' => ['file' => 'photo-80x80.avif'],
                 'converted' => ['file' => 'photo-300x200.png'],
+                'unique' => ['file' => 'photo-150x150-1.jpg'],
             ],
             'original_image' => 'photo.jpg',
             'source_image' => 'photo.heic',
         ],
-        20 => ['file' => '2026/10/report.pdf',
-            'sizes' => ['thumbnail' => ['file' => 'report-pdf-150x150.jpg']]],
+        // Match actual WordPress PDF metadata: it has sizes but NO 'file'.
+        20 => ['sizes' => [
+            'full' => ['file' => 'report-pdf-1.jpg'],
+            'thumbnail' => ['file' => 'report-pdf-1-150x150.jpg'],
+            'medium' => ['file' => 'report-pdf-300x300.jpg'],
+        ], 'filesize' => 2319],
         30 => ['file' => '2026/10/clip.gif',
             'animated_video' => ['file' => 'clip.mp4'],
             'animated_video_poster' => 'clip-poster.jpg'],
@@ -112,13 +117,19 @@ try {
     expect_status($resolver, '2026/10/photo-300x200.png', 'resolved', 10);
     expect_status($resolver, '2026/10/photo.jpg', 'resolved', 10);
     expect_status($resolver, '2026/10/photo.heic', 'resolved', 10);
-    expect_status($resolver, '2026/10/report-pdf-150x150.jpg', 'resolved', 20);
+    expect_status($resolver, '2026/10/report-pdf-1.jpg', 'resolved', 20);
+    expect_status($resolver, '2026/10/report-pdf-1-150x150.jpg', 'resolved', 20);
+    expect_status($resolver, '2026/10/report-pdf-300x300.jpg', 'resolved', 20);
+    expect_status($resolver, '2026/10/report-pdf-2.jpg', 'unresolved');
+    expect_status($resolver, '2026/10/report-1.pdf', 'unresolved');
+    expect_status($resolver, '2026/10/photo-150x150-1.jpg', 'resolved', 10);
     expect_status($resolver, '2026/10/clip.mp4', 'resolved', 30);
     expect_status($resolver, '2026/10/clip-poster.jpg', 'resolved', 30);
     $metadata[30]['animated_video'] = 'clip-animated.mp4';
-    $metadata[30]['animated_video_poster'] = 'clip.gif-poster.jpg';
+    $metadata[30]['animated_video_poster'] = 'clip.gif-poster-1.jpg';
     expect_status($resolver, '2026/10/clip-animated.mp4', 'resolved', 30);
-    expect_status($resolver, '2026/10/clip.gif-poster.jpg', 'resolved', 30);
+    expect_status($resolver, '2026/10/clip.gif-poster-1.jpg', 'resolved', 30);
+    expect_status($resolver, '2026/10/clip.gif-poster-2.jpg', 'unresolved');
     expect_status($resolver, '2026/10/edited-250x250.png', 'resolved', 40);
     expect_status($resolver, '2026/10/unknown-150x150.avif', 'unresolved');
     expect_status($resolver, '2026/11/photo-150x150.jpg', 'unresolved');
@@ -133,6 +144,12 @@ try {
     $wpdb->records[] = ['id' => 60, 'path' => '2026/10/photo-80x80.avif'];
     expect_status($resolver, '2026/10/photo-80x80.avif', 'ambiguous');
 
+    // Exact owners of numeric PDF previews must not be silently overridden.
+    $wpdb->records[] = ['id' => 63, 'path' => '2026/10/report-pdf-1.jpg'];
+    expect_status($resolver, '2026/10/report-pdf-1.jpg', 'ambiguous');
+    $wpdb->records = array_values(array_filter($wpdb->records,
+        static function ($row) { return $row['id'] !== 63; }));
+
     // Duplicate original records, including SQL collation case-insensitivity.
     $wpdb->records[] = ['id' => 61, 'path' => '2026/10/report.pdf'];
     expect_status($resolver, '2026/10/report.pdf', 'ambiguous');
@@ -141,6 +158,11 @@ try {
     expect_status($resolver, '2026/10/report.pdf', 'ambiguous');
     $wpdb->records = array_values(array_filter($wpdb->records,
         static function ($row) { return !in_array($row['id'], [60, 61], true); }));
+
+    // A PDF with no current size evidence cannot inherit a similarly named file.
+    $wpdb->records[] = ['id' => 80, 'path' => '2026/10/bad.pdf'];
+    $metadata[80] = ['source_image' => 'bad-pdf.jpg', 'filesize' => 123];
+    expect_status($resolver, '2026/10/bad-pdf.jpg', 'unresolved');
 
     // Temporary sideload and backup-size metadata cannot prove ownership.
     $wpdb->records[] = ['id' => 70, 'path' => '2026/10/staging.jpg'];
