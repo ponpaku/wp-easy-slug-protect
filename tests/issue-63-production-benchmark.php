@@ -42,7 +42,7 @@ require dirname(__DIR__) . '/includes/class-esp-media-index.php';
 function get_option($name, $default = false) {
     if ($name === ESP_Media_Index::SCHEMA_OPTION ||
         $name === ESP_Media_Index::READY_OPTION ||
-        $name === ESP_Media_Index::ENABLE_OPTION) { return '1'; }
+        $name === ESP_Media_Index::ENABLE_OPTION) { return $name === ESP_Media_Index::SCHEMA_OPTION ? '2' : '1'; }
     return $default;
 }
 
@@ -229,7 +229,10 @@ try {
         active_generation BIGINT UNSIGNED NOT NULL DEFAULT 0,
         pending_count INT UNSIGNED NOT NULL DEFAULT 0,
         changed_at BIGINT UNSIGNED NOT NULL DEFAULT 0,
-        KEY status (status)
+        retry_after BIGINT UNSIGNED NOT NULL DEFAULT 0,
+        failure_count INT UNSIGNED NOT NULL DEFAULT 0,
+        KEY status (status),
+        KEY retry_queue (status,pending_count,retry_after,changed_at)
     ) ENGINE=InnoDB");
     $report = ['benchmark' => 'issue-63-synthetic', 'php' => PHP_VERSION,
                'word_press' => 'synthetic metadata; pinned main + PR62 + prototype + production live-join query',
