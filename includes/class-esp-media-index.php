@@ -101,8 +101,9 @@ final class ESP_Media_Index {
             path_hash char(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
             file_path text NOT NULL,
             attachment_id bigint(20) unsigned NOT NULL,
+            generation bigint(20) unsigned NOT NULL DEFAULT 0,
             protected_path_id varchar(191) NOT NULL DEFAULT '',
-            PRIMARY KEY  (path_hash,attachment_id),
+            PRIMARY KEY  (path_hash,attachment_id,generation),
             KEY attachment_id (attachment_id),
             KEY protected_path_id (protected_path_id)
         ) $charset;");
@@ -110,6 +111,7 @@ final class ESP_Media_Index {
             attachment_id bigint(20) unsigned NOT NULL,
             status varchar(16) NOT NULL DEFAULT 'dirty',
             revision bigint(20) unsigned NOT NULL DEFAULT 0,
+            active_generation bigint(20) unsigned NOT NULL DEFAULT 0,
             pending_count int(11) unsigned NOT NULL DEFAULT 0,
             changed_at bigint(20) unsigned NOT NULL DEFAULT 0,
             PRIMARY KEY  (attachment_id),
@@ -233,8 +235,9 @@ final class ESP_Media_Index {
         // and reject disagreement with our materialized ID. This catches some
         // bypassed index updates and duplicate protection meta records without
         // a second post-ID lookup or trusting an unverified cached permission.
-        $sql = $wpdb->prepare("SELECT f.file_path, f.attachment_id, f.protected_path_id,
-                s.status, s.pending_count, pm.meta_value AS live_protected_path
+        $sql = $wpdb->prepare("SELECT f.file_path, f.attachment_id, f.generation,
+                f.protected_path_id, s.status, s.pending_count, s.active_generation,
+                pm.meta_value AS live_protected_path
             FROM $files f INNER JOIN $state s ON s.attachment_id=f.attachment_id
             LEFT JOIN {$wpdb->postmeta} pm ON pm.post_id=f.attachment_id
                 AND pm.meta_key=%s
@@ -246,7 +249,8 @@ final class ESP_Media_Index {
         foreach ($rows as $row) {
             if (!is_array($row) ||
                 !isset($row['file_path'], $row['attachment_id'],
-                         $row['protected_path_id'], $row['status'], $row['pending_count']) ||
+                         $row['protected_path_id'], $row['status'], $row['pending_count'],
+                         $row['generation'], $row['active_generation']) ||
                 !array_key_exists('live_protected_path', $row) ||
                 !hash_equals((string)$row['file_path'], $relative) ||
                 !ctype_digit((string)$row['attachment_id']) ||
@@ -257,6 +261,12 @@ final class ESP_Media_Index {
                 $row['protected_path_id'] !== (string)($row['live_protected_path'] ?? '') ||
                 $row['status'] !== 'ready' || (int)$row['pending_count'] !== 0) {
                 return ['status' => 'error'];
+            }
+            // Published state can retain old generation rows until cleanup.
+            // While dirty, *all* old/new rows are blockers to prevent a
+            // temporary multiple-owner path from falsely becoming public.
+            if ((string)$row['generation'] !== (string)$row['active_generation']) {
+                continue;
             }
             // A duplicate postmeta row can yield the same owner twice.
             $id = (int)$row['attachment_id'];
@@ -498,8 +508,8 @@ final class ESP_Media_Index {
             }
             if (!$row) {
                 $sql = $wpdb->prepare("INSERT INTO $state
-                    (attachment_id,status,revision,pending_count,changed_at)
-                    VALUES (%d,'dirty',1,0,%d)", $id, time());
+                    (attachment_id,status,revision,active_generation,pending_count,changed_at)
+                    VALUES (%d,'dirty',1,0,0,%d)", $id, time());
                 if ($wpdb->query($sql) === false) {
                     throw new RuntimeException('state init');
                 }
@@ -555,15 +565,14 @@ final class ESP_Media_Index {
                     throw new RuntimeException('invalid derivative metadata');
                 }
             }
-            if ($wpdb->query($wpdb->prepare(
-                "DELETE FROM $files WHERE attachment_id=%d", $id)) === false) {
-                throw new RuntimeException('delete index rows');
-            }
+            // Stage new rows alongside the old live generation. Never remove
+            // old owner evidence while the state is dirty: another public
+            // attachment could otherwise appear to be the only owner.
             foreach ($paths as $path) {
                 $sql = $wpdb->prepare("INSERT INTO $files
-                    (path_hash,file_path,attachment_id,protected_path_id)
-                    VALUES (%s,%s,%d,%s)",
-                    hash('sha256', $path), $path, $id, $protection);
+                    (path_hash,file_path,attachment_id,generation,protected_path_id)
+                    VALUES (%s,%s,%d,%d,%s)",
+                    hash('sha256', $path), $path, $id, $revision, $protection);
                 if ($wpdb->query($sql) === false) {
                     throw new RuntimeException('insert index row');
                 }
@@ -571,13 +580,18 @@ final class ESP_Media_Index {
             // If the source changed while rebuilding, revision or pending
             // will differ, and the state must stay dirty until another pass.
             $published = $wpdb->query($wpdb->prepare(
-                "UPDATE $state SET status='ready',changed_at=%d
+                "UPDATE $state SET status='ready',active_generation=%d,changed_at=%d
                  WHERE attachment_id=%d AND revision=%d
                    AND pending_count=0 AND status='dirty'",
-                time(), $id, $revision));
+                $revision, time(), $id, $revision));
             if ($published !== 1) {
                 throw new RuntimeException('stale revision or publish failure');
             }
+            // Cleanup happens AFTER generation switch. A failure leaves
+            // redundant inert rows, not a partially published ownership map.
+            $wpdb->query($wpdb->prepare(
+                "DELETE FROM $files WHERE attachment_id=%d AND generation<>%d",
+                $id, $revision));
             return true;
         } catch (\Throwable $e) {
             // Never undo another plugin's transaction. The committed dirty
