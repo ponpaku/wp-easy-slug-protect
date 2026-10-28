@@ -188,16 +188,29 @@ final class ESP_Media_Index {
         if ($root === false || $real === false || !is_file($real)) { return null; }
         $prefix = rtrim($root, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
         if (strncmp($real, $prefix, strlen($prefix)) !== 0) { return null; }
-        // Reject nested symlinks (root symlink is supported).
+        // Reject nested symlinks BEFORE realpath() erases link components.
+        // The uploads root itself may be a symlink and remains supported.
         $given_root = rtrim((string)$uploads['basedir'], '/');
-        $suffix = substr($real, strlen($prefix));
-        $parts = explode('/', str_replace(DIRECTORY_SEPARATOR, '/', $suffix));
-        $walk = $given_root;
-        foreach ($parts as $part) {
+        $suffix = str_replace(DIRECTORY_SEPARATOR, '/', substr($real, strlen($prefix)));
+        $original_prefix = rtrim($given_root, '/') . '/';
+        $canonical_prefix = rtrim($root, '/') . '/';
+        if (strncmp($file, $original_prefix, strlen($original_prefix)) === 0) {
+            $original_suffix = substr($file, strlen($original_prefix));
+            $walk = $given_root;
+        } elseif (strncmp($file, $canonical_prefix, strlen($canonical_prefix)) === 0) {
+            $original_suffix = substr($file, strlen($canonical_prefix));
+            $walk = $root;
+        } else {
+            return null;
+        }
+        if ($original_suffix !== $suffix || !self::valid_path($original_suffix)) {
+            return null; // Alias, traversal, changed capitalization or alternate inode.
+        }
+        foreach (explode('/', $original_suffix) as $part) {
             $walk .= '/' . $part;
             if (is_link($walk)) { return null; }
         }
-        $relative = str_replace(DIRECTORY_SEPARATOR, '/', $suffix);
+        $relative = $suffix;
         return self::valid_path($relative) ? $relative : null;
     }
 
@@ -288,8 +301,10 @@ final class ESP_Media_Index {
     }
     public static function on_meta_saved($meta_id, $post_id, $meta_key, $meta_value) {
         if (!self::installed()) { return; }
-        $was_by_mid = self::$by_mid[(int)$meta_id] ?? null;
-        unset(self::$by_mid[(int)$meta_id]);
+        $mid = (is_int($meta_id) || (is_string($meta_id) && ctype_digit($meta_id)))
+            ? (int)$meta_id : 0;
+        $was_by_mid = self::$by_mid[$mid] ?? null;
+        unset(self::$by_mid[$mid]);
         if (!self::relevant($meta_key) && $was_by_mid === null) { return; }
         if (get_post_type((int)$post_id) !== 'attachment') { return; }
         self::finish_local((int)$post_id);
