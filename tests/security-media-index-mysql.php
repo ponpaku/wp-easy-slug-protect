@@ -16,6 +16,7 @@ final class ESP63_DB {
     public $last_error = '';
     public $dbh;
     public $fail_state_write = false;
+    public $fail_cleanup = false;
     private $db;
     public function __construct($db) { $this->db = $db; $this->dbh = $db; }
     public function esc_like($str) { return addcslashes($str, '_%\\'); }
@@ -36,6 +37,12 @@ final class ESP63_DB {
         if ($this->fail_state_write &&
             strpos($sql, 'INSERT INTO esp63_esp_media_file_state_v1') !== false) {
             $this->last_error = 'injected index state failure';
+            return false;
+        }
+        if ($this->fail_cleanup &&
+            strpos($sql, 'DELETE FROM esp63_esp_media_files_v1') !== false &&
+            strpos($sql, 'generation<>') !== false) {
+            $this->last_error = 'injected post-publication cleanup failure';
             return false;
         }
         try {
@@ -171,8 +178,13 @@ try {
     ESP_Media_Index::on_meta_saved(20,10,'_esp_media_protected_path_id','secret_B');
     esp63_assert(ESP_Media_Index::resolve($uploads . '/2026/10/cat.jpg')['status']
         === 'error', 'post-hook leaves index dirty until independent worker');
+    $wpdb->fail_cleanup = true; // Old-generation rows will remain.
     esp63_assert(ESP_Media_Index::reindex_attachment(10),
         'independent reindex after committed metadata update');
+    $wpdb->fail_cleanup = false;
+    $old_generations = (int)$wpdb->get_var("SELECT COUNT(*) FROM $files WHERE attachment_id=10");
+    esp63_assert($old_generations >= 6,
+        'failed cleanup retains previous and new generation rows');
     $changed = ESP_Media_Index::resolve($uploads . '/2026/10/cat.jpg');
     esp63_assert($changed['status'] === 'resolved' &&
         $changed['protected_path_id'] === 'secret_B', 'post-update protection visible');
