@@ -755,7 +755,7 @@ class ESP_Media_Protection {
         
         // Resolverが不明・矛盾・障害を検出した場合は公開扱いにしない。
         // 正常な未登録の移行ポリシーは#43で別途決定する。
-        if (ESP_Media_Index::enabled()) {
+        if (class_exists('ESP_Media_Index') && ESP_Media_Index::enabled()) {
             // #63: verified index returns ownership + protection ID together.
             // Unknown paths and ambiguous owners are never public. The index is
             // opt-in until initial backfill and the #43 migration are verified.
