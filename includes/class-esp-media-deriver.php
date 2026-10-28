@@ -12,9 +12,10 @@ class ESP_Media_Deriver {
      * メディアファイルを配信
      *
      * @param string $file_path ファイルパス
+     * @param bool $protected 認証または管理者権限を要するレスポンスか
      * @return bool 成功時true、失敗時false
      */
-    public function deliver($file_path) {
+    public function deliver($file_path, $protected = false) {
         try {
             if (!is_string($file_path) || $file_path === '') {
                 // 無効なパスは処理しない
@@ -47,7 +48,7 @@ class ESP_Media_Deriver {
 
             // Webサーバー配信が可能な場合はヘッダー委譲のみで終了
             if ($delivery_method['type'] !== 'php') {
-                if ($this->attempt_web_server_delivery($delivery_method, $file_path)) {
+                if ($this->attempt_web_server_delivery($delivery_method, $file_path, $protected)) {
                     exit;
                 }
             }
@@ -59,9 +60,14 @@ class ESP_Media_Deriver {
             // 本文を読み込まず終了する（Webサーバー委譲は上で処理済み）。
             $is_head = strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET')) === 'HEAD';
             $range = !$is_head && isset($_SERVER['HTTP_RANGE']) ? $_SERVER['HTTP_RANGE'] : '';
+            // 保護ファイルは、不正Rangeの416でもブラウザー・共有キャッシュへの保存を禁止。
+            // 公開ファイルは成功応答だけに従来のキャッシュ方針を適用する。
+            if ($protected) {
+                $this->set_cache_headers($mime_type, true);
+            }
             if ($range) {
                 // Rangeヘッダーがある場合は分割配信
-                if (!$this->deliver_with_range($file_path, $file_size, $mime_type, $range)) {
+                if (!$this->deliver_with_range($file_path, $file_size, $mime_type, $range, $protected)) {
                     return false;
                 }
                 exit;
@@ -73,8 +79,9 @@ class ESP_Media_Deriver {
 
             $disposition = $this->should_inline($mime_type) ? 'inline' : 'attachment';
             header('Content-Disposition: ' . $disposition . '; filename="' . basename($file_path) . '"');
-
-            $this->set_cache_headers($mime_type);
+            if (!$protected) {
+                $this->set_cache_headers($mime_type, false);
+            }
 
             if ($is_head) {
                 exit;
@@ -148,20 +155,21 @@ class ESP_Media_Deriver {
      *
      * @param array{type:string,path?:string} $delivery_method 判定済みの配信方法
      * @param string $file_path 実ファイルパス
+     * @param bool $protected 保護レスポンスか
      * @return bool ヘッダー送信に成功したらtrue
      */
-    private function attempt_web_server_delivery($delivery_method, $file_path) {
+    private function attempt_web_server_delivery($delivery_method, $file_path, $protected) {
         switch ($delivery_method['type']) {
             case 'apache':
                 // X-Sendfileヘッダーを付与
-                $this->clear_header();
+                $this->clear_header($protected);
                 header('X-Sendfile: ' . $file_path);
                 return true;
 
             case 'nginx':
                 if (isset($delivery_method['path'])) {
                     // X-Accel-Redirectで内部リダイレクト
-                    $this->clear_header();
+                    $this->clear_header($protected);
                     header('X-Accel-Redirect: ' . $delivery_method['path']);
                     return true;
                 }
@@ -186,7 +194,7 @@ class ESP_Media_Deriver {
                     return false;
                 }
 
-                $this->clear_header();
+                $this->clear_header($protected);
                 header('X-LiteSpeed-Location: ' . $redirect_path);
                 return true;
         }
@@ -197,7 +205,7 @@ class ESP_Media_Deriver {
     /**
      * LiteSpeed等へ委譲する前に競合しうるヘッダーを削除
      */
-    private function clear_header() {
+    private function clear_header($protected) {
         if (!function_exists('header_remove')) {
             return;
         }
@@ -212,6 +220,8 @@ class ESP_Media_Deriver {
             'Cache-Control',
             'Expires',
             'Pragma',
+            'X-LiteSpeed-Cache-Control',
+            'X-Accel-Expires',
             'Last-Modified',
             'ETag',
         ];
@@ -223,6 +233,12 @@ class ESP_Media_Deriver {
         if (function_exists('ini_set')) {
             // 既定のContent-Type付与を抑止
             ini_set('default_mimetype', '');
+        }
+
+        // 内部リダイレクトに入る前に、消去された保護ヘッダーを復元する。
+        // 委譲先サーバー・CDNの最終レスポンスは別途検証が必要。
+        if ($protected) {
+            $this->set_cache_headers('', true);
         }
     }
 
@@ -298,9 +314,10 @@ class ESP_Media_Deriver {
      * @param int    $file_size ファイルサイズ
      * @param string $mime_type MIMEタイプ
      * @param string $range     Rangeヘッダー
+     * @param bool $protected  保護ファイルか
      * @return bool 成功時true
      */
-    private function deliver_with_range($file_path, $file_size, $mime_type, $range) {
+    private function deliver_with_range($file_path, $file_size, $mime_type, $range, $protected) {
         // Rangeヘッダーを単位と値に分割
         list($size_unit, $range_orig) = explode('=', $range, 2);
 
@@ -426,8 +443,9 @@ class ESP_Media_Deriver {
 
         $disposition = $this->should_inline($mime_type) ? 'inline' : 'attachment';
         header('Content-Disposition: ' . $disposition . '; filename="' . basename($file_path) . '"');
-
-        $this->set_cache_headers($mime_type);
+        if (!$protected) {
+            $this->set_cache_headers($mime_type, false);
+        }
 
         $fp = @fopen($file_path, 'rb');
         if ($fp === false) {
@@ -511,8 +529,20 @@ class ESP_Media_Deriver {
      * キャッシュヘッダーを設定
      *
      * @param string $mime_type MIMEタイプ
+     * @param bool $protected 保護メディア・権限付き配信か
      */
-    private function set_cache_headers($mime_type) {
+    private function set_cache_headers($mime_type, $protected) {
+        if ($protected) {
+            // MIMEや配信方式によらず、認可後の内容の保存を禁止する。
+            header('Cache-Control: private, no-store, no-cache, max-age=0, must-revalidate');
+            header('Pragma: no-cache');
+            header('Expires: Thu, 01 Jan 1970 00:00:00 GMT');
+            // LiteSpeedは専用ヘッダーを通常のCache-Controlより優先する。
+            header('X-LiteSpeed-Cache-Control: no-store');
+            // Nginxの上流キャッシュにも保存禁止を指示する。
+            header('X-Accel-Expires: 0');
+            return;
+        }
         if (strpos($mime_type, 'image/') === 0 ||
             strpos($mime_type, 'text/css') === 0 ||
             strpos($mime_type, 'application/javascript') === 0) {

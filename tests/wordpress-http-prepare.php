@@ -35,6 +35,38 @@ foreach (['protected', 'public'] as $kind) {
     update_attached_file($id, $path);
     if ($kind === 'protected') { $wpdb->insert($wpdb->postmeta, ['post_id' => $id, 'meta_key' => '_esp_media_protected_path_id', 'meta_value' => 'path_http']); }
 }
+// JPEG variants exercise the image-specific caching policy through real Apache.
+// These are valid 2x2 JPEG bytes, with a COM marker to identify body leaks.
+$base_jpeg = base64_decode('/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAsICAoIBwsKCQoNDAsNERwSEQ8PESIZGhQcKSQrKigkJyctMkA3LTA9MCcnOEw5PUNFSElIKzZPVU5GVEBHSEX/2wBDAQwNDREPESESEiFFLicuRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUX/wAARCAACAAIDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAABAX/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCegKgT/9k=', true);
+if (!is_string($base_jpeg) || substr($base_jpeg, 0, 2) !== "\xFF\xD8") {
+    throw new RuntimeException('Invalid JPEG fixture');
+}
+foreach (['protected', 'public'] as $kind) {
+    $marker = 'ESP31_' . strtoupper($kind) . '_JPEG';
+    $jpeg = substr($base_jpeg, 0, 2) . "\xFF\xFE" .
+        pack('n', strlen($marker) + 2) . $marker . substr($base_jpeg, 2);
+    $name = 'esp31-' . $kind . '.jpg';
+    $path = $uploads['basedir'] . '/' . $name;
+    if (file_put_contents($path, $jpeg) !== strlen($jpeg)) {
+        throw new RuntimeException('Cannot write disposable JPEG fixture');
+    }
+    $attachment = wp_insert_attachment([
+        'post_title' => 'ESP31 ' . $kind . ' JPEG',
+        'post_mime_type' => 'image/jpeg',
+        'post_status' => 'inherit',
+    ], $path);
+    if (is_wp_error($attachment) || !$attachment) {
+        throw new RuntimeException('Cannot register JPEG fixture');
+    }
+    update_attached_file($attachment, $path);
+    if ($kind === 'protected') {
+        $wpdb->insert($wpdb->postmeta, [
+            'post_id' => $attachment,
+            'meta_key' => '_esp_media_protected_path_id',
+            'meta_value' => 'path_http',
+        ]);
+    }
+}
 update_option('active_plugins', ['esp44-custom/easy-slug-protect.php']);
 ESP_Updater::during_activation(static function () { return ESP_Protection_State::verify_and_commit(new ESP_Setup()); });
 file_put_contents(ABSPATH . '.htaccess', "<IfModule mod_rewrite.c>\nRewriteEngine On\nRewriteBase /\nRewriteRule ^index\\.php$ - [L]\nRewriteCond %{REQUEST_FILENAME} !-f\nRewriteCond %{REQUEST_FILENAME} !-d\nRewriteRule . /index.php [L]\n</IfModule>\n");
