@@ -56,11 +56,14 @@ docker exec "$container" php /opt/wp-cli.phar --allow-root --path=/var/www/html 
   --admin_email=esp@example.test --skip-email
 docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
   php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-http-prepare.php
+docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+  php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-pdf-unique-fixture.php
 
 docker exec "$container" test -r /var/www/html/wp-content/uploads/esp31-protected.jpg
 docker exec "$container" grep -q '# BEGIN ESP Media Protection' \
   /var/www/html/wp-content/uploads/.htaccess
 
 # Real Apache requests including Rewrite, WordPress auth, headers and bytes.
-python3 tests/wordpress-http-check.py
+ESP42_PDF_MANIFEST="$fixture_root/wordpress/wp-content/uploads/.esp42-pdf-fixture.json" \
+  python3 tests/wordpress-http-check.py
 echo 'PASS: disposable Apache/WordPress media HTTP regression suite'

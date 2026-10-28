@@ -31,6 +31,7 @@
 - `php tests/security-avif-test.php`：既存AVIFの帰属・Rewrite回帰。
 - `php tests/security-rewrite-failclosed-test.php`：添付DB照会失敗、未登録公開、Rewrite・パス検証回帰。
 - `wordpress-apache-http` CI：現行添付メタデータに記録した保護JPEGの標準サムネイルについて、匿名拒否、認証済み配信、ログアウト後拒否をHTTP本文まで検証。
+- 同ジョブでCI専用Imagick/Ghostscriptを用いWordPressコア `wp_generate_attachment_metadata()` にPDFプレビューを**実際に生成**させる。`file`キーを含まない`sizes['full']`、衝突時の番号付きプレビューと縮小画像をHTTPで確認。`wp_unique_filename()`を使った画像・GIFポスターの番号付きフィクスチャも検証。CI画像のPDF読み取り許可はこの使い捨て環境のみ。
 
 ## 限界・追加計測
 
