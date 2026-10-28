@@ -396,6 +396,23 @@ try {
         (int)$wpdb->get_var("SELECT COUNT(*) FROM $files WHERE attachment_id=30") === 0 &&
         (int)$wpdb->get_var("SELECT COUNT(*) FROM $state WHERE attachment_id=30") === 0,
         'F01 READY cannot return until deleted public owner and state are purged');
+    // Crash recovery: a file index row can exist without any state row.
+    // Such a row is never a reason to grant public access and must be
+    // removed before global READY is restored.
+    $dangling = '2026/10/no-state.jpg';
+    file_put_contents($uploads . '/' . $dangling, 'dangling-file');
+    esp63_sql("INSERT INTO $files
+        (path_hash,file_path,attachment_id,generation,protected_path_id)
+        VALUES ('" . hash('sha256', $dangling) . "','$dangling',77,1,'')");
+    esp63_assert(ESP_Media_Index::resolve($uploads . '/' . $dangling)['status']
+        === 'error', 'F01 owner without state is never treated as public');
+    $options[ESP_Media_Index::READY_OPTION] = '0';
+    ESP_Media_Index::run_batch();
+    ESP_Media_Index::run_batch();
+    esp63_assert($options[ESP_Media_Index::READY_OPTION] === '1' &&
+        (int)$wpdb->get_var("SELECT COUNT(*) FROM $files WHERE attachment_id=77") === 0,
+        'F01 orphan file rows without state are purged before READY');
+
     esp63_sql("INSERT INTO esp63_posts (ID,post_type) VALUES (31,'attachment')");
     esp63_sql("INSERT INTO esp63_postmeta(post_id,meta_key,meta_value) VALUES
         (31,'_wp_attached_file','2026/10/reused.jpg'),
