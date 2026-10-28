@@ -739,17 +739,24 @@ final class ESP_Media_Index {
         return true;
     }
 
-    /** The ONLY place allowed to restore global READY after an audit cycle. */
-    private static function coverage_is_complete() {
+    /**
+     * Global READY means initial ownership coverage is complete, not that
+     * every attachment is currently unmodified. During steady state, dirty
+     * attachments fail closed individually without taking down unrelated
+     * ready media. After global invalidation, all attachments must be ready
+     * before re-publishing READY.
+     */
+    private static function coverage_is_complete($require_all_ready) {
         global $wpdb;
         $state = self::table(self::state_table());
         $files = self::table(self::files_table());
+        $state_conditions = $require_all_ready
+            ? "(s.attachment_id IS NULL OR s.status<>'ready' OR s.pending_count<>0)"
+            : "s.attachment_id IS NULL";
         $checks = [
             "SELECT p.ID FROM {$wpdb->posts} p
              LEFT JOIN $state s ON p.ID=s.attachment_id
-             WHERE p.post_type='attachment' AND
-               (s.attachment_id IS NULL OR s.status<>'ready'
-                OR s.pending_count<>0) LIMIT 1",
+             WHERE p.post_type='attachment' AND $state_conditions LIMIT 1",
             "SELECT s.attachment_id FROM $state s
              LEFT JOIN {$wpdb->posts} p ON p.ID=s.attachment_id
                AND p.post_type='attachment'
@@ -796,8 +803,16 @@ final class ESP_Media_Index {
              AND ID>%d ORDER BY ID ASC LIMIT %d", $cursor, self::BATCH_SIZE));
         if (!is_array($ids) || $wpdb->last_error !== '') { return; }
         if (!$ids) {
-            update_option(self::READY_OPTION,
-                self::coverage_is_complete() ? '1' : '0', false);
+            $already_ready = self::ready();
+            $valid = self::coverage_is_complete(!$already_ready);
+            // Do not revoke global coverage merely for an isolated dirty
+            // attachment: its own state still forces 503. Missing owners or
+            // orphan rows are global coverage gaps and revoke READY.
+            if (!$valid) {
+                update_option(self::READY_OPTION, '0', false);
+            } elseif (!$already_ready) {
+                update_option(self::READY_OPTION, '1', false);
+            }
             update_option(self::CURSOR_OPTION, 0, false);
             return;
         }
