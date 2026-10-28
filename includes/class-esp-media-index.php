@@ -706,7 +706,7 @@ final class ESP_Media_Index {
      * rows missing a state row. Do not publish global READY until *both*
      * sources of orphan evidence have been checked clean.
      */
-    private static function reconcile_orphans() {
+    private static function reconcile_orphans($check_file_rows) {
         global $wpdb;
         $state = self::table(self::state_table());
         $files = self::table(self::files_table());
@@ -719,6 +719,10 @@ final class ESP_Media_Index {
         foreach ($orphans as $id) {
             if (!self::purge_orphan((int)$id)) { return false; }
         }
+        // The file table can have many derivatives per attachment. Scan
+        // orphan file owners at the END of an audit cycle, not every 5-minute
+        // batch, to preserve bounded work during normal incremental repair.
+        if (!$check_file_rows) { return true; }
         // A crash or legacy index may leave file rows without state; these
         // must not be invisible to resolve() or the READY revalidation.
         $unowned = $wpdb->get_col($wpdb->prepare(
@@ -784,7 +788,7 @@ final class ESP_Media_Index {
         }
         // First remove orphans. Individual corrupt attachments can be retried
         // later, but a DB outage or failed orphan purge must halt the cycle.
-        if (!self::reconcile_orphans()) { return; }
+        if (!self::reconcile_orphans(false)) { return; }
         $state = self::table(self::state_table());
         $dirty_ids = $wpdb->get_col($wpdb->prepare(
             "SELECT attachment_id FROM $state
@@ -803,6 +807,8 @@ final class ESP_Media_Index {
              AND ID>%d ORDER BY ID ASC LIMIT %d", $cursor, self::BATCH_SIZE));
         if (!is_array($ids) || $wpdb->last_error !== '') { return; }
         if (!$ids) {
+            // The full file-owner anti-join is intentionally cycle-scoped.
+            if (!self::reconcile_orphans(true)) { return; }
             $already_ready = self::ready();
             $valid = self::coverage_is_complete(!$already_ready);
             // Do not revoke global coverage merely for an isolated dirty
