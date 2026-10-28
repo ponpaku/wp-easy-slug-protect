@@ -470,33 +470,51 @@ final class ESP_Media_Index {
      * index-state row lock. Hook guards must mark this row dirty before WP writes.
      * Any crash leaves dirty records non-public; Cron retries after a grace period.
      */
+    /**
+     * Best-effort rebuild without issuing START TRANSACTION/COMMIT/ROLLBACK.
+     * The caller owns its transaction, if any. Before changing any file rows
+     * the derived state is marked dirty, so partial writes cannot authorize.
+     * Revision CAS at publication prevents concurrent pre-hooks from
+     * turning old materialized data into a ready authorization decision.
+     *
+     * Named lock prevents simultaneous workers from replacing the same rows.
+     * This lock is connection-scoped and does not commit an enclosing txn.
+     */
     public static function reindex_attachment($id, $repair = false) {
         global $wpdb;
         if ($id <= 0 || !self::installed()) { return false; }
-        // MySQL/MariaDB START TRANSACTION implicitly commits the caller's
-        // existing transaction. Only the independent worker may own a new one.
-        $in_transaction = $wpdb->get_var('SELECT @@session.in_transaction');
-        if ($wpdb->last_error !== '' || (string)$in_transaction !== '0') {
-            return false;
-        }
         $state = self::table(self::state_table());
         $files = self::table(self::files_table());
-        if ($wpdb->query('START TRANSACTION') === false) { return false; }
+        $lock_name = 'esp63_' . substr(hash('sha256', $wpdb->prefix . ':' . $id), 0, 40);
+        $lock = $wpdb->get_var($wpdb->prepare('SELECT GET_LOCK(%s, 2)', $lock_name));
+        if ($wpdb->last_error !== '' || (string)$lock !== '1') { return false; }
         try {
             $row = $wpdb->get_row($wpdb->prepare(
-                "SELECT status,pending_count,changed_at FROM $state WHERE attachment_id=%d FOR UPDATE",
+                "SELECT status,revision,pending_count FROM $state WHERE attachment_id=%d",
                 $id), ARRAY_A);
             if ($wpdb->last_error !== '') { throw new RuntimeException('state read'); }
+            if ($row && (int)$row['pending_count'] !== 0) {
+                return false;
+            }
             if (!$row) {
-                if ($wpdb->query($wpdb->prepare("INSERT INTO $state
+                $sql = $wpdb->prepare("INSERT INTO $state
                     (attachment_id,status,revision,pending_count,changed_at)
-                    VALUES (%d,'dirty',1,0,%d)", $id, time())) === false) {
+                    VALUES (%d,'dirty',1,0,%d)", $id, time());
+                if ($wpdb->query($sql) === false) {
                     throw new RuntimeException('state init');
                 }
-                $row = ['status' => 'dirty', 'pending_count' => 0, 'changed_at' => 0];
-            }
-            if ((int)$row['pending_count'] !== 0) {
-                throw new RuntimeException('mutation in progress');
+                $revision = 1;
+            } else {
+                $revision = (int)$row['revision'];
+                // In autocommit mode the dirty marker becomes visible before
+                // any DELETE/INSERT, even if a later database operation fails.
+                $sql = $wpdb->prepare("UPDATE $state SET status='dirty',changed_at=%d
+                    WHERE attachment_id=%d AND revision=%d AND pending_count=0",
+                    time(), $id, $revision);
+                $changed = $wpdb->query($sql);
+                if ($changed === false || $changed < 1) {
+                    throw new RuntimeException('pre-rebuild dirty fence');
+                }
             }
             $type = $wpdb->get_var($wpdb->prepare(
                 "SELECT post_type FROM {$wpdb->posts} WHERE ID=%d", $id));
@@ -548,20 +566,24 @@ final class ESP_Media_Index {
                     throw new RuntimeException('insert index row');
                 }
             }
-            if ($wpdb->query($wpdb->prepare(
-                "UPDATE $state SET status='ready',changed_at=%d WHERE attachment_id=%d",
-                time(), $id)) === false) {
-                throw new RuntimeException('publish state');
+            // If the source changed while rebuilding, revision or pending
+            // will differ, and the state must stay dirty until another pass.
+            $published = $wpdb->query($wpdb->prepare(
+                "UPDATE $state SET status='ready',changed_at=%d
+                 WHERE attachment_id=%d AND revision=%d
+                   AND pending_count=0 AND status='dirty'",
+                time(), $id, $revision));
+            if ($published !== 1) {
+                throw new RuntimeException('stale revision or publish failure');
             }
-            if ($wpdb->query('COMMIT') === false) { throw new RuntimeException('commit'); }
             return true;
         } catch (\Throwable $e) {
-            $wpdb->query('ROLLBACK');
-            // A previously ready row might predate the failed rebuild.
-            $wpdb->query($wpdb->prepare("UPDATE $state SET status='dirty',changed_at=%d
-                WHERE attachment_id=%d", time(), $id));
-            error_log('ESP: Media index reindex failed, attachment ' . $id);
+            // Never undo another plugin's transaction. The committed dirty
+            // marker already blocks authorization; a worker can retry.
+            error_log('ESP: Media index rebuild incomplete for attachment ' . $id);
             return false;
+        } finally {
+            $wpdb->get_var($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $lock_name));
         }
     }
 
