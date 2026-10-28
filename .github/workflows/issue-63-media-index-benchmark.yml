@@ -1,0 +1,66 @@
+name: Issue 63 dedicated media index benchmark
+on:
+  pull_request:
+    paths:
+      - 'includes/class-esp63-media-index-prototype.php'
+      - 'tests/issue-63-*'
+      - '.github/workflows/issue-63-media-index-benchmark.yml'
+  workflow_dispatch:
+jobs:
+  prototype-and-mysql-benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: test-password
+          MYSQL_DATABASE: esp_test
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -ptest-password"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Access the pinned main implementation via git show.
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mysqli
+          coverage: none
+      - name: Extract exact main implementation (pinned SHA)
+        run: |
+          git show a5c0e3f518e8204d085bdaf492fcc203bf8bca87:includes/class-esp-media-protection.php > "$RUNNER_TEMP/esp63-main-media-protection.php"
+          test -s "$RUNNER_TEMP/esp63-main-media-protection.php"
+      - name: Lint experimental PHP
+        run: |
+          php -l includes/class-esp63-media-index-prototype.php
+          php -l tests/issue-63-media-index-test.php
+          php -l tests/issue-63-index-benchmark.php
+      - name: Check ownership and error states
+        run: php tests/issue-63-media-index-test.php
+      - name: Compare actual PR62 Resolver with dedicated index (synthetic MySQL)
+        env:
+          ESP_TEST_DB_HOST: 127.0.0.1
+          ESP_TEST_DB_USER: root
+          ESP_TEST_DB_PASSWORD: test-password
+          ESP_TEST_DB_NAME: esp_test
+          ESP63_BENCH_REPORT: issue-63-benchmark.json
+          ESP63_MAIN_CLASS_SOURCE: ${{ runner.temp }}/esp63-main-media-protection.php
+        run: |
+          php tests/issue-63-index-benchmark.php | tee issue-63-benchmark.log
+          echo '## Issue #63 synthetic MySQL benchmark' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Pinned exact main private lookup vs actual PR #62 Resolver vs dedicated indexed lookup; synthetic metadata, no HTTP. JPEG thumbnail main=unresolved.' >> "$GITHUB_STEP_SUMMARY"
+          echo '\`\`\`json' >> "$GITHUB_STEP_SUMMARY"
+          cat issue-63-benchmark.json >> "$GITHUB_STEP_SUMMARY"
+          echo '\`\`\`' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: issue-63-index-benchmark
+          path: |
+            issue-63-benchmark.json
+            issue-63-benchmark.log
+          if-no-files-found: warn
+          retention-days: 30
