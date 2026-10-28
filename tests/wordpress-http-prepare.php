@@ -59,6 +59,21 @@ foreach (['protected', 'public'] as $kind) {
         throw new RuntimeException('Cannot register JPEG fixture');
     }
     update_attached_file($attachment, $path);
+    // A WordPress-standard thumbnail is NOT a separate attachment. Its owner
+    // must be proven by current _wp_attachment_metadata, never by its name.
+    $thumb = 'esp31-' . $kind . '-150x150.jpg';
+    $thumb_marker = 'ESP42_' . strtoupper($kind) . '_THUMB';
+    $thumb_bytes = substr($base_jpeg, 0, 2) . "\xFF\xFE" .
+        pack('n', strlen($thumb_marker) + 2) . $thumb_marker . substr($base_jpeg, 2);
+    file_put_contents($uploads['basedir'] . '/' . $thumb, $thumb_bytes);
+    wp_update_attachment_metadata($attachment, [
+        'file' => $name,
+        'width' => 2,
+        'height' => 2,
+        'sizes' => ['thumbnail' => [
+            'file' => $thumb, 'width' => 150, 'height' => 150, 'mime-type' => 'image/jpeg',
+        ]],
+    ]);
     if ($kind === 'protected') {
         $wpdb->insert($wpdb->postmeta, [
             'post_id' => $attachment,

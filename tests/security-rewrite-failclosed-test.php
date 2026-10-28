@@ -3,6 +3,7 @@
 define('ABSPATH', __DIR__ . '/');
 define('WEEK_IN_SECONDS', 604800);
 define('ESP_VERSION', '0.7.39');
+define('ARRAY_A', 'ARRAY_A');
 require __DIR__ . '/../includes/class-esp-config.php';
 class ESP_Option {
     public static function get_current_setting($name) {
@@ -39,6 +40,7 @@ class WP_Error {
 }
 class RewriteTestDB {
     public $postmeta = 'wp_postmeta';
+    public $posts = 'wp_posts';
     public $last_error = '';
     public $count = 1;
     public $live_path = null;
@@ -48,7 +50,25 @@ class RewriteTestDB {
     public $attached_query_error = false;
     public $candidate_ids = [];
     public $candidate_query_error = false;
-    public function prepare($sql, ...$args) { return $sql; }
+    public function prepare($sql, ...$args) {
+        if (count($args) === 1 && is_array($args[0])) { $args = $args[0]; }
+        // Existing rewrite tests use simple SQL substring assertions.
+        return isset($args[0]) && $args[0] === '_wp_attached_file'
+            ? ['sql' => $sql, 'args' => $args] : $sql;
+    }
+    public function esc_like($value) { return addcslashes($value, '_%\\'); }
+    public function get_results($query, $format = null) {
+        $this->last_error = $this->attached_query_error || $this->candidate_query_error
+            ? 'Simulated attachment lookup SQL error' : '';
+        if ($this->last_error !== '') { return null; }
+        $candidates = $query['args'] ?? [];
+        if ($this->attached_id !== null &&
+            in_array('ordinary.jpg', $candidates, true)) {
+            return [['post_id' => (string) $this->attached_id,
+                'meta_value' => 'ordinary.jpg']];
+        }
+        return [];
+    }
     public function get_var($query) {
         if (strpos($query, 'SELECT meta_value FROM') !== false) {
             $this->live_reads++;
@@ -108,6 +128,7 @@ function check($ok, $description) {
     if (!$ok) { fwrite(STDERR, "FAIL: $description\n"); exit(1); }
     echo "PASS: $description\n";
 }
+require __DIR__ . '/../includes/class-esp-media-file-resolver.php';
 require __DIR__ . '/../includes/class-esp-media-protection.php';
 $_SERVER['SERVER_SOFTWARE'] = 'Apache/2.4';
 $wpdb = new RewriteTestDB();
