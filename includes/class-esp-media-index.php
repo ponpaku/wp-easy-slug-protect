@@ -508,13 +508,15 @@ final class ESP_Media_Index {
                 $revision = (int)$row['revision'];
                 // In autocommit mode the dirty marker becomes visible before
                 // any DELETE/INSERT, even if a later database operation fails.
-                $sql = $wpdb->prepare("UPDATE $state SET status='dirty',changed_at=%d
+                $sql = $wpdb->prepare("UPDATE $state SET status='dirty',
+                    revision=revision+1,changed_at=%d
                     WHERE attachment_id=%d AND revision=%d AND pending_count=0",
                     time(), $id, $revision);
                 $changed = $wpdb->query($sql);
-                if ($changed === false || $changed < 1) {
+                if ($changed !== 1) {
                     throw new RuntimeException('pre-rebuild dirty fence');
                 }
+                ++$revision;
             }
             $type = $wpdb->get_var($wpdb->prepare(
                 "SELECT post_type FROM {$wpdb->posts} WHERE ID=%d", $id));
