@@ -37,7 +37,7 @@ function esp63_main_lookup($path): array {
 }
 
 require dirname(__DIR__) . '/includes/class-esp-media-file-resolver.php';
-require dirname(__DIR__) . '/includes/class-esp63-media-index-prototype.php';
+require __DIR__ . '/fixtures/esp63-media-index-prototype.php';
 require dirname(__DIR__) . '/includes/class-esp-media-index.php';
 function get_option($name, $default = false) {
     if ($name === ESP_Media_Index::SCHEMA_OPTION ||
