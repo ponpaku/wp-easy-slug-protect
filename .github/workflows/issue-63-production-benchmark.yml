@@ -48,7 +48,7 @@ jobs:
         run: |
           php tests/issue-63-production-benchmark.php | tee issue-63-production-benchmark.log
           echo '## Issue #63 production indexed MySQL comparison' >> "$GITHUB_STEP_SUMMARY"
-          echo 'Pinned exact main private lookup vs actual PR #62 Resolver vs dedicated indexed lookup; synthetic metadata, no HTTP. JPEG thumbnail main=unresolved.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Main vs PR62 vs prototype vs production live-postmeta JOIN. Synthetic metadata; no WordPress HTTP. Main JPEG thumbnail=unresolved.' >> "$GITHUB_STEP_SUMMARY"
           echo '\`\`\`json' >> "$GITHUB_STEP_SUMMARY"
           cat issue-63-production-benchmark.json >> "$GITHUB_STEP_SUMMARY"
           echo '\`\`\`' >> "$GITHUB_STEP_SUMMARY"
@@ -57,7 +57,7 @@ jobs:
         with:
           name: issue-63-production-benchmark
           path: |
-            issue-63-benchmark.json
+            issue-63-production-benchmark.json
             issue-63-production-benchmark.log
           if-no-files-found: warn
           retention-days: 30
