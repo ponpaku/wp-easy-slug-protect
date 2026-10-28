@@ -8,10 +8,11 @@ WordPressの正本を `_wp_attached_file`・`_wp_attachment_metadata`・
 現在の派生ファイルを uploads 相対パスで列挙し、**公開画像も含めて登録**する。
 
 - `{prefix}esp_media_files_v1`：パス SHA-256、相対パス、添付ID、保護パスID。
-  `(path_hash, attachment_id)` を複合主キーとし、複数所有者は複数行で保持。
+  `(path_hash, attachment_id, generation)` を複合主キーとし、複数所有者は複数行で保持。
   候補行のパスをPHPの `hash_equals()` で完全一致確認。
 - `{prefix}esp_media_file_state_v1`：添付単位の `dirty/ready`、
-  `pending_count`、`revision`、更新時刻。更新中の旧索引は拒否する。
+  `pending_count`、`revision`、`active_generation`、更新時刻。
+  更新中の旧世代・新世代のどちらも公開判断に使わない。
 - `resolve()`：`resolved(attachment_id, protected_path_id)`／
   `unresolved`／`ambiguous`／`error`。
   `unresolved` は公開可能と同義ではない。
@@ -27,12 +28,34 @@ WordPressの正本を `_wp_attached_file`・`_wp_attachment_metadata`・
 
 ## 更新・失効の範囲
 
-WP標準postmetaフックの**変更前**に添付状態をdirtyにしてDBへ永続化する。
-メタ書込完了後（同じリクエスト）に正本をDBから再読込して、
-ファイル行の差し替えと `ready` の公開を1トランザクションで行う。
-並行書込は状態行のロックとpendingカウントで処理する。値が同じため
-WordPressが後フックを呼ばない場合はリクエスト終了時に保留処理を終了する。
-途中失敗時、古い索引行が残っていても `dirty` なので公開判断に使わない。
+WordPress標準postmetaフックの**変更前**に添付単位の `dirty` と
+`pending_count` を保存する。フックの第5引数は操作ごとに異なるため、
+add/update/deleteのガードを分離する。失効のDB書込みが失敗した場合は
+互換モードでも全体 `READY=0` を実DBから確認できない限り元の操作を拒否する。
+削除開始時に失効できず全体失効も失敗した場合は削除を例外で停止する。
+
+**メタ更新フックから独自のSTART/COMMIT/ROLLBACKを実行しない。**
+呼び出し元に既存のMySQLトランザクションがある場合、`dirty`・メタ更新・
+`pending_count` の変更は同じトランザクションに参加する。ROLLBACKで
+一緒に戻り、COMMITで一緒に可視化される。更新後フックは
+pendingを減らすだけで、同期的に`ready`には戻さない。
+no-op更新で後フックが来ない場合は、同じリクエストの終了時にpendingを処理する。
+
+独立Cronワーカーが、コミット済み `dirty, pending=0` を優先して処理する。
+再構築は1添付につき名前付きDBロックで直列化し、次を実施する。
+
+1. 元の索引行を**残したまま**状態を `dirty` にし、`revision` を進める。
+2. WordPress正本を再読込して、新しい世代のファイル行を段階的に挿入する。
+3. 同じrevision・pending=0なら、単一UPDATEで
+   `active_generation=revision, status=ready`を公開する（CAS）。
+4. その後に旧世代を削除する。削除失敗は容量面だけの問題で、旧世代は
+   ready検索で無視される。
+
+この順序なら、再構築中に古い保護済み所有者が消え、同じパスの
+公開所有者が一時的に唯一の候補になる不具合を防げる。
+ステージング途中でSQLエラー・PHP終了が起きても状態はdirtyのままであり、
+次のワーカーが世代を進めて再試行する。
+ただし名前付きロックは権限・接続の制約があり、同時接続・障害時テストが必要。
 
 **保証範囲の制限：** WordPressフックを通過するメタデータ変更が対象。
 直接SQL/FTP/外部配信/CDNは変更前失効を保証しない。フック外の変更に
@@ -46,7 +69,8 @@ WordPressが後フックを呼ばない場合はリクエスト終了時に保�
 ## Cronバッチ
 
 `esp_media_index_v1_batch` を5分間隔で予約。1回につき
-最大200添付を照合して進捗を保存し、最初の全件走査が完了して
+優先dirty再構築を最大200添付処理し、さらに最大200添付を照合して進捗を保存する。
+最初の全件走査が完了して
 未完了の添付がない場合だけreadyマーカーを公開する。
 その後も同じカーソルによって分割監査を継続する。
 初期化・バックフィルのSQLは配信リクエスト中に実行しない。
