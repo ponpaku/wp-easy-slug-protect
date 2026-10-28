@@ -753,7 +753,8 @@ class ESP_Media_Protection {
             return;
         }
         
-        // 添付IDの照会失敗と正常な未登録を区別する。未知なら配信しない。
+        // Resolverが不明・矛盾・障害を検出した場合は公開扱いにしない。
+        // 正常な未登録の移行ポリシーは#43で別途決定する。
         $attachment_id = $this->get_attachment_id_from_path($file_path);
         if ($attachment_id === null) {
             $this->send_503();
@@ -896,151 +897,64 @@ class ESP_Media_Protection {
     * @return string|false 検証済みのファイルパス、無効な場合はfalse
     */
     private function validate_file_path($requested_file) {
-        // nullバイト攻撃対策
-        $requested_file = str_replace("\0", '', $requested_file);
-        
-        // URLエンコードされた文字をデコード（複数回）
-        $max_decode = 3;
-        for ($i = 0; $i < $max_decode; $i++) {
+        // 破壊的なpreg_replaceで不正パスを別ファイルへ変換しない。
+        if (!self::is_allowed_media_request($requested_file)) {
+            return false;
+        }
+        for ($i = 0; $i < 3; $i++) {
             $decoded = rawurldecode($requested_file);
-            if ($decoded === $requested_file) break;
+            if ($decoded === $requested_file) {
+                break;
+            }
             $requested_file = $decoded;
         }
-        
-        // ディレクトリトラバーサル対策（強化版）
-        // 様々なパターンの相対パス指定を除去
-        $patterns = [
-            '#(\.\.+[/\\\\])#',           // ../ または ..\
-            '#([/\\\\]\.\.+)#',           // /.. または \..
-            '#(\.\.+)#',                  // 連続した..
-            '#^[/\\\\]+#',                // 先頭のスラッシュ
-            '#[/\\\\]+$#',                // 末尾のスラッシュ
-            '#[/\\\\]{2,}#'               // 連続したスラッシュ
-        ];
-        
-        foreach ($patterns as $pattern) {
-            $requested_file = preg_replace($pattern, '', $requested_file);
-        }
-        
-        // 空文字になった場合は無効
-        if (empty($requested_file)) {
-            return false;
-        }
-        
-        // 安全なパス構築
-        $upload_dir = wp_upload_dir();
-        $base_path = realpath($upload_dir['basedir']);
-        
-        if ($base_path === false) {
-            return false;
-        }
-        
-        // ファイルパスを構築
-        $file_path = $base_path . DIRECTORY_SEPARATOR . $requested_file;
-        $file_path = realpath($file_path);
-        
-        // realpathが失敗した場合
-        if ($file_path === false) {
-            return false;
-        }
-        
-        // 接頭辞だけの比較ではuploads-backup等の兄弟ディレクトリを通してしまう。
-        // 実体パスでディレクトリ境界を確認し、リンク先の隠しファイルも拒否する。
-        $base_prefix = rtrim($base_path, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
-        if (strpos($file_path, $base_prefix) !== 0 ||
-            !self::is_allowed_media_request(substr($file_path, strlen($base_prefix)))) {
+        if (!self::is_allowed_media_request($requested_file)) {
             return false;
         }
 
-        // ファイルが存在し、通常ファイルであることを確認
-        if (!file_exists($file_path) || !is_file($file_path) || is_link($file_path)) {
+        $upload = wp_upload_dir();
+        if (!is_array($upload) || !empty($upload['error']) ||
+            empty($upload['basedir']) || !is_string($upload['basedir'])) {
             return false;
         }
-        
-        return $file_path;
+        $root = realpath($upload['basedir']);
+        if ($root === false) {
+            return false;
+        }
+        // Trust the configured uploads root even when it is a symlink, but
+        // reject *every* symlink component below it before resolving the file.
+        $logical = rtrim($upload['basedir'], '/');
+        foreach (explode('/', $requested_file) as $segment) {
+            $logical .= '/' . $segment;
+            if (is_link($logical)) {
+                return false;
+            }
+        }
+        $file = realpath($logical);
+        $prefix = rtrim($root, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
+        if ($file === false || strncmp($file, $prefix, strlen($prefix)) !== 0 ||
+            !is_file($file) || !is_readable($file)) {
+            return false;
+        }
+        return $file;
     }
 
     /**
-     * ファイルパスから添付ファイルIDを取得
+     * Legacy media-delivery adapter: unknown ownership keeps the existing
+     * public-file behavior until the explicit migration policy in #43.
+     * Never turn ambiguous matches, SQL failures or invalid paths into public.
      *
-     * @param string $file_path ファイルパス
-     * @return int|false|null ID=登録済み、false=正常な未登録、null=DB状態不明
+     * @return int|false|null resolved ID / legacy unresolved / unsafe uncertainty
      */
     private function get_attachment_id_from_path($file_path) {
-        global $wpdb;
-        if (!is_object($wpdb) || !isset($wpdb->postmeta)) {
-            return null;
+        $result = (new ESP_Media_File_Resolver())->resolve($file_path);
+        if ($result['status'] === 'resolved') {
+            return $result['attachment_id'];
         }
-        try {
-            $upload_dir = wp_upload_dir();
-            if (!is_array($upload_dir) || empty($upload_dir['basedir'])) {
-                return null;
-            }
-            $relative_path = str_replace(rtrim($upload_dir['basedir'], '/') . '/', '', $file_path);
-
-            // SQL失敗を「IDなし」と混同しない。単に見つからなかった場合のみfalse。
-            $attachment_id = $wpdb->get_var($wpdb->prepare(
-                "SELECT post_id FROM {$wpdb->postmeta}
-                WHERE meta_key = '_wp_attached_file'
-                AND meta_value = %s
-                LIMIT 1",
-                $relative_path
-            ));
-            if ($wpdb->last_error !== '' ||
-                ($attachment_id !== null && (!is_numeric($attachment_id) || (int) $attachment_id <= 0))) {
-                return null;
-            }
-            if ($attachment_id !== null) {
-                return (int) $attachment_id;
-            }
-
-            // AVIFサムネイルは _wp_attached_file に登録されない場合がある。
-            // 親画像の候補を同じディレクトリから探し、メタデータに記録された
-            // サムネイル名と一致した場合だけ保護設定を継承する。
-            if (strtolower(pathinfo($relative_path, PATHINFO_EXTENSION)) !== 'avif') {
-                return false;
-            }
-
-            $thumbnail_name = basename($relative_path);
-            if (!preg_match('/^(.+)-[0-9]+x[0-9]+\\.avif$/i', $thumbnail_name, $matches)) {
-                return false;
-            }
-
-            $directory = dirname($relative_path);
-            $parent_prefix = ($directory === '.' ? '' : $directory . '/') . $matches[1];
-            $parent_extensions = ['avif', 'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'heic', 'heif'];
-            $candidates = [];
-            foreach ($parent_extensions as $extension) {
-                $candidates[] = $parent_prefix . '.' . $extension;
-            }
-
-            $placeholders = implode(', ', array_fill(0, count($candidates), '%s'));
-            $candidate_ids = $wpdb->get_col($wpdb->prepare(
-                "SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = %s AND meta_value IN ({$placeholders})",
-                array_merge(['_wp_attached_file'], $candidates)
-            ));
-            if ($wpdb->last_error !== '' || !is_array($candidate_ids)) {
-                return null;
-            }
-
-            foreach ($candidate_ids as $candidate_id) {
-                $metadata = wp_get_attachment_metadata((int) $candidate_id);
-                if (!is_array($metadata) || !isset($metadata['file'], $metadata['sizes']) ||
-                    !is_array($metadata['sizes']) || dirname($metadata['file']) !== $directory) {
-                    continue;
-                }
-
-                foreach ($metadata['sizes'] as $size) {
-                    if (is_array($size) && isset($size['file']) && $size['file'] === $thumbnail_name) {
-                        return (int) $candidate_id;
-                    }
-                }
-            }
-
+        if ($result['status'] === 'unresolved') {
             return false;
-        } catch (\Throwable $error) {
-            return null;
         }
+        return null; // ambiguous and error: fail closed in the existing caller
     }
 
     /**
