@@ -268,13 +268,23 @@ final class ESP_Media_Index {
         // WordPress delete_metadata(..., delete_all=true) may mutate every post.
         // Without an exact finite affected set, do not admit it in strict mode.
         if ($extra === true) {
-            return self::enabled() ? false : null;
+            // delete_all is an unbounded cross-attachment mutation. Reject in
+            // strict mode; in compatibility mode invalidate global coverage
+            // before allowing the WordPress operation to continue.
+            if (self::enabled()) { return false; }
+            if (!update_option(self::READY_OPTION, '0', false) &&
+                self::ready()) { return false; }
+            update_option(self::CURSOR_OPTION, 0, false);
+            return null;
         }
         if (get_post_type((int)$post_id) !== 'attachment') { return $check; }
         if (self::mark_dirty((int)$post_id)) {
             self::track_local((int)$post_id);
             return null;
         }
+        // Failed pre-invalidation must never leave a trustworthy-looking
+        // coverage marker for a future opt-in, even in compatibility mode.
+        update_option(self::READY_OPTION, '0', false);
         return self::enabled() ? false : null;
     }
     public static function guard_by_mid($check, $meta_id, $meta_value, $meta_key = false) {
