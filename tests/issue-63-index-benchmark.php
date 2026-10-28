@@ -1,12 +1,41 @@
 <?php
 /**
  * Issue #63 synthetic MySQL comparison, NOT a WordPress/HTTP production benchmark.
- * Runs actual PR #62 Resolver::resolve() with a small wpdb compatibility shim,
- * and the isolated dedicated-table lookup against the same 10K/100K corpus.
+ * Runs the EXACT main branch method get_attachment_id_from_path() extracted
+ * from the pinned source (via class name isolation), actual PR #62 Resolver,
+ * and the isolated dedicated-table lookup on the same 10K/100K corpus.
+ * The main implementation doesn't resolve ordinary JPEG thumbnails;
+ * speed and correctness are measured separately.
  */
 declare(strict_types=1);
 define('ABSPATH', __DIR__ . '/');
 define('ARRAY_A', 'ARRAY_A');
+define('WEEK_IN_SECONDS', 604800);
+// GitHub Actions supplies main's unmodified source from git show at a pinned SHA.
+$main_file = getenv('ESP63_MAIN_CLASS_SOURCE');
+if (!is_string($main_file) || !is_file($main_file)) {
+    fwrite(STDERR, "Missing pinned main source; see workflow git show step\n");
+    exit(1);
+}
+$main_source = file_get_contents($main_file);
+if (!is_string($main_source)) { throw new RuntimeException('Could not read main'); }
+$renamed_main = str_replace('class ESP_Media_Protection {',
+    'class ESP63_Main_Media_Protection {', $main_source, $main_replacements);
+if ($main_replacements !== 1) { throw new RuntimeException('main class signature changed'); }
+$main_copy = tempnam(sys_get_temp_dir(), 'esp63-main-');
+file_put_contents($main_copy, $renamed_main);
+try { require $main_copy; } finally { @unlink($main_copy); }
+$main_reflection = new ReflectionClass('ESP63_Main_Media_Protection');
+$main_object = $main_reflection->newInstanceWithoutConstructor();
+$main_lookup_method = $main_reflection->getMethod('get_attachment_id_from_path');
+function esp63_main_lookup($path): array {
+    global $main_lookup_method, $main_object;
+    $value = $main_lookup_method->invoke($main_object, $path);
+    if ($value === null) { return ['status' => 'error']; }
+    if ($value === false) { return ['status' => 'unresolved']; }
+    return ['status' => 'resolved', 'attachment_id' => (int)$value];
+}
+
 require dirname(__DIR__) . '/includes/class-esp-media-file-resolver.php';
 require dirname(__DIR__) . '/includes/class-esp63-media-index-prototype.php';
 
@@ -39,6 +68,17 @@ final class ESP63_Bench_DB {
             if (!$result instanceof mysqli_result) { $this->last_error = 'query failed'; return null; }
             return $result->fetch_all(MYSQLI_ASSOC);
         } catch (Throwable $e) { $this->last_error = $e->getMessage(); return null; }
+    }
+    public function get_var($sql) {
+        $rows = $this->get_results($sql, ARRAY_A);
+        if (!is_array($rows) || !$rows) { return null; }
+        $first = reset($rows[0]);
+        return $first === false ? null : $first;
+    }
+    public function get_col($sql) {
+        $rows = $this->get_results($sql, ARRAY_A);
+        if (!is_array($rows)) { return null; }
+        return array_map(static function ($row) { return reset($row); }, $rows);
     }
     public function query($sql) {
         $this->queries++;
@@ -119,7 +159,8 @@ function esp63_percentile(array $values, float $p): float {
     sort($values, SORT_NUMERIC);
     return round($values[max(0, (int)ceil(count($values) * $p) - 1)], 3);
 }
-function esp63_measure(callable $lookup, array $targets, int $iterations): array {
+function esp63_measure(callable $lookup, array $targets, int $iterations,
+                       string $expected_status = 'resolved'): array {
     foreach ($targets as $target) { $lookup($target); }
     $durations = [];
     for ($round = 0; $round < $iterations; $round++) {
@@ -127,7 +168,7 @@ function esp63_measure(callable $lookup, array $targets, int $iterations): array
             $start = hrtime(true);
             $result = $lookup($target);
             $durations[] = (hrtime(true) - $start) / 1000000.0;
-            if ($result['status'] !== 'resolved') {
+            if ($result['status'] !== $expected_status) {
                 throw new RuntimeException('Unexpected status ' . json_encode($result));
             }
         }
@@ -153,7 +194,8 @@ try {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
     esp63_run_sql($mysqli, ESP63_Media_Index_Prototype::schema_sql('esp63_media_index'));
     $report = ['benchmark' => 'issue-63-synthetic', 'php' => PHP_VERSION,
-               'word_press' => 'stub metadata, actual PR #62 Resolver SQL',
+               'word_press' => 'stub metadata; main exact method; PR #62 actual Resolver SQL',
+               'main_commit' => 'a5c0e3f518e8204d085bdaf492fcc203bf8bca87',
                'dataset_files_per_attachment' => 5, 'iterations_per_target' => 20,
                'results' => []];
     foreach ([10000, 100000] as $size) {
@@ -164,11 +206,22 @@ try {
             $mysqli->query('ANALYZE TABLE ' . $table);
         }
         $targets = [];
+        $original_targets = [];
         foreach ([1000, 1001, (int)($size / 2), $size - 1] as $id) {
             $relative = '2026/10/' . esp63_name($id) . '-150x150.jpg';
             $absolute = $uploads . '/' . $relative;
             file_put_contents($absolute, 'bench');
             $targets[] = $absolute;
+            $original = $uploads . '/2026/10/' . esp63_name($id) . '.jpg';
+            file_put_contents($original, 'bench');
+            $original_targets[] = $original;
+            $main_original = esp63_main_lookup($original);
+            $main_thumb = esp63_main_lookup($absolute);
+            if ($main_original['status'] !== 'resolved' ||
+                $main_original['attachment_id'] !== $id ||
+                $main_thumb['status'] !== 'unresolved') {
+                throw new RuntimeException('Unexpected main original/thumb resolution');
+            }
             $expected = ($id % 8 === 0) ? 'secret_A' : '';
             $found = ESP63_Media_Index_Prototype::lookup($wpdb, 'esp63_media_index', $relative);
             if ($found['status'] !== 'resolved' || $found['attachment_id'] !== $id ||
@@ -177,10 +230,16 @@ try {
             }
         }
         $old = new ESP_Media_File_Resolver();
+        $index_lookup = fn($path) => ESP63_Media_Index_Prototype::lookup(
+            $wpdb, 'esp63_media_index', substr($path, strlen($uploads) + 1));
+        // Original: all three implementations resolve to the same owner.
+        $main_original = esp63_measure('esp63_main_lookup', $original_targets, 20);
+        $pr62_original = esp63_measure(fn($path) => $old->resolve($path), $original_targets, 20);
+        $indexed_original = esp63_measure($index_lookup, $original_targets, 20);
+        // Thumbnail: main returns unresolved; PR #62 and dedicated lookup resolve.
+        $main_thumb = esp63_measure('esp63_main_lookup', $targets, 20, 'unresolved');
         $baseline = esp63_measure(fn($path) => $old->resolve($path), $targets, 20);
-        $indexed = esp63_measure(fn($path) =>
-            ESP63_Media_Index_Prototype::lookup($wpdb, 'esp63_media_index',
-                substr($path, strlen($uploads) + 1)), $targets, 20);
+        $indexed = esp63_measure($index_lookup, $targets, 20);
         $db_bytes = (int)$mysqli->query("SELECT COALESCE(SUM(data_length+index_length),0) AS bytes
             FROM information_schema.tables WHERE table_schema=DATABASE()
             AND table_name IN ('esp63_posts','esp63_postmeta','esp63_media_index')")
@@ -191,14 +250,23 @@ try {
         }
         $report['results'][] = [
             'attachments' => $size, 'indexed_files' => $size * 5,
+            'original_file' => ['main' => $main_original, 'resolver_pr62' => $pr62_original,
+                               'dedicated_index' => $indexed_original],
+            'jpeg_thumbnail' => ['main' => $main_thumb, 'resolver_pr62' => $baseline,
+                                  'dedicated_index' => $indexed],
+            'main_jpeg_thumbnail_status' => 'unresolved',
             'seed_seconds' => round($seed_secs, 2),
             'resolver_pr62' => $baseline,
             'dedicated_index' => $indexed,
             'db_size_bytes_estimate' => $db_bytes,
         ];
-        foreach ($targets as $path) { @unlink($path); }
-        echo $size . " attachments: Resolver p95 " . $baseline['p95_ms'] .
-            " ms; dedicated p95 " . $indexed['p95_ms'] . " ms\n";
+        foreach (array_merge($targets, $original_targets) as $path) { @unlink($path); }
+        echo $size . " originals: main p95 " . $main_original['p95_ms'] .
+            " ms; PR62 p95 " . $pr62_original['p95_ms'] .
+            " ms; dedicated p95 " . $indexed_original['p95_ms'] . " ms\n";
+        echo $size . " JPEG thumbnails: main unresolved p95 " . $main_thumb['p95_ms'] .
+            " ms; PR62 resolved p95 " . $baseline['p95_ms'] .
+            " ms; dedicated resolved p95 " . $indexed['p95_ms'] . " ms\n";
     }
     // Backfill helper updates a single attachment without leaving partial rows.
     $changed_id = 99;
