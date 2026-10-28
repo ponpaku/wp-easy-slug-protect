@@ -1,0 +1,35 @@
+name: Disposable media resolver benchmark
+on:
+  push:
+    branches: ['test/issue-42-resolver-benchmark']
+  workflow_dispatch:
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
+          MYSQL_DATABASE: esp_wp31
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1"
+          --health-interval=5s --health-timeout=5s --health-retries=30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Benchmark main vs PR #62 at 10k and 100k attachment records
+        env:
+          ESP_ALLOW_DISPOSABLE_DB: "1"
+        run: bash .github/scripts/benchmark-media-resolver.sh
+      - name: Upload raw JSON and evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: media-resolver-benchmark
+          path: ${{ runner.temp }}/esp42-benchmark-results/
+          if-no-files-found: warn
+          retention-days: 14
