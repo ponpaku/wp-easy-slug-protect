@@ -167,11 +167,11 @@ function esp63_seed(mysqli $mysqli, int $size): float {
     // attachment's protection ID and a per-owner ready state. This excludes
     // the real WordPress backfill lifecycle and isolates indexed lookup speed.
     esp63_run_sql($mysqli, 'INSERT INTO esp63_esp_media_files_v1
-        (path_hash,file_path,attachment_id,protected_path_id)
-        SELECT path_hash,file_path,attachment_id,protected_path_id FROM esp63_media_index');
+        (path_hash,file_path,attachment_id,generation,protected_path_id)
+        SELECT path_hash,file_path,attachment_id,1,protected_path_id FROM esp63_media_index');
     esp63_run_sql($mysqli, "INSERT INTO esp63_esp_media_file_state_v1
-        (attachment_id,status,revision,pending_count,changed_at)
-        SELECT ID,'ready',1,0,0 FROM esp63_posts");
+        (attachment_id,status,revision,active_generation,pending_count,changed_at)
+        SELECT ID,'ready',1,1,0,0 FROM esp63_posts");
     return microtime(true) - $start;
 }
 function esp63_percentile(array $values, float $p): float {
@@ -217,14 +217,16 @@ try {
     esp63_run_sql($mysqli, "CREATE TABLE esp63_esp_media_files_v1 (
         path_hash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
         file_path TEXT NOT NULL, attachment_id BIGINT UNSIGNED NOT NULL,
+        generation BIGINT UNSIGNED NOT NULL DEFAULT 0,
         protected_path_id VARCHAR(191) NOT NULL DEFAULT '',
-        PRIMARY KEY (path_hash,attachment_id),KEY attachment_id (attachment_id),
+        PRIMARY KEY (path_hash,attachment_id,generation),KEY attachment_id (attachment_id),
         KEY protected_path_id (protected_path_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
     esp63_run_sql($mysqli, "CREATE TABLE esp63_esp_media_file_state_v1 (
         attachment_id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
         status VARCHAR(16) NOT NULL DEFAULT 'dirty',
         revision BIGINT UNSIGNED NOT NULL DEFAULT 0,
+        active_generation BIGINT UNSIGNED NOT NULL DEFAULT 0,
         pending_count INT UNSIGNED NOT NULL DEFAULT 0,
         changed_at BIGINT UNSIGNED NOT NULL DEFAULT 0,
         KEY status (status)
