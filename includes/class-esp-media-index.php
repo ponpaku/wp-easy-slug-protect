@@ -242,8 +242,10 @@ final class ESP_Media_Index {
         // a second post-ID lookup or trusting an unverified cached permission.
         $sql = $wpdb->prepare("SELECT f.file_path, f.attachment_id, f.generation,
                 f.protected_path_id, s.status, s.pending_count, s.active_generation,
-                pm.meta_value AS live_protected_path
-            FROM $files f INNER JOIN $state s ON s.attachment_id=f.attachment_id
+                p.post_type AS live_post_type, pm.meta_value AS live_protected_path
+            FROM $files f
+            LEFT JOIN $state s ON s.attachment_id=f.attachment_id
+            LEFT JOIN {$wpdb->posts} p ON p.ID=f.attachment_id
             LEFT JOIN {$wpdb->postmeta} pm ON pm.post_id=f.attachment_id
                 AND pm.meta_key=%s
             WHERE f.path_hash=%s",
@@ -257,6 +259,7 @@ final class ESP_Media_Index {
                          $row['protected_path_id'], $row['status'], $row['pending_count'],
                          $row['generation'], $row['active_generation']) ||
                 !array_key_exists('live_protected_path', $row) ||
+                ($row['live_post_type'] ?? null) !== 'attachment' ||
                 !hash_equals((string)$row['file_path'], $relative) ||
                 !ctype_digit((string)$row['attachment_id']) ||
                 (int)$row['attachment_id'] <= 0 ||
