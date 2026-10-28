@@ -57,12 +57,20 @@ $id = (int)$wpdb->get_var("SELECT ID FROM {$wpdb->posts} WHERE post_type='attach
 if ($id <= 0 || !update_post_meta($id, ESP_Media_Index::PROTECTION_META, '')) {
     throw new RuntimeException('Cannot unprotect fixture via normal WP API');
 }
+if (ESP_Media_Index::resolve($path)['status'] !== 'error' ||
+    !ESP_Media_Index::reindex_attachment($id)) {
+    throw new RuntimeException('committed WP unprotect requires independent rebuild');
+}
 $unprotected = ESP_Media_Index::resolve($path);
 if ($unprotected['status'] !== 'resolved' || $unprotected['protected_path_id'] !== '') {
     throw new RuntimeException('WP metadata OFF transition not indexed');
 }
 if (!update_post_meta($id, ESP_Media_Index::PROTECTION_META, 'path_http')) {
     throw new RuntimeException('Cannot reprotect fixture via WP API');
+}
+if (ESP_Media_Index::resolve($path)['status'] !== 'error' ||
+    !ESP_Media_Index::reindex_attachment($id)) {
+    throw new RuntimeException('committed WP reprotect requires independent rebuild');
 }
 $restored = ESP_Media_Index::resolve($path);
 if ($restored['status'] !== 'resolved' || $restored['protected_path_id'] !== 'path_http') {
@@ -71,7 +79,8 @@ if ($restored['status'] !== 'resolved' || $restored['protected_path_id'] !== 'pa
 // A no-op update has a pre-hook but may not have a WordPress after-hook.
 update_post_meta($id, ESP_Media_Index::PROTECTION_META, 'path_http');
 ESP_Media_Index::finish_noop_writes();
-if (ESP_Media_Index::resolve($path)['status'] !== 'resolved') {
+if (!ESP_Media_Index::reindex_attachment($id) ||
+    ESP_Media_Index::resolve($path)['status'] !== 'resolved') {
     throw new RuntimeException('No-op metadata update stranded pending state');
 }
 $meta = wp_get_attachment_metadata($id, true);
@@ -80,10 +89,76 @@ copy($uploads['basedir'] . '/esp31-protected.jpg', $uploads['basedir'] . '/' . $
 $meta['sizes']['esp63_extra'] = ['file'=>$new_name, 'width'=>175,
     'height'=>175, 'mime-type'=>'image/jpeg'];
 wp_update_attachment_metadata($id, $meta);
+if (!ESP_Media_Index::reindex_attachment($id)) {
+    throw new RuntimeException('Cannot rebuild committed subsize index');
+}
 $new_owner = ESP_Media_Index::resolve($uploads['basedir'] . '/' . $new_name);
 if ($new_owner['status'] !== 'resolved' || $new_owner['protected_path_id'] !== 'path_http') {
     throw new RuntimeException('new WP subsize was not indexed on metadata update');
 }
+// R01: real WordPress API, unique=true must NOT be treated as delete_all.
+$public_id = (int)$wpdb->get_var("SELECT ID FROM {$wpdb->posts}
+    WHERE post_type='attachment' AND post_title='ESP31 public JPEG' LIMIT 1");
+if (!$public_id) { throw new RuntimeException('Missing public attachment for unique hook'); }
+foreach (['1', '0'] as $mode) {
+    update_option(ESP_Media_Index::ENABLE_OPTION, $mode, false);
+    if (!add_post_meta($public_id, ESP_Media_Index::PROTECTION_META, '1', true)) {
+        throw new RuntimeException('add_post_meta unique=true rejected for mode ' . $mode);
+    }
+    if (ESP_Media_Index::ready() !== true) {
+        throw new RuntimeException('unique=true incorrectly reset global READY');
+    }
+    if (!ESP_Media_Index::reindex_attachment($public_id)) {
+        throw new RuntimeException('unique=true committed add cannot rebuild');
+    }
+    if (!update_post_meta($public_id, ESP_Media_Index::PROTECTION_META, 'path_http', true)) {
+        throw new RuntimeException('update_post_meta prev_value=true was rejected');
+    }
+    if (ESP_Media_Index::ready() !== true ||
+        !ESP_Media_Index::reindex_attachment($public_id)) {
+        throw new RuntimeException('prev_value=true corrupted global coverage');
+    }
+    if (!delete_post_meta($public_id, ESP_Media_Index::PROTECTION_META) ||
+        !ESP_Media_Index::reindex_attachment($public_id)) {
+        throw new RuntimeException('failed to restore public attachment');
+    }
+}
+
+// R02: WP API called under an external transaction may not cause an
+// implicit COMMIT. The pre-fence rolls back with the metadata itself.
+$probe_table = $wpdb->prefix . 'esp63_transaction_probe';
+$wpdb->query("CREATE TABLE $probe_table (id INT PRIMARY KEY) ENGINE=InnoDB");
+$wpdb->query('START TRANSACTION');
+$wpdb->query("INSERT INTO $probe_table (id) VALUES (1)");
+if (!update_post_meta($id, ESP_Media_Index::PROTECTION_META, 'transaction_test')) {
+    throw new RuntimeException('external transaction WordPress metadata update failed');
+}
+if (ESP_Media_Index::reindex_attachment($id) !== false) {
+    throw new RuntimeException('reindex committed external transaction');
+}
+$wpdb->query('ROLLBACK');
+wp_cache_delete($id, 'post_meta');
+if ((int)$wpdb->get_var("SELECT COUNT(*) FROM $probe_table") !== 0 ||
+    ESP_Media_Index::resolve($path)['status'] !== 'resolved') {
+    throw new RuntimeException('external transaction rollback was not atomic');
+}
+$wpdb->query('START TRANSACTION');
+$wpdb->query("INSERT INTO $probe_table (id) VALUES (2)");
+if (!update_post_meta($id, ESP_Media_Index::PROTECTION_META, 'transaction_committed')) {
+    throw new RuntimeException('external transaction commit fixture failed');
+}
+$wpdb->query('COMMIT');
+if ((int)$wpdb->get_var("SELECT COUNT(*) FROM $probe_table") !== 1 ||
+    ESP_Media_Index::resolve($path)['status'] !== 'error' ||
+    !ESP_Media_Index::reindex_attachment($id)) {
+    throw new RuntimeException('dirty marker not persisted atomically on COMMIT');
+}
+if (!update_post_meta($id, ESP_Media_Index::PROTECTION_META, 'path_http') ||
+    !ESP_Media_Index::reindex_attachment($id)) {
+    throw new RuntimeException('failed to restore HTTP protected fixture');
+}
+$wpdb->query("DROP TABLE $probe_table");
+update_option(ESP_Media_Index::ENABLE_OPTION, '1', false);
 // Keep strict mode on for the following real Apache curl checks.
 update_option(ESP_Media_Index::ENABLE_OPTION, '1', false);
 echo "PASS: dbDelta, batched WordPress metadata backfill, original+derivative protection and strict opt-in\n";
