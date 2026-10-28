@@ -181,7 +181,7 @@ final class ESP_Media_File_Resolver {
         while (count($stems) < self::MAX_STEMS) {
             $last = $stems[count($stems) - 1];
             $next = preg_replace(
-                '/(?:-[1-9][0-9]*x[1-9][0-9]*|-scaled|-rotated|-e[0-9]{8,16}|-pdf)$/i',
+                '/(?:-[1-9][0-9]*x[1-9][0-9]*|-scaled|-rotated|-e[0-9]{8,16}|-pdf|-poster)$/i',
                 '', $last, 1, $replaced
             );
             if ($replaced !== 1 || $next === '') {
