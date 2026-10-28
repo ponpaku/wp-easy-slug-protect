@@ -755,25 +755,41 @@ class ESP_Media_Protection {
         
         // Resolverが不明・矛盾・障害を検出した場合は公開扱いにしない。
         // 正常な未登録の移行ポリシーは#43で別途決定する。
-        $attachment_id = $this->get_attachment_id_from_path($file_path);
-        if ($attachment_id === null) {
-            $this->send_503();
-            return;
+        if (ESP_Media_Index::enabled()) {
+            // #63: verified index returns ownership + protection ID together.
+            // Unknown paths and ambiguous owners are never public. The index is
+            // opt-in until initial backfill and the #43 migration are verified.
+            $ownership = ESP_Media_Index::resolve($file_path);
+            if ($ownership['status'] === 'unresolved' ||
+                $ownership['status'] === 'ambiguous') {
+                $this->send_403();
+                return;
+            }
+            if ($ownership['status'] !== 'resolved') {
+                $this->send_503();
+                return;
+            }
+            $attachment_id = $ownership['attachment_id'];
+            $protected_path_id = $ownership['protected_path_id'];
+        } else {
+            // Compatibility mode: retain #62 Resolver behavior until #43
+            // migration is explicitly performed. This is not strict mode.
+            $attachment_id = $this->get_attachment_id_from_path($file_path);
+            if ($attachment_id === null) {
+                $this->send_503();
+                return;
+            }
+            if ($attachment_id === false) {
+                $this->deliver_media($file_path);
+                return;
+            }
+            $live_path = self::read_protected_media_path($attachment_id);
+            if ($live_path === null) {
+                $this->send_503();
+                return;
+            }
+            $protected_path_id = $live_path['path_id'];
         }
-        if ($attachment_id === false) {
-            // 正常なDB照会で未登録と確定した場合だけ、従来の配信を維持。
-            $this->deliver_media($file_path);
-            return;
-        }
-
-        // 管理者が選んだ確認方式で保護メタを確認する。既定はDB直接照会。
-        // 高速モードでも読取エラーや不正な値を「公開」として扱わない。
-        $live_path = self::read_protected_media_path($attachment_id);
-        if ($live_path === null) {
-            $this->send_503();
-            return;
-        }
-        $protected_path_id = $live_path['path_id'];
         if ($protected_path_id === '') {
             $this->deliver_media($file_path);
             return;
