@@ -11,7 +11,8 @@ WordPressの正本を `_wp_attached_file`・`_wp_attachment_metadata`・
   `(path_hash, attachment_id, generation)` を複合主キーとし、複数所有者は複数行で保持。
   候補行のパスをPHPの `hash_equals()` で完全一致確認。
 - `{prefix}esp_media_file_state_v1`：添付単位の `dirty/ready`、
-  `pending_count`、`revision`、`active_generation`、更新時刻。
+  `pending_count`、`revision`、`active_generation`、更新時刻、
+  `retry_after`・`failure_count`。
   更新中の旧世代・新世代のどちらも公開判断に使わない。
 - `resolve()`：`resolved(attachment_id, protected_path_id)`／
   `unresolved`／`ambiguous`／`error`。
@@ -93,7 +94,7 @@ wp option get esp_media_index_v1_ready
 wp option get esp_media_index_v1_cursor
 ```
 
-`schema=1, ready=1` は**初期照合を完了したこと**を意味し、
+`schema=2, ready=1` は**初期照合を完了したこと**を意味し、
 現在のDB・uploadsの任意変更まで完全に追跡できている証明ではない。
 
 ステージングで厳格モードと既存URLの回帰検証を行う場合：
