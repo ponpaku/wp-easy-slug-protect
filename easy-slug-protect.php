@@ -66,6 +66,7 @@ class Easy_Slug_Protect {
         require_once ESP_PATH . 'includes/class-esp-filter.php';
         require_once ESP_PATH . 'includes/class-esp-path-matcher.php';
         require_once ESP_PATH . 'includes/class-esp-media-deriver.php';
+        require_once ESP_PATH . 'includes/class-esp-media-file-resolver.php';
         require_once ESP_PATH . 'includes/class-esp-media-protection.php';
 
         // 管理画面クラスの読み込み
