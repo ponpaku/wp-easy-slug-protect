@@ -370,6 +370,92 @@ try {
     esp63_assert(ESP_Media_Index::resolve($uploads . '/2026/10/cat.jpg')['status']
         === 'resolved', 'correct mapping remains usable after fault reset');
 
+    // F01: state-table write failure during attachment deletion. The
+    // global READY invalidation must not become reversible until the stale
+    // public owner and all its files have been removed by the orphan audit.
+    esp63_sql("INSERT INTO esp63_posts (ID,post_type) VALUES (30,'attachment')");
+    esp63_sql("INSERT INTO esp63_postmeta(post_id,meta_key,meta_value) VALUES
+        (30,'_wp_attached_file','2026/10/reused.jpg')");
+    file_put_contents($uploads . '/2026/10/reused.jpg', 'reused-file');
+    esp63_assert(ESP_Media_Index::reindex_attachment(30), 'F01 public owner indexed');
+    $options[ESP_Media_Index::ENABLE_OPTION] = '0';
+    $options[ESP_Media_Index::READY_OPTION] = '1';
+    $wpdb->fail_state_write = true;
+    ESP_Media_Index::on_attachment_deleting(30);
+    esp63_assert($options[ESP_Media_Index::READY_OPTION] === '0',
+        'F01 global invalidated when deletion fence fails');
+    esp63_sql('DELETE FROM esp63_postmeta WHERE post_id=30');
+    esp63_sql('DELETE FROM esp63_posts WHERE ID=30');
+    ESP_Media_Index::on_post_deleted(30);
+    $wpdb->fail_state_write = false;
+    esp63_assert((int)$wpdb->get_var("SELECT COUNT(*) FROM $files WHERE attachment_id=30") > 0,
+        'F01 stale ownership exists before orphan reconciliation');
+    ESP_Media_Index::run_batch(); // orphan purge + normal audit
+    ESP_Media_Index::run_batch(); // publish only after complete coverage verification
+    esp63_assert($options[ESP_Media_Index::READY_OPTION] === '1' &&
+        (int)$wpdb->get_var("SELECT COUNT(*) FROM $files WHERE attachment_id=30") === 0 &&
+        (int)$wpdb->get_var("SELECT COUNT(*) FROM $state WHERE attachment_id=30") === 0,
+        'F01 READY cannot return until deleted public owner and state are purged');
+    esp63_sql("INSERT INTO esp63_posts (ID,post_type) VALUES (31,'attachment')");
+    esp63_sql("INSERT INTO esp63_postmeta(post_id,meta_key,meta_value) VALUES
+        (31,'_wp_attached_file','2026/10/reused.jpg'),
+        (31,'_esp_media_protected_path_id','secret_Z')");
+    esp63_assert(ESP_Media_Index::reindex_attachment(31),
+        'F01 reused path reindexed under new protected owner');
+    $options[ESP_Media_Index::ENABLE_OPTION] = '1';
+    $reused = ESP_Media_Index::resolve($uploads . '/2026/10/reused.jpg');
+    esp63_assert($reused['status'] === 'resolved' &&
+        $reused['attachment_id'] === 31 &&
+        $reused['protected_path_id'] === 'secret_Z',
+        'F01 old public owner never reappears after READY republish');
+
+    // F02: one persistently invalid attachment may be retried but cannot
+    // keep later healthy attachments from rebuilding or advancing the scan.
+    esp63_sql("INSERT INTO esp63_posts (ID,post_type) VALUES
+        (40,'attachment'),(41,'attachment')");
+    esp63_sql("INSERT INTO esp63_postmeta(post_id,meta_key,meta_value) VALUES
+        (40,'_wp_attached_file','../invalid.jpg'),
+        (41,'_wp_attached_file','2026/10/healthy.jpg'),
+        (41,'_esp_media_protected_path_id','secret_Z')");
+    file_put_contents($uploads . '/2026/10/healthy.jpg', 'healthy-file');
+    esp63_assert(ESP_Media_Index::guard_meta(null,40,'_wp_attached_file','../invalid.jpg')
+        === null, 'F02 invalid attachment enqueued');
+    ESP_Media_Index::on_meta_saved(401,40,'_wp_attached_file','../invalid.jpg');
+    esp63_assert(ESP_Media_Index::guard_meta(null,41,'_wp_attached_file',
+        '2026/10/healthy.jpg') === null, 'F02 healthy attachment enqueued');
+    ESP_Media_Index::on_meta_saved(411,41,'_wp_attached_file','2026/10/healthy.jpg');
+    ESP_Media_Index::run_batch();
+    $failed = $wpdb->get_row("SELECT status,failure_count,retry_after
+        FROM $state WHERE attachment_id=40");
+    $healthy = $wpdb->get_row("SELECT status,active_generation
+        FROM $state WHERE attachment_id=41");
+    esp63_assert($failed['status'] === 'dirty' &&
+        (int)$failed['failure_count'] > 0 &&
+        (int)$failed['retry_after'] > time() &&
+        $healthy['status'] === 'ready' &&
+        (int)$healthy['active_generation'] > 0,
+        'F02 bad attachment deferred while healthy attachment becomes ready');
+    $failed_count = (int)$failed['failure_count'];
+    ESP_Media_Index::run_batch();
+    esp63_assert((int)$wpdb->get_var("SELECT failure_count FROM $state
+        WHERE attachment_id=40") === $failed_count &&
+        $options[ESP_Media_Index::READY_OPTION] === '0',
+        'F02 retry cooldown prevents starvation and incomplete coverage stays disabled');
+    // Once the metadata is repaired, a normal WordPress mutation resets its
+    // retry and the next batch can publish it.
+    esp63_assert(ESP_Media_Index::guard_meta(null,40,'_wp_attached_file',
+        '2026/10/fixed.jpg') === null, 'F02 repaired metadata resets retry');
+    esp63_sql("UPDATE esp63_postmeta SET meta_value='2026/10/fixed.jpg'
+        WHERE post_id=40 AND meta_key='_wp_attached_file'");
+    file_put_contents($uploads . '/2026/10/fixed.jpg', 'fixed-file');
+    ESP_Media_Index::on_meta_saved(402,40,'_wp_attached_file','2026/10/fixed.jpg');
+    ESP_Media_Index::run_batch();
+    ESP_Media_Index::run_batch();
+    esp63_assert($options[ESP_Media_Index::READY_OPTION] === '1' &&
+        ESP_Media_Index::resolve($uploads . '/2026/10/fixed.jpg')['status']
+          === 'resolved',
+        'F02 repaired attachment eventually restores complete coverage');
+
     file_put_contents($uploads . '/2026/10/unknown.jpg', 'unregistered');
     esp63_assert(ESP_Media_Index::resolve($uploads . '/2026/10/unknown.jpg')['status']
         === 'unresolved', 'unregistered is not automatically known-public');
