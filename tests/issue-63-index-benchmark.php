@@ -54,6 +54,7 @@ $mysqli = new mysqli(
     getenv('ESP_TEST_DB_NAME') ?: 'esp_test'
 );
 $mysqli->set_charset('utf8mb4');
+$mysqli->query('SET SESSION information_schema_stats_expiry=0');
 $mysqli->query("SET SESSION sql_mode='STRICT_ALL_TABLES'");
 $wpdb = new ESP63_Bench_DB($mysqli);
 $GLOBALS['wpdb'] = $wpdb;
@@ -157,6 +158,11 @@ try {
                'results' => []];
     foreach ([10000, 100000] as $size) {
         $seed_secs = esp63_seed($mysqli, $size);
+        // Refresh InnoDB persistent stats before reporting table size. Prior
+        // values were stale/default (163840 bytes) and must not be interpreted.
+        foreach (['esp63_posts', 'esp63_postmeta', 'esp63_media_index'] as $table) {
+            $mysqli->query('ANALYZE TABLE ' . $table);
+        }
         $targets = [];
         foreach ([1000, 1001, (int)($size / 2), $size - 1] as $id) {
             $relative = '2026/10/' . esp63_name($id) . '-150x150.jpg';
@@ -179,6 +185,10 @@ try {
             FROM information_schema.tables WHERE table_schema=DATABASE()
             AND table_name IN ('esp63_posts','esp63_postmeta','esp63_media_index')")
             ->fetch_assoc()['bytes'];
+        $count_row = $mysqli->query('SELECT COUNT(*) AS n FROM esp63_media_index')->fetch_assoc();
+        if ((int)$count_row['n'] !== $size * 5) {
+            throw new RuntimeException('Unexpected dedicated index row count');
+        }
         $report['results'][] = [
             'attachments' => $size, 'indexed_files' => $size * 5,
             'seed_seconds' => round($seed_secs, 2),
@@ -190,6 +200,21 @@ try {
         echo $size . " attachments: Resolver p95 " . $baseline['p95_ms'] .
             " ms; dedicated p95 " . $indexed['p95_ms'] . " ms\n";
     }
+    // Backfill helper updates a single attachment without leaving partial rows.
+    $changed_id = 99;
+    $changed_base = '2026/10/' . esp63_name($changed_id) . '.jpg';
+    if (!ESP63_Media_Index_Prototype::replace_attachment(
+        $wpdb, 'esp63_media_index', $changed_id,
+        $changed_base, esp63_metadata($changed_id), 'secret_Z')) {
+        throw new RuntimeException('Attachment replacement transaction failed');
+    }
+    $changed_lookup = ESP63_Media_Index_Prototype::lookup(
+        $wpdb, 'esp63_media_index', '2026/10/' . esp63_name($changed_id) . '-150x150.jpg');
+    if ($changed_lookup['status'] !== 'resolved' ||
+        $changed_lookup['protected_path_id'] !== 'secret_Z') {
+        throw new RuntimeException('Attachment protection update failed');
+    }
+    $report['attachment_replacement_check'] = 'passed';
     // Competing ownership and corruption must not yield a resolved owner.
     $rel = '2026/10/conflict.jpg';
     esp63_run_sql($mysqli, "INSERT INTO esp63_media_index
