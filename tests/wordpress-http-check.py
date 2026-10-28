@@ -49,11 +49,16 @@ check(status == 200 and public_jpeg.startswith(b'\xff\xd8') and
 check('public' in jpeg_headers.get('Cache-Control', '').lower() and
       'no-store' not in jpeg_headers.get('Cache-Control', '').lower(),
       'public JPEG retains long-lived public cache policy')
+status, thumbnail, thumbnail_headers = request(anon, '/wp-content/uploads/esp31-public-150x150.jpg')
+check(status == 200 and b'ESP42_PUBLIC_THUMB' in thumbnail and
+      'public' in thumbnail_headers.get('Cache-Control', '').lower(),
+      'WordPress standard public JPEG thumbnail stays available')
 check('no-store' not in public_headers.get('Cache-Control', '').lower(),
       'public media is not forced into protected no-store cache policy')
 for path, secret in [('/esp44-secret/', b'ESP44_SECRET_PAGE'),
                      ('/wp-content/uploads/esp44-protected.txt', b'ESP44_PROTECTED_MEDIA'),
-                     ('/wp-content/uploads/esp31-protected.jpg', b'ESP31_PROTECTED_JPEG')]:
+                     ('/wp-content/uploads/esp31-protected.jpg', b'ESP31_PROTECTED_JPEG'),
+                     ('/wp-content/uploads/esp31-protected-150x150.jpg', b'ESP42_PROTECTED_THUMB')]:
     status, body, _ = request(anon, path)
     check(status in (302, 403) and secret not in body, 'anonymous protected URL returns no secret bytes: ' + path)
 for remember in (False, True):
@@ -96,6 +101,10 @@ for remember in (False, True):
     check(status == 206 and jpeg_range == jpeg[:4] and
           'no-store' in headers.get('Cache-Control', '').lower(),
           'protected JPEG Range serves expected bytes without caching')
+    status, thumb_body, thumb_headers = request(c, '/wp-content/uploads/esp31-protected-150x150.jpg')
+    check(status == 200 and b'ESP42_PROTECTED_THUMB' in thumb_body and
+          'no-store' in thumb_headers.get('Cache-Control', '').lower(),
+          'WordPress standard protected thumbnail inherits exact attachment authorization')
     logout_nonce = re.search(rb'name="esp_nonce" value="([^"]+)"', body).group(1).decode()
     request(c, '/', {'esp_action': 'logout', 'esp_nonce': logout_nonce, 'esp_logout_path_id': 'path_http', 'redirect_to': '/'})
     status, media, logout_headers = request(c, '/wp-content/uploads/esp44-protected.txt')
@@ -107,4 +116,7 @@ for remember in (False, True):
           'logout denies the same protected JPEG URL without leaking image bytes')
     check('no-store' in headers.get('Cache-Control', '').lower(),
           'protected JPEG logout denial cannot be cached')
+    status, thumb_after_logout, _ = request(c, '/wp-content/uploads/esp31-protected-150x150.jpg')
+    check(status in (302, 403) and b'ESP42_PROTECTED_THUMB' not in thumb_after_logout,
+          'logout revokes access to WordPress standard protected JPEG thumbnail')
 print('All real Apache HTTP checks passed.')
