@@ -38,7 +38,10 @@ final class ESP63_DB {
             $this->last_error = 'injected index state failure';
             return false;
         }
-        try { return $this->db->query($sql); }
+        try {
+            $result = $this->db->query($sql);
+            return $result instanceof mysqli_result ? $result : $this->db->affected_rows;
+        }
         catch (Throwable $e) { $this->last_error = $e->getMessage(); return false; }
     }
     public function get_results($sql, $mode = ARRAY_A) {
@@ -254,8 +257,8 @@ try {
     esp63_sql("UPDATE esp63_postmeta SET meta_value='txn_rollback'
         WHERE post_id=10 AND meta_key='_esp_media_protected_path_id'");
     ESP_Media_Index::on_meta_saved(101,10,'_esp_media_protected_path_id','txn_rollback');
-    esp63_assert(!ESP_Media_Index::reindex_attachment(10),
-        'worker refuses to start transaction on another transaction');
+    esp63_assert(ESP_Media_Index::reindex_attachment(10),
+        'manual rebuild does not COMMIT the caller transaction');
     esp63_sql('ROLLBACK');
     esp63_assert((int)$wpdb->get_var('SELECT COUNT(*) FROM esp63_external_txn') === 0,
         'external INSERT was not implicitly committed');
