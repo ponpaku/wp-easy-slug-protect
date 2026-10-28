@@ -439,8 +439,17 @@ try {
     ESP_Media_Index::run_batch();
     esp63_assert((int)$wpdb->get_var("SELECT failure_count FROM $state
         WHERE attachment_id=40") === $failed_count &&
-        $options[ESP_Media_Index::READY_OPTION] === '0',
-        'F02 retry cooldown prevents starvation and incomplete coverage stays disabled');
+        $options[ESP_Media_Index::READY_OPTION] === '1' &&
+        ESP_Media_Index::resolve($uploads . '/2026/10/healthy.jpg')['status']
+            === 'resolved',
+        'F02 poison row does not revoke established global coverage or block healthy media');
+    // When global coverage has been explicitly invalidated, it must NOT be
+    // republished while a dirty attachment still has a deferred retry.
+    $options[ESP_Media_Index::READY_OPTION] = '0';
+    ESP_Media_Index::run_batch();
+    ESP_Media_Index::run_batch();
+    esp63_assert($options[ESP_Media_Index::READY_OPTION] === '0',
+        'F02 globally invalidated coverage cannot republish with dirty rows');
     // Once the metadata is repaired, a normal WordPress mutation resets its
     // retry and the next batch can publish it.
     esp63_assert(ESP_Media_Index::guard_meta(null,40,'_wp_attached_file',
