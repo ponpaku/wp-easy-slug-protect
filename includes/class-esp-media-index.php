@@ -95,6 +95,9 @@ final class ESP_Media_Index {
     public static function install_schema() {
         global $wpdb;
         if (!is_object($wpdb) || empty($wpdb->prefix)) { return false; }
+        // Schema upgrades must never inherit READY from an older generation:
+        // its audit did not check deleted owners or retry state.
+        if (!self::installed() && !self::invalidate_global()) { return false; }
         $files = self::table(self::files_table());
         $state = self::table(self::state_table());
         require_once ABSPATH . 'wp-admin/includes/upgrade.php';
@@ -125,6 +128,13 @@ final class ESP_Media_Index {
         foreach ([$files, $state] as $table) {
             $row = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($table)));
             if ($wpdb->last_error !== '' || $row !== $table) { return false; }
+        }
+        // dbDelta may report a partial upgrade without throwing. Verify
+        // the specific columns required by the retry/ownership contract.
+        foreach (['retry_after', 'failure_count'] as $column) {
+            $row = $wpdb->get_var($wpdb->prepare(
+                "SHOW COLUMNS FROM $state LIKE %s", $column));
+            if ($wpdb->last_error !== '' || $row !== $column) { return false; }
         }
         return update_option(self::SCHEMA_OPTION, '2', false) ||
             (string)get_option(self::SCHEMA_OPTION) === '2';
