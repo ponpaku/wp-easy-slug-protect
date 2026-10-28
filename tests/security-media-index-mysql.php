@@ -271,6 +271,13 @@ try {
     // R02: never start/commit a nested transaction. The dirty marker and
     // WordPress metadata share the caller's transaction and roll back together.
     esp63_sql("CREATE TABLE esp63_external_txn (id INT PRIMARY KEY) ENGINE=InnoDB");
+    $peer = new mysqli(
+        getenv('ESP_TEST_DB_HOST') ?: '127.0.0.1',
+        getenv('ESP_TEST_DB_USER') ?: 'root',
+        getenv('ESP_TEST_DB_PASSWORD') ?: '',
+        getenv('ESP_TEST_DB_NAME') ?: 'esp_test'
+    );
+    $peer->set_charset('utf8mb4');
     esp63_sql('START TRANSACTION');
     esp63_sql('INSERT INTO esp63_external_txn VALUES (1)');
     esp63_assert(ESP_Media_Index::guard_meta(null,10,
@@ -279,6 +286,12 @@ try {
     esp63_sql("UPDATE esp63_postmeta SET meta_value='txn_rollback'
         WHERE post_id=10 AND meta_key='_esp_media_protected_path_id'");
     ESP_Media_Index::on_meta_saved(101,10,'_esp_media_protected_path_id','txn_rollback');
+    $peer_state = $peer->query("SELECT status FROM $state WHERE attachment_id=10")->fetch_assoc();
+    $peer_protection = $peer->query("SELECT meta_value FROM esp63_postmeta
+        WHERE post_id=10 AND meta_key='_esp_media_protected_path_id'")->fetch_assoc();
+    esp63_assert($peer_state['status'] === 'ready' &&
+        $peer_protection['meta_value'] === 'writer_B',
+        'separate DB connection sees old committed state until transaction ends');
     esp63_assert(ESP_Media_Index::reindex_attachment(10),
         'manual rebuild does not COMMIT the caller transaction');
     esp63_sql('ROLLBACK');
@@ -297,6 +310,10 @@ try {
         WHERE post_id=10 AND meta_key='_esp_media_protected_path_id'");
     ESP_Media_Index::on_meta_saved(102,10,'_esp_media_protected_path_id','txn_committed');
     esp63_sql('COMMIT');
+    $peer_committed = $peer->query("SELECT status FROM $state
+        WHERE attachment_id=10")->fetch_assoc();
+    esp63_assert($peer_committed['status'] === 'dirty',
+        'another DB connection sees dirty state atomically after COMMIT');
     esp63_assert((int)$wpdb->get_var('SELECT COUNT(*) FROM esp63_external_txn') === 1,
         'external COMMIT controlled by caller');
     esp63_assert(ESP_Media_Index::resolve($uploads . '/2026/10/cat.jpg')['status']
@@ -304,6 +321,7 @@ try {
     esp63_assert(ESP_Media_Index::reindex_attachment(10), 'worker indexes committed transaction');
     esp63_assert(ESP_Media_Index::resolve($uploads . '/2026/10/cat.jpg')['protected_path_id']
         === 'txn_committed', 'worker published committed protection');
+    $peer->close();
 
     // R03: fail only state-table writes, not WordPress postmeta or option
     // writes. Bypass hooks in compatibility mode only after global invalidation.
