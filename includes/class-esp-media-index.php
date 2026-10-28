@@ -228,10 +228,17 @@ final class ESP_Media_Index {
         if ($relative === null) { return ['status' => 'error']; }
         $files = self::table(self::files_table());
         $state = self::table(self::state_table());
+        // Read the WordPress protection meta in the SAME indexed SQL roundtrip
+        // and reject disagreement with our materialized ID. This catches some
+        // bypassed index updates and duplicate protection meta records without
+        // a second post-ID lookup or trusting an unverified cached permission.
         $sql = $wpdb->prepare("SELECT f.file_path, f.attachment_id, f.protected_path_id,
-                s.status, s.pending_count
+                s.status, s.pending_count, pm.meta_value AS live_protected_path
             FROM $files f INNER JOIN $state s ON s.attachment_id=f.attachment_id
-            WHERE f.path_hash=%s", hash('sha256', $relative));
+            LEFT JOIN {$wpdb->postmeta} pm ON pm.post_id=f.attachment_id
+                AND pm.meta_key=%s
+            WHERE f.path_hash=%s",
+            self::PROTECTION_META, hash('sha256', $relative));
         $rows = $wpdb->get_results($sql, ARRAY_A);
         if (!is_array($rows) || $wpdb->last_error !== '') { return ['status' => 'error']; }
         $owners = [];
@@ -239,14 +246,21 @@ final class ESP_Media_Index {
             if (!is_array($row) ||
                 !isset($row['file_path'], $row['attachment_id'],
                          $row['protected_path_id'], $row['status'], $row['pending_count']) ||
+                !array_key_exists('live_protected_path', $row) ||
                 !hash_equals((string)$row['file_path'], $relative) ||
                 !ctype_digit((string)$row['attachment_id']) ||
                 (int)$row['attachment_id'] <= 0 ||
                 !is_string($row['protected_path_id']) ||
+                ($row['live_protected_path'] !== null &&
+                 !is_string($row['live_protected_path'])) ||
+                $row['protected_path_id'] !== (string)($row['live_protected_path'] ?? '') ||
                 $row['status'] !== 'ready' || (int)$row['pending_count'] !== 0) {
                 return ['status' => 'error'];
             }
-            $owners[(int)$row['attachment_id']] = $row['protected_path_id'];
+            // A duplicate postmeta row can yield the same owner twice.
+            $id = (int)$row['attachment_id'];
+            if (array_key_exists($id, $owners)) { return ['status' => 'error']; }
+            $owners[$id] = $row['protected_path_id'];
         }
         if (count($owners) > 1) { return ['status' => 'ambiguous']; }
         if (!$owners) { return ['status' => 'unresolved']; }
