@@ -22,6 +22,8 @@ final class ESP_Media_Index {
     const PROTECTION_META = '_esp_media_protected_path_id';
     private const KEYS = ['_wp_attached_file', '_wp_attachment_metadata', self::PROTECTION_META];
     private static $scheduled = false;
+    private static $deleting = [];
+    private static $by_mid = [];
 
     public static function files_table() {
         global $wpdb;
@@ -247,6 +249,11 @@ final class ESP_Media_Index {
      */
     public static function guard_meta($check, $post_id, $meta_key, $meta_value, $extra = null) {
         if ($check !== null || !self::relevant($meta_key) || !self::installed()) { return $check; }
+        // WordPress delete_metadata(..., delete_all=true) may mutate every post.
+        // Without an exact finite affected set, do not admit it in strict mode.
+        if ($extra === true && (int)$post_id === 0) {
+            return self::enabled() ? false : null;
+        }
         if (get_post_type((int)$post_id) !== 'attachment') { return $check; }
         return self::mark_dirty((int)$post_id) ? null : (self::enabled() ? false : null);
     }
@@ -255,7 +262,11 @@ final class ESP_Media_Index {
         $old = get_metadata_by_mid('post', $meta_id);
         if (!is_object($old)) { return $check; }
         if (!self::relevant($old->meta_key) && !self::relevant($meta_key)) { return $check; }
-        return self::mark_dirty((int)$old->post_id) ? null : (self::enabled() ? false : null);
+        if (self::mark_dirty((int)$old->post_id)) {
+            self::$by_mid[(int)$meta_id] = (int)$old->post_id;
+            return null;
+        }
+        return self::enabled() ? false : null;
     }
     public static function guard_delete_by_mid($check, $meta_id) {
         if ($check !== null || !self::installed()) { return $check; }
@@ -264,7 +275,10 @@ final class ESP_Media_Index {
         return self::mark_dirty((int)$old->post_id) ? null : (self::enabled() ? false : null);
     }
     public static function on_meta_saved($meta_id, $post_id, $meta_key, $meta_value) {
-        if (!self::relevant($meta_key) || !self::installed()) { return; }
+        if (!self::installed()) { return; }
+        $was_by_mid = self::$by_mid[(int)$meta_id] ?? null;
+        unset(self::$by_mid[(int)$meta_id]);
+        if (!self::relevant($meta_key) && $was_by_mid === null) { return; }
         if (get_post_type((int)$post_id) !== 'attachment') { return; }
         self::complete_mutation((int)$post_id);
     }
@@ -272,10 +286,14 @@ final class ESP_Media_Index {
         if (self::installed()) { self::mark_dirty((int)$id); self::complete_mutation((int)$id); }
     }
     public static function on_attachment_deleting($id) {
-        if (self::installed()) { self::mark_dirty((int)$id); }
+        if (self::installed() && self::mark_dirty((int)$id)) {
+            self::$deleting[(int)$id] = true;
+        }
     }
     public static function on_post_deleted($id) {
-        if (self::installed()) { self::complete_mutation((int)$id); }
+        if (!isset(self::$deleting[(int)$id])) { return; }
+        unset(self::$deleting[(int)$id]);
+        self::complete_mutation((int)$id);
     }
 
     private static function mark_dirty($id) {
@@ -411,6 +429,11 @@ final class ESP_Media_Index {
     /** Bounded incremental backfill and continuous audit, never HTTP request path. */
     public static function run_batch() {
         global $wpdb;
+        // Never perform index schema changes or a rebuild while the plugin's
+        // existing protection-state upgrade/verification has not completed.
+        $runtime = get_option(ESP_Protection_State::RUNTIME_STATE_OPTION, null);
+        if (!is_array($runtime) || ($runtime['state'] ?? '') !== 'READY' ||
+            ($runtime['version'] ?? '') !== ESP_VERSION) { return; }
         if (!self::installed() && !self::install_schema()) {
             error_log('ESP: Media index schema install failed');
             return;
