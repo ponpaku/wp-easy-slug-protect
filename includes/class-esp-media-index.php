@@ -52,9 +52,10 @@ final class ESP_Media_Index {
     }
 
     public static function register() {
-        foreach (['add_post_metadata', 'update_post_metadata', 'delete_post_metadata'] as $hook) {
-            add_filter($hook, [self::class, 'guard_meta'], 5, 5);
-        }
+        // The fifth argument differs across these three WordPress hooks.
+        add_filter('add_post_metadata', [self::class, 'guard_add_meta'], 5, 5);
+        add_filter('update_post_metadata', [self::class, 'guard_update_meta'], 5, 5);
+        add_filter('delete_post_metadata', [self::class, 'guard_delete_meta'], 5, 5);
         add_filter('update_post_metadata_by_mid', [self::class, 'guard_by_mid'], 5, 4);
         add_filter('delete_post_metadata_by_mid', [self::class, 'guard_delete_by_mid'], 5, 2);
         foreach (['added_post_meta', 'updated_post_meta', 'deleted_post_meta'] as $hook) {
@@ -277,51 +278,88 @@ final class ESP_Media_Index {
      * under enabled mode, prevent WordPress's ordinary metadata write.
      * Existing authorization-cache guards run first at priority 1.
      */
-    public static function guard_meta($check, $post_id, $meta_key, $meta_value, $extra = null) {
-        if ($check !== null || !self::relevant($meta_key) || !self::installed()) { return $check; }
-        // WordPress delete_metadata(..., delete_all=true) may mutate every post.
-        // Without an exact finite affected set, do not admit it in strict mode.
-        if ($extra === true) {
-            // delete_all is an unbounded cross-attachment mutation. Reject in
-            // strict mode; in compatibility mode invalidate global coverage
-            // before allowing the WordPress operation to continue.
-            if (self::enabled()) { return false; }
-            if (!update_option(self::READY_OPTION, '0', false) &&
-                self::ready()) { return false; }
-            update_option(self::CURSOR_OPTION, 0, false);
-            return null;
+    /** The fifth argument of add_post_metadata is unique, not delete_all. */
+    public static function guard_add_meta($check, $post_id, $meta_key, $value, $unique = false) {
+        return self::guard_meta($check, $post_id, $meta_key, $value);
+    }
+    /** The fifth argument of update_post_metadata is prev_value. */
+    public static function guard_update_meta($check, $post_id, $meta_key, $value, $prev_value = '') {
+        return self::guard_meta($check, $post_id, $meta_key, $value);
+    }
+    /** Only delete_post_metadata has a delete_all fifth argument. */
+    public static function guard_delete_meta($check, $post_id, $meta_key, $value, $delete_all = false) {
+        if ($check !== null || !self::relevant($meta_key) || !self::installed()) {
+            return $check;
         }
+        if ($delete_all) {
+            // Cross-post mutation cannot be fenced by a single attachment ID.
+            if (self::enabled()) { return false; }
+            return self::invalidate_global() ? null : false;
+        }
+        return self::guard_meta($check, $post_id, $meta_key, $value);
+    }
+    /** Single-attachment common guard; never interprets operation-specific args. */
+    public static function guard_meta($check, $post_id, $meta_key, $meta_value, $unused = null) {
+        if ($check !== null || !self::relevant($meta_key) || !self::installed()) { return $check; }
         if (get_post_type((int)$post_id) !== 'attachment') { return $check; }
         if (self::mark_dirty((int)$post_id)) {
             self::track_local((int)$post_id);
             return null;
         }
-        // Failed pre-invalidation must never leave a trustworthy-looking
-        // coverage marker for a future opt-in, even in compatibility mode.
+        return self::failed_pre_fence();
+    }
+    /**
+     * Persist global coverage invalidation before admitting a metadata write
+     * whose per-attachment pre-fence failed. A direct DB read verifies the
+     * stored value (not merely the local WordPress option cache).
+     */
+    private static function invalidate_global() {
+        global $wpdb;
         update_option(self::READY_OPTION, '0', false);
-        return self::enabled() ? false : null;
+        update_option(self::CURSOR_OPTION, 0, false);
+        if (!isset($wpdb->options)) {
+            return (string)get_option(self::READY_OPTION, '1') === '0';
+        }
+        $value = $wpdb->get_var($wpdb->prepare(
+            "SELECT option_value FROM {$wpdb->options} WHERE option_name=%s",
+            self::READY_OPTION
+        ));
+        return $wpdb->last_error === '' && (string)$value === '0';
+    }
+    private static function failed_pre_fence() {
+        // In strict mode, do not admit the WordPress write. In compatibility
+        // mode only allow it if coverage invalidation was durably verified.
+        $invalidated = self::invalidate_global();
+        return (self::enabled() || !$invalidated) ? false : null;
     }
     public static function guard_by_mid($check, $meta_id, $meta_value, $meta_key = false) {
+        global $wpdb;
         if ($check !== null || !self::installed()) { return $check; }
         $old = get_metadata_by_mid('post', $meta_id);
-        if (!is_object($old)) { return $check; }
+        if (!is_object($old)) {
+            return $wpdb->last_error !== '' ? self::failed_pre_fence() : $check;
+        }
         if (!self::relevant($old->meta_key) && !self::relevant($meta_key)) { return $check; }
         if (self::mark_dirty((int)$old->post_id)) {
             self::$by_mid[(int)$meta_id] = (int)$old->post_id;
             self::track_local((int)$old->post_id);
             return null;
         }
-        return self::enabled() ? false : null;
+        return self::failed_pre_fence();
     }
     public static function guard_delete_by_mid($check, $meta_id) {
+        global $wpdb;
         if ($check !== null || !self::installed()) { return $check; }
         $old = get_metadata_by_mid('post', $meta_id);
-        if (!is_object($old) || !self::relevant($old->meta_key)) { return $check; }
+        if (!is_object($old)) {
+            return $wpdb->last_error !== '' ? self::failed_pre_fence() : $check;
+        }
+        if (!self::relevant($old->meta_key)) { return $check; }
         if (self::mark_dirty((int)$old->post_id)) {
             self::track_local((int)$old->post_id);
             return null;
         }
-        return self::enabled() ? false : null;
+        return self::failed_pre_fence();
     }
     public static function on_meta_saved($meta_id, $post_id, $meta_key, $meta_value) {
         if (!self::installed()) { return; }
@@ -342,10 +380,18 @@ final class ESP_Media_Index {
         }
     }
     public static function on_attachment_deleting($id) {
-        if (self::installed() && self::mark_dirty((int)$id)) {
-            self::$deleting[(int)$id] = true;
-            self::track_local((int)$id);
+        if (!self::installed()) { return; }
+        if (!self::mark_dirty((int)$id)) {
+            // delete_attachment is an action with no cancellation return. If
+            // global invalidation also fails, abort the operation rather than
+            // let a stale, still-READY mapping survive a file deletion.
+            if (!self::invalidate_global()) {
+                throw new RuntimeException('ESP media index: cannot fence attachment deletion');
+            }
+            return;
         }
+        self::$deleting[(int)$id] = true;
+        self::track_local((int)$id);
     }
     public static function on_post_deleted($id) {
         if (!isset(self::$deleting[(int)$id])) { return; }
@@ -411,7 +457,12 @@ final class ESP_Media_Index {
         if ($wpdb->last_error !== '' || $pending === null || (int)$pending !== 0) {
             return false;
         }
-        return self::reindex_attachment($id);
+        // Never START/COMMIT a transaction inside a WordPress metadata hook.
+        // A caller may have an open transaction; the dirty marker participates
+        // in that transaction and becomes visible atomically with the metadata.
+        // The independent Cron worker rebuilds only after it can read the
+        // committed dirty marker (and pending_count = 0).
+        return true;
     }
 
     /**
@@ -422,6 +473,12 @@ final class ESP_Media_Index {
     public static function reindex_attachment($id, $repair = false) {
         global $wpdb;
         if ($id <= 0 || !self::installed()) { return false; }
+        // MySQL/MariaDB START TRANSACTION implicitly commits the caller's
+        // existing transaction. Only the independent worker may own a new one.
+        $in_transaction = $wpdb->get_var('SELECT @@session.in_transaction');
+        if ($wpdb->last_error !== '' || (string)$in_transaction !== '0') {
+            return false;
+        }
         $state = self::table(self::state_table());
         $files = self::table(self::files_table());
         if ($wpdb->query('START TRANSACTION') === false) { return false; }
@@ -519,6 +576,18 @@ final class ESP_Media_Index {
         if (!self::installed() && !self::install_schema()) {
             error_log('ESP: Media index schema install failed');
             return;
+        }
+        // Prioritize changed attachments over the expensive full scan.
+        // Dirty rows are visible to this connection only after an external
+        // metadata transaction commits. Never rebuild in-flight mutations.
+        $state_table = self::table(self::state_table());
+        $dirty_ids = $wpdb->get_col($wpdb->prepare(
+            "SELECT attachment_id FROM $state_table
+             WHERE status='dirty' AND pending_count=0
+             ORDER BY changed_at ASC LIMIT %d", self::BATCH_SIZE));
+        if (!is_array($dirty_ids) || $wpdb->last_error !== '') { return; }
+        foreach ($dirty_ids as $dirty_id) {
+            if (!self::reindex_attachment((int)$dirty_id, true)) { return; }
         }
         $cursor = max(0, (int)get_option(self::CURSOR_OPTION, 0));
         $ids = $wpdb->get_col($wpdb->prepare(
