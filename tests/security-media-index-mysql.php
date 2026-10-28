@@ -156,6 +156,17 @@ try {
     esp63_assert($changed['status'] === 'resolved' &&
         $changed['protected_path_id'] === 'secret_B', 'post-update protection visible');
 
+    // Even a direct-SQL protection change that bypasses hooks must NOT allow
+    // an outdated materialized public/protected ID to authorize delivery.
+    esp63_sql("UPDATE esp63_postmeta SET meta_value='secret_C'
+        WHERE post_id=10 AND meta_key='_esp_media_protected_path_id'");
+    esp63_assert(ESP_Media_Index::resolve($uploads . '/2026/10/cat.jpg')['status']
+        === 'error', 'live postmeta disagreement blocks stale protection ID');
+    esp63_sql("UPDATE esp63_postmeta SET meta_value='secret_B'
+        WHERE post_id=10 AND meta_key='_esp_media_protected_path_id'");
+    esp63_assert(ESP_Media_Index::resolve($uploads . '/2026/10/cat.jpg')['status']
+        === 'resolved', 'restored protection metadata agrees with index');
+
     // Duplicate owners, including protected + public, are ambiguous.
     esp63_sql("INSERT INTO esp63_posts (ID,post_type) VALUES (11,'attachment')");
     esp63_sql("INSERT INTO esp63_postmeta(post_id,meta_key,meta_value) VALUES
