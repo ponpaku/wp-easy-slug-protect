@@ -590,6 +590,12 @@ class ESP_Admin_Menu {
                                         )); ?>
                                     <?php endif; ?>
                                 </p>
+                                <p id="esp-media-index-last-run" class="description">
+                                    <?php echo esc_html($esp_index_status['last_activity'] > 0
+                                        ? sprintf(__('最終処理：%s', $text_domain),
+                                            wp_date('Y-m-d H:i:s', $esp_index_status['last_activity']))
+                                        : __('最終処理：未実行', $text_domain)); ?>
+                                </p>
                                 <div style="max-width: 480px; background: #eee; height: 14px;" role="progressbar"
                                     id="esp-media-index-bar" aria-valuemin="0" aria-valuemax="100"
                                     aria-valuenow="<?php echo esc_attr($esp_index_status['ready'] ? 100 :
