@@ -197,4 +197,31 @@ $wpdb->query("DROP TABLE $probe_table");
 update_option(ESP_Media_Index::ENABLE_OPTION, '1', false);
 // Keep strict mode on for the following real Apache curl checks.
 update_option(ESP_Media_Index::ENABLE_OPTION, '1', false);
+
+// Review R02: PHP shutdown callbacks registered AFTER ESP's own shutdown
+// finalizer can still perform no-op meta writes. The newly rearmed finalizer
+// must run after each late callback, even when the callback chain grows.
+register_shutdown_function(function () use ($id) {
+    global $wpdb;
+    if (update_post_meta($id, ESP_Media_Index::PROTECTION_META, 'path_http') !== false) {
+        throw new RuntimeException('R02 expected a no-op in late PHP shutdown A');
+    }
+    register_shutdown_function(function () use ($id) {
+        global $wpdb;
+        if (update_post_meta($id, ESP_Media_Index::PROTECTION_META, 'path_http') !== false) {
+            throw new RuntimeException('R02 expected a no-op in late PHP shutdown B');
+        }
+        register_shutdown_function(function () use ($id) {
+            global $wpdb;
+            $pending = (int)$wpdb->get_var($wpdb->prepare(
+                'SELECT pending_count FROM ' . ESP_Media_Index::state_table() .
+                ' WHERE attachment_id=%d', $id));
+            if ($wpdb->last_error !== '' || $pending !== 0) {
+                throw new RuntimeException('R02 later PHP shutdown callback stranded pending=' . $pending);
+            }
+            echo "PASS: R02 late PHP shutdown no-op rearmed finalizers\n";
+        });
+    });
+});
+
 echo "PASS: dbDelta, batched WordPress metadata backfill, original+derivative protection and strict opt-in\n";
