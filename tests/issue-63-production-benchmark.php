@@ -42,7 +42,7 @@ require dirname(__DIR__) . '/includes/class-esp-media-index.php';
 function get_option($name, $default = false) {
     if ($name === ESP_Media_Index::SCHEMA_OPTION ||
         $name === ESP_Media_Index::READY_OPTION ||
-        $name === ESP_Media_Index::ENABLE_OPTION) { return $name === ESP_Media_Index::SCHEMA_OPTION ? '2' : '1'; }
+        $name === ESP_Media_Index::ENABLE_OPTION) { return $name === ESP_Media_Index::SCHEMA_OPTION ? '3' : '1'; }
     return $default;
 }
 
