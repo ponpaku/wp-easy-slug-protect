@@ -787,6 +787,10 @@
                             return;
                         }
                         const status = response.data;
+                        const stamp = Number(status.last_activity) || 0;
+                        $("#esp-media-index-last-run").text(
+                            stamp > 0 ? "最終処理：" + new Date(stamp * 1000).toLocaleString() : "最終処理：未実行"
+                        );
                         const total = Number(status.total) || 0;
                         const scanned = Number(status.scanned) || 0;
                         const percent = status.ready ? 100 :
