@@ -746,6 +746,69 @@ try {
         "SELECT audit_cursor FROM $state WHERE attachment_id=0") === 700,
         'scan resumes after other driver releases the lock');
 
+
+    // Review R01: WordPress moves files by updating attached_file and
+    // metadata.file separately. Both orders must be admitted in strict mode
+    // without ever granting access to a partially updated attachment.
+    foreach ([720 => 'attached_first', 721 => 'metadata_first'] as $move_id => $order) {
+        $from = '2026/10/move-' . $move_id . '.jpg';
+        $to_dir = $move_id === 720 ? '2026/09' : '2026/11';
+        $to = $to_dir . '/move-' . $move_id . '.jpg';
+        $old_meta = ['file'=>$from, 'sizes'=>[
+            'thumb'=>['file'=>'move-' . $move_id . '-150x150.jpg']]];
+        $new_meta = ['file'=>$to, 'sizes'=>[
+            'thumb'=>['file'=>'move-' . $move_id . '-150x150.jpg']]];
+        @mkdir($uploads . '/' . $to_dir, 0700, true);
+        file_put_contents($uploads . '/' . $from, 'old');
+        file_put_contents($uploads . '/' . $to, 'new');
+        file_put_contents($uploads . '/' . $to_dir .
+            '/move-' . $move_id . '-150x150.jpg', 'new thumb');
+        esp63_sql("INSERT INTO esp63_posts (ID,post_type) VALUES ($move_id,'attachment')");
+        esp63_sql("INSERT INTO esp63_postmeta(post_id,meta_key,meta_value) VALUES
+            ($move_id,'_wp_attached_file','$from'),
+            ($move_id,'_wp_attachment_metadata','" .
+            $db->real_escape_string(serialize($old_meta)) . "'),
+            ($move_id,'_esp_media_protected_path_id','secret_move')");
+        esp63_assert(ESP_Media_Index::reindex_attachment($move_id),
+            'R01 source attachment initially indexed ' . $order);
+        $first_key = $order === 'attached_first'
+            ? '_wp_attached_file' : '_wp_attachment_metadata';
+        $second_key = $order === 'attached_first'
+            ? '_wp_attachment_metadata' : '_wp_attached_file';
+        foreach ([$first_key,$second_key] as $step => $key) {
+            $value = $key === '_wp_attached_file' ? $to : $new_meta;
+            esp63_assert(ESP_Media_Index::guard_meta(null,$move_id,$key,$value) === null,
+                "R01 strict guard admits $order step $step");
+            if ($key === '_wp_attached_file') {
+                esp63_sql("UPDATE esp63_postmeta SET meta_value='" .
+                    $db->real_escape_string($to) .
+                    "' WHERE post_id=$move_id AND meta_key='$key'");
+            } else {
+                esp63_sql("UPDATE esp63_postmeta SET meta_value='" .
+                    $db->real_escape_string(serialize($new_meta)) .
+                    "' WHERE post_id=$move_id AND meta_key='$key'");
+            }
+            ESP_Media_Index::on_meta_saved(800+$step,$move_id,$key,$value);
+            esp63_assert(ESP_Media_Index::resolve($uploads . '/' . $to)['status']
+                === 'error', "R01 new location never authorized mid-move $order");
+            if ($step === 0) {
+                esp63_assert(!ESP_Media_Index::reindex_attachment($move_id),
+                    "R01 incomplete cross-directory move cannot publish $order");
+            }
+        }
+        esp63_assert(ESP_Media_Index::reindex_attachment($move_id),
+            "R01 full move reindexes safely $order");
+        $mapped = ESP_Media_Index::resolve($uploads . '/' . $to);
+        esp63_assert($mapped['status'] === 'resolved' &&
+            $mapped['protected_path_id'] === 'secret_move',
+            "R01 moved file maps to original protection $order");
+        $thumb = ESP_Media_Index::resolve($uploads . '/' . $to_dir .
+            '/move-' . $move_id . '-150x150.jpg');
+        esp63_assert($thumb['status'] === 'resolved' &&
+            $thumb['protected_path_id'] === 'secret_move',
+            "R01 moved derivative follows protection $order");
+    }
+
     // Throughput experiment, opt-in only on benchmark workflow.
     // This measures real run_batch()/reindex_attachment(), not the existing
     // synthetic bulk-copy lookup benchmark. No WordPress/HTTP bootstrap.
@@ -903,6 +966,10 @@ try {
     echo "Issue 63 production index MySQL tests passed.\n";
 } finally {
     foreach (glob($uploads . '/2026/10/*') as $file) { @unlink($file); }
+    foreach (['09','11'] as $month) {
+        foreach (glob($uploads . '/2026/' . $month . '/*') ?: [] as $file) { @unlink($file); }
+        @rmdir($uploads . '/2026/' . $month);
+    }
     @rmdir($uploads . '/2026/10'); @rmdir($uploads . '/2026'); @rmdir($uploads);
     foreach ([$files,$state,'esp63_postmeta','esp63_posts','esp63_external_txn'] as $table) {
         $db->query("DROP TABLE IF EXISTS $table");
