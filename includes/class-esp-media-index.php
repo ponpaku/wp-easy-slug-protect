@@ -804,7 +804,7 @@ final class ESP_Media_Index {
             "SELECT s.attachment_id FROM $state s
              LEFT JOIN {$wpdb->posts} p ON p.ID=s.attachment_id
                AND p.post_type='attachment'
-             WHERE p.ID IS NULL LIMIT %d", self::BATCH_SIZE));
+             WHERE p.ID IS NULL AND s.attachment_id>0 LIMIT %d", self::BATCH_SIZE));
         if (!is_array($orphans) || $wpdb->last_error !== '') { return false; }
         foreach ($orphans as $id) {
             if (!self::purge_orphan((int)$id)) { return false; }
@@ -854,7 +854,7 @@ final class ESP_Media_Index {
             "SELECT s.attachment_id FROM $state s
              LEFT JOIN {$wpdb->posts} p ON p.ID=s.attachment_id
                AND p.post_type='attachment'
-             WHERE p.ID IS NULL LIMIT 1",
+             WHERE p.ID IS NULL AND s.attachment_id>0 LIMIT 1",
             "SELECT f.attachment_id FROM $files f
              LEFT JOIN $state s ON s.attachment_id=f.attachment_id
              WHERE s.attachment_id IS NULL LIMIT 1",
@@ -882,7 +882,8 @@ final class ESP_Media_Index {
         $state = self::table(self::state_table());
         $dirty_ids = $wpdb->get_col($wpdb->prepare(
             "SELECT attachment_id FROM $state
-             WHERE status='dirty' AND pending_count=0 AND retry_after<=%d
+             WHERE attachment_id>0 AND status='dirty'
+               AND pending_count=0 AND retry_after<=%d
              ORDER BY changed_at ASC LIMIT %d", time(), self::BATCH_SIZE));
         if (!is_array($dirty_ids) || $wpdb->last_error !== '') { return; }
         foreach ($dirty_ids as $id) {
