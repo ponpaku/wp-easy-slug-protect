@@ -93,6 +93,19 @@ docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html
   ESP_COLLISION_PHASE=restore \
   php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-collision-ci.php
 assert_http esp31-public-150x150.jpg 200
+
+# by-mid metadata update: sanitize_post_meta_* changes the stored file
+# AFTER the pre-hook. Verify the actual sanitized protected owner blocks
+# anonymous HTTP before any media-index rebuild.
+docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+  ESP_COLLISION_PHASE=by_mid_prepare \
+  php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-collision-ci.php
+assert_http esp31-public-150x150.jpg 503
+docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+  ESP_COLLISION_PHASE=by_mid_restore \
+  php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-collision-ci.php
+assert_http esp31-public-150x150.jpg 200
+
 assert_http esp63-unregistered.jpg 403
 echo 'PASS: issue 63 real WordPress/Apache strict index HTTP smoke suite'
 echo 'PASS: disposable Apache/WordPress media HTTP regression suite'
