@@ -834,6 +834,45 @@ try {
         $final_seconds = microtime(true) - $final_start;
         $coverage = $wpdb->get_var("SELECT status FROM $state WHERE attachment_id=0");
         esp63_assert($coverage === 'ready', 'bootstrap full coverage becomes READY');
+        // Measure a complete second pass over the same READY data. This is
+        // the steady-state audit, where no SQL writes should occur for healthy
+        // owners. Count both file rows and owner revisions before/after.
+        $sum_before = (int)$wpdb->get_var(
+            "SELECT COALESCE(SUM(revision),0) FROM $state
+             WHERE attachment_id>=$base_id AND attachment_id<($base_id+$size)");
+        $rows_before = (int)$wpdb->get_var(
+            "SELECT COUNT(*) FROM $files
+             WHERE attachment_id>=$base_id AND attachment_id<($base_id+$size)");
+        esp63_sql("UPDATE $state SET status='ready',revision=revision+1,
+            audit_cursor=99999 WHERE attachment_id=0");
+        $audit_start = microtime(true);
+        for ($batch = 1; $batch <= (int)($size / 200); ++$batch) {
+            ESP_Media_Index::run_batch();
+            $expected_cursor = 99999 + $batch * 200;
+            $observed_cursor = (int)$wpdb->get_var(
+                "SELECT audit_cursor FROM $state WHERE attachment_id=0");
+            if ($observed_cursor !== $expected_cursor) {
+                throw new RuntimeException('Read-only audit cursor stalled at batch ' . $batch);
+            }
+        }
+        ESP_Media_Index::run_batch();
+        $audit_seconds = microtime(true) - $audit_start;
+        $sum_after = (int)$wpdb->get_var(
+            "SELECT COALESCE(SUM(revision),0) FROM $state
+             WHERE attachment_id>=$base_id AND attachment_id<($base_id+$size)");
+        $rows_after = (int)$wpdb->get_var(
+            "SELECT COUNT(*) FROM $files
+             WHERE attachment_id>=$base_id AND attachment_id<($base_id+$size)");
+        $audit_ready = $wpdb->get_var(
+            "SELECT status FROM $state WHERE attachment_id=0");
+        esp63_assert($sum_before === $sum_after && $rows_before === $rows_after
+            && $audit_ready === 'ready', 'full healthy audit writes no new owner generations');
+        echo 'ESP63_AUDIT_SAMPLE ' . json_encode([
+            'attachments' => $size,
+            'read_only_audit_seconds' => round($audit_seconds, 3),
+            'attachments_per_second' => round($size / max($audit_seconds, .000001), 3)
+        ], JSON_UNESCAPED_SLASHES) . "\n";
+
         sort($batches, SORT_NUMERIC);
         $p95 = $batches[(int)ceil(count($batches) * .95) - 1];
         $report = [
@@ -847,6 +886,10 @@ try {
             'seed_seconds_excluded' => round($seed_seconds, 3),
             'batch_p95_seconds' => round($p95, 3),
             'final_coverage_seconds' => round($final_seconds, 3),
+            'read_only_audit_seconds' => round($audit_seconds, 3),
+            'audit_attachments_per_second' => round($size / max($audit_seconds, .000001), 3),
+            'audit_revisions_unchanged' => $sum_before === $sum_after,
+            'audit_file_rows_unchanged' => $rows_before === $rows_after,
             'samples' => $samples
         ];
         $report_file = getenv('ESP63_BUILD_REPORT') ?: '';
