@@ -74,7 +74,7 @@ final class ESP_Media_Index {
         add_action('admin_init', [self::class, 'ensure_schema_on_admin']);
         add_action('admin_notices', [self::class, 'render_bootstrap_notice']);
         add_action('wp_ajax_esp_media_index_build_slice', [self::class, 'ajax_build_slice']);
-        if (defined('WP_CLI') && WP_CLI) {
+        if (defined('WP_CLI') && WP_CLI && class_exists('WP_CLI', false)) {
             \WP_CLI::add_command('esp media-index', 'ESP_Media_Index_CLI');
         }
         // WordPress shutdown callbacks may themselves call update_post_meta()
