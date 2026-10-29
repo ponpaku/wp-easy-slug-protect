@@ -375,9 +375,11 @@ try {
         $options[ESP_Media_Index::READY_OPTION] === '0',
         'strict mode rejects by-mid update on pre-fence failure');
     $wpdb->fail_state_write = false;
-    $options[ESP_Media_Index::READY_OPTION] = '1';
-    esp63_assert(ESP_Media_Index::resolve($uploads . '/2026/10/cat.jpg')['status']
-        === 'resolved', 'correct mapping remains usable after fault reset');
+    ESP_Media_Index::run_batch();
+    ESP_Media_Index::run_batch();
+    esp63_assert($options[ESP_Media_Index::READY_OPTION] === '1' &&
+        ESP_Media_Index::resolve($uploads . '/2026/10/cat.jpg')['status']
+        === 'resolved', 'fault reset requires a verified new audit epoch');
 
     // F01: state-table write failure during attachment deletion. The
     // global READY invalidation must not become reversible until the stale
