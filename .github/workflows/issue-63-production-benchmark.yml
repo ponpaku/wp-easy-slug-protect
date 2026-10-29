@@ -7,6 +7,14 @@ on:
       - 'tests/security-media-index-mysql.php'
       - '.github/workflows/issue-63-production-benchmark.yml'
   workflow_dispatch:
+    inputs:
+      build_total:
+        description: 'Attachment count for real-batch MySQL bootstrap benchmark'
+        type: choice
+        default: '10000'
+        options:
+          - '10000'
+          - '100000'
 jobs:
   prototype-and-mysql-benchmark:
     runs-on: ubuntu-latest
@@ -53,19 +61,19 @@ jobs:
           echo '\`\`\`json' >> "$GITHUB_STEP_SUMMARY"
           cat issue-63-production-benchmark.json >> "$GITHUB_STEP_SUMMARY"
           echo '\`\`\`' >> "$GITHUB_STEP_SUMMARY"
-      - name: Measure real run_batch initial build up to 100K attachments (MySQL)
+      - name: Measure real run_batch initial build (10K PR / optional 100K manual)
         env:
           ESP_TEST_DB_HOST: 127.0.0.1
           ESP_TEST_DB_USER: root
           ESP_TEST_DB_PASSWORD: test-password
           ESP_TEST_DB_NAME: esp_test
           ESP63_BUILD_BENCH: '1'
-          ESP63_BUILD_TOTAL: '100000'
+          ESP63_BUILD_TOTAL: ${{ inputs.build_total || '10000' }}
           ESP63_BUILD_REPORT: issue-63-build-benchmark.json
         run: |
           php tests/security-media-index-mysql.php | tee issue-63-build-benchmark.log
           echo '## Issue #63 initial build with real run_batch()' >> "$GITHUB_STEP_SUMMARY"
-          echo '1K/5K/10K/50K/100K attachment checkpoints; five paths per attachment. Real PHP class and MySQL; synthetic metadata, NOT full WordPress/HTTP or production load.' >> "$GITHUB_STEP_SUMMARY"
+          echo "Target: $ESP63_BUILD_TOTAL attachments (5 paths each). Real PHP class and MySQL; synthetic metadata, NOT full WordPress/HTTP or production load." >> "$GITHUB_STEP_SUMMARY"
           echo '~~~json' >> "$GITHUB_STEP_SUMMARY"
           cat issue-63-build-benchmark.json >> "$GITHUB_STEP_SUMMARY"
           echo '~~~' >> "$GITHUB_STEP_SUMMARY"
