@@ -81,7 +81,7 @@ $db->query("SET SESSION sql_mode = 'STRICT_ALL_TABLES'");
 $wpdb = new ESP63_DB($db);
 $GLOBALS['wpdb'] = $wpdb;
 $options = [
-    ESP_Media_Index::SCHEMA_OPTION => '2',
+    ESP_Media_Index::SCHEMA_OPTION => '3',
     ESP_Protection_State::RUNTIME_STATE_OPTION => ['state'=>'READY', 'version'=>ESP_VERSION],
     ESP_Media_Index::READY_OPTION => '1',
     ESP_Media_Index::ENABLE_OPTION => '1',
@@ -145,9 +145,11 @@ try {
         changed_at BIGINT UNSIGNED NOT NULL DEFAULT 0,
         retry_after BIGINT UNSIGNED NOT NULL DEFAULT 0,
         failure_count INT UNSIGNED NOT NULL DEFAULT 0,
+        audit_cursor BIGINT UNSIGNED NOT NULL DEFAULT 0,
         KEY status (status),
         KEY retry_queue (status,pending_count,retry_after,changed_at)
     ) ENGINE=InnoDB");
+    esp63_sql("INSERT INTO $state (attachment_id,status,revision,audit_cursor) VALUES (0,'ready',1,0)");
     $metadata = serialize(['file'=>'2026/10/cat.jpg',
         'sizes'=>['thumb'=>['file'=>'cat-150x150.jpg']],
         'original_image'=>'cat-original.jpg']);
@@ -273,7 +275,7 @@ try {
 
     // Invalid metadata must leave the prior row non-authoritative.
     esp63_assert(ESP_Media_Index::guard_meta(null,10,
-        '_wp_attached_file','../outside.jpg') === null, 'metadata write guarded');
+        '_wp_attached_file','../outside.jpg') === false, 'invalid ownership change rejected');
     esp63_sql("UPDATE esp63_postmeta SET meta_value='../outside.jpg'
         WHERE post_id=10 AND meta_key='_wp_attached_file'");
     ESP_Media_Index::on_meta_saved(21,10,'_wp_attached_file','../outside.jpg');
