@@ -338,15 +338,15 @@ final class ESP_Media_Index {
             if (self::enabled()) { return false; }
             return self::invalidate_global() ? null : false;
         }
-        return self::guard_meta($check, $post_id, $meta_key, $value);
+        return self::guard_meta($check, $post_id, $meta_key, $value, false);
     }
     /** Single-attachment common guard; never interprets operation-specific args. */
-    public static function guard_meta($check, $post_id, $meta_key, $meta_value, $unused = null) {
+    public static function guard_meta($check, $post_id, $meta_key, $meta_value, $reserve = true) {
         if ($check !== null || !self::relevant($meta_key) || !self::installed()) { return $check; }
         if (get_post_type((int)$post_id) !== 'attachment') { return $check; }
         if (self::mark_dirty((int)$post_id)) {
             self::track_local((int)$post_id);
-            if (self::reserve_new_paths((int)$post_id, $meta_key, $meta_value)) {
+            if (!$reserve || self::reserve_new_paths((int)$post_id, $meta_key, $meta_value)) {
                 return null;
             }
             // The reservation failed, so the new path cannot be admitted
@@ -441,7 +441,11 @@ final class ESP_Media_Index {
         if (self::mark_dirty((int)$old->post_id)) {
             self::$by_mid[(int)$meta_id] = (int)$old->post_id;
             self::track_local((int)$old->post_id);
-            return null;
+            $next_key = is_string($meta_key) ? $meta_key : $old->meta_key;
+            if (self::reserve_new_paths((int)$old->post_id, $next_key, $meta_value)) {
+                return null;
+            }
+            return self::failed_pre_fence();
         }
         return self::failed_pre_fence();
     }
@@ -868,7 +872,11 @@ final class ESP_Media_Index {
 
         // The full audit advances even when an individual attachment cannot
         // rebuild. Its dirty record and retry_after preserve the problem.
-        $cursor = max(0, (int)get_option(self::CURSOR_OPTION, 0));
+        $control = $wpdb->get_row("SELECT revision,audit_cursor,status FROM $state
+            WHERE attachment_id=0", ARRAY_A);
+        if (!$control || $wpdb->last_error !== '') { return; }
+        $epoch = (int)$control['revision'];
+        $cursor = (int)$control['audit_cursor'];
         $ids = $wpdb->get_col($wpdb->prepare(
             "SELECT ID FROM {$wpdb->posts} WHERE post_type='attachment'
              AND ID>%d ORDER BY ID ASC LIMIT %d", $cursor, self::BATCH_SIZE));
@@ -876,16 +884,32 @@ final class ESP_Media_Index {
         if (!$ids) {
             // The full file-owner anti-join is intentionally cycle-scoped.
             if (!self::reconcile_orphans(true)) { return; }
-            $already_ready = self::ready();
+            $already_ready = $control['status'] === 'ready';
             $valid = self::coverage_is_complete(!$already_ready);
-            // Do not revoke global coverage merely for an isolated dirty
-            // attachment: its own state still forces 503. Missing owners or
-            // orphan rows are global coverage gaps and revoke READY.
             if (!$valid) {
-                update_option(self::READY_OPTION, '0', false);
-            } elseif (!$already_ready) {
-                update_option(self::READY_OPTION, '1', false);
+                // If previously published coverage has become incomplete,
+                // revoke it under a NEW audit epoch instead of reusing stale
+                // cursor progress. Local dirty is not a global gap.
+                if ($already_ready) { self::invalidate_global(); }
+                return;
             }
+            // All audit publication and cursor writes are CAS against one
+            // row. A concurrent invalidate_global() advances revision and
+            // makes this stale worker's result unusable.
+            $written = $wpdb->query($wpdb->prepare(
+                "UPDATE $state SET status='ready',audit_cursor=0
+                 WHERE attachment_id=0 AND revision=%d AND audit_cursor=%d",
+                $epoch, $cursor));
+            if ($written === false || $wpdb->last_error !== '') { return; }
+            $fresh = $wpdb->get_row("SELECT revision,status FROM $state
+                WHERE attachment_id=0", ARRAY_A);
+            if (!$fresh || $wpdb->last_error !== '' ||
+                (int)$fresh['revision'] !== $epoch || $fresh['status'] !== 'ready') {
+                return;
+            }
+            // This WordPress option is a compatibility cache; the SQL
+            // control row is authoritative for every indexed owner lookup.
+            update_option(self::READY_OPTION, '1', false);
             update_option(self::CURSOR_OPTION, 0, false);
             return;
         }
@@ -902,6 +926,11 @@ final class ESP_Media_Index {
             }
             if (!self::rebuild_in_batch($id)) { return; }
         }
+        $advanced = $wpdb->query($wpdb->prepare(
+            "UPDATE $state SET audit_cursor=%d
+             WHERE attachment_id=0 AND revision=%d AND audit_cursor=%d",
+            (int)end($ids), $epoch, $cursor));
+        if ($advanced !== 1 || $wpdb->last_error !== '') { return; }
         update_option(self::CURSOR_OPTION, (int)end($ids), false);
     }
 }
