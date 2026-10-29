@@ -13,6 +13,8 @@
 				this.lockExistingPaths();
 				// 新しいツールボタン用のイベントも初期化時にバインド
 				this.bindToolButtons();
+				this.mediaIndexRunning = false;
+				this.mediaIndexStop = false;
 			},
 
 			// イベントのバインド
@@ -25,6 +27,12 @@
 
 			// ツールボタン用のイベントバインド
 			bindToolButtons: function () {
+                $("#esp-media-index-build").on("click", this.handleMediaIndexBuild.bind(this));
+                $("#esp-media-index-stop").on("click", () => {
+                    this.mediaIndexStop = true;
+                    $("#esp-media-index-message").text("現在の処理が完了したら、手動実行を停止します。Cronは継続します。");
+                });
+
 				$("#esp-regenerate-permalink-paths").on(
 					"click",
 					this.handleRegeneratePermalinks.bind(this)
@@ -736,6 +744,86 @@
                                         },
                                 });
                         },
+
+            /**
+             * All progress is server-authoritative. Every AJAX response
+             * performs at most one bounded shared batch; PHP owns the cursor.
+             */
+            handleMediaIndexBuild: function () {
+                if (this.mediaIndexRunning) return;
+                this.mediaIndexRunning = true;
+                this.mediaIndexStop = false;
+                const $start = $("#esp-media-index-build");
+                const $stop = $("#esp-media-index-stop");
+                const $message = $("#esp-media-index-message");
+                const $progress = $("#esp-media-index-progress");
+                const $bar = $("#esp-media-index-bar");
+                const $fill = $("#esp-media-index-fill");
+                let previous = null;
+                let stalls = 0;
+                const finish = function (message, success) {
+                    this.mediaIndexRunning = false;
+                    $start.prop("disabled", !!success);
+                    $stop.prop("disabled", true);
+                    $message.text(message);
+                }.bind(this);
+                const next = function () {
+                    if (this.mediaIndexStop) {
+                        finish("手動実行を停止しました。保存済みの進捗から再開できます。", false);
+                        return;
+                    }
+                    $.ajax({
+                        url: ajaxurl,
+                        type: "POST",
+                        dataType: "json",
+                        data: {
+                            action: "esp_media_index_build_slice",
+                            nonce: espAdminData.mediaIndexNonce
+                        }
+                    }).done(function (response) {
+                        if (!response || !response.success || !response.data) {
+                            const detail = response && response.data && response.data.message;
+                            finish(detail || "構築処理を続行できません。DBと実行状態を確認してください。", false);
+                            return;
+                        }
+                        const status = response.data;
+                        const total = Number(status.total) || 0;
+                        const scanned = Number(status.scanned) || 0;
+                        const percent = status.ready ? 100 :
+                            (total > 0 ? Math.min(99, Math.floor(100 * scanned / total)) : 0);
+                        $progress.text(status.ready ? "初期構築・検証が完了しました。" :
+                            "走査済み添付（目安）: " + scanned.toLocaleString() +
+                            " / " + total.toLocaleString() + " （" + percent + "%）");
+                        $bar.attr("aria-valuenow", percent);
+                        $fill.css("width", percent + "%");
+                        if (status.ready) {
+                            finish("初期構築・検証は完了しました。新方式への切替には移行条件の確認が必要です。", true);
+                            return;
+                        }
+                        const signature = [status.installed, status.cursor, status.dirty].join(":");
+                        stalls = signature === previous ? stalls + 1 : 0;
+                        previous = signature;
+                        if (stalls >= 3) {
+                            finish("進捗が停止しています。未完了の更新・エラー・他の処理を確認してください。Cronは継続します。", false);
+                            return;
+                        }
+                        $message.text("メディア保護テーブルを構築中…");
+                        // Let the event loop repaint and allow a stop between slices.
+                        window.setTimeout(next, 100);
+                    }).fail(function (xhr) {
+                        let detail = "";
+                        if (xhr.responseJSON && xhr.responseJSON.data) {
+                            detail = xhr.responseJSON.data.message || "";
+                        }
+                        finish(detail || "通信またはサーバーのエラーが発生しました。進捗は保存されています。", false);
+                    });
+                }.bind(this);
+                $start.prop("disabled", true);
+                $stop.prop("disabled", false);
+                $message.text("メディア保護テーブルを構築中…");
+                next();
+            },
+
                 }; // ESP_Admin オブジェクトここまで
 
 		// 初期化実行
