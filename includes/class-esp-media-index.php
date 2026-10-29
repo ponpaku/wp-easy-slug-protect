@@ -130,6 +130,7 @@ final class ESP_Media_Index {
             'total' => 0,
             'scanned' => 0,
             'dirty' => 0,
+            'last_activity' => 0,
             'error' => false,
         ];
         if (!is_object($wpdb)) { $result['error'] = true; return $result; }
@@ -138,13 +139,14 @@ final class ESP_Media_Index {
         if ($wpdb->last_error !== '') { $result['error'] = true; return $result; }
         if (!$result['installed']) { return $result; }
         $state = self::table(self::state_table());
-        $control = $wpdb->get_row("SELECT status,audit_cursor FROM $state
+        $control = $wpdb->get_row("SELECT status,audit_cursor,changed_at FROM $state
             WHERE attachment_id=0", ARRAY_A);
         if (!is_array($control) || $wpdb->last_error !== '') {
             $result['error'] = true;
             return $result;
         }
         $result['cursor'] = (int)$control['audit_cursor'];
+        $result['last_activity'] = (int)$control['changed_at'];
         $result['ready'] = self::ready() && $control['status'] === 'ready';
         $result['scanned'] = (int)$wpdb->get_var($wpdb->prepare(
             "SELECT COUNT(*) FROM {$wpdb->posts} WHERE post_type='attachment'
@@ -1118,9 +1120,9 @@ final class ESP_Media_Index {
             // row. A concurrent invalidate_global() advances revision and
             // makes this stale worker's result unusable.
             $written = $wpdb->query($wpdb->prepare(
-                "UPDATE $state SET status='ready',audit_cursor=0
+                "UPDATE $state SET status='ready',audit_cursor=0,changed_at=%d
                  WHERE attachment_id=0 AND revision=%d AND audit_cursor=%d",
-                $epoch, $cursor));
+                time(), $epoch, $cursor));
             if ($written === false || $wpdb->last_error !== '') { return; }
             $fresh = $wpdb->get_row("SELECT revision,status FROM $state
                 WHERE attachment_id=0", ARRAY_A);
@@ -1154,9 +1156,9 @@ final class ESP_Media_Index {
             if (!self::rebuild_in_batch($id)) { return; }
         }
         $advanced = $wpdb->query($wpdb->prepare(
-            "UPDATE $state SET audit_cursor=%d
+            "UPDATE $state SET audit_cursor=%d,changed_at=%d
              WHERE attachment_id=0 AND revision=%d AND audit_cursor=%d",
-            (int)end($ids), $epoch, $cursor));
+            (int)end($ids), time(), $epoch, $cursor));
         if ($advanced !== 1 || $wpdb->last_error !== '') { return; }
         update_option(self::CURSOR_OPTION, (int)end($ids), false);
         } finally {
