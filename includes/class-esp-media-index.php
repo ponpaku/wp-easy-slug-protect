@@ -69,6 +69,14 @@ final class ESP_Media_Index {
         add_filter('cron_schedules', [self::class, 'cron_intervals']);
         add_action(self::BATCH_HOOK, [self::class, 'run_batch']);
         add_action('init', [self::class, 'schedule'], 20);
+        // Initial bootstrap never runs in the activation/update HTTP request.
+        // All three drivers use the same serialized batch and persisted cursor.
+        add_action('admin_init', [self::class, 'ensure_schema_on_admin']);
+        add_action('admin_notices', [self::class, 'render_bootstrap_notice']);
+        add_action('wp_ajax_esp_media_index_build_slice', [self::class, 'ajax_build_slice']);
+        if (defined('WP_CLI') && WP_CLI) {
+            \WP_CLI::add_command('esp media-index', 'ESP_Media_Index_CLI');
+        }
         // WordPress shutdown callbacks may themselves call update_post_meta()
         // and get a no-op result. A late WP hook plus PHP's post-WordPress
         // shutdown callback close that normal lifecycle gap.
@@ -90,6 +98,110 @@ final class ESP_Media_Index {
     }
     public static function unschedule() {
         wp_clear_scheduled_hook(self::BATCH_HOOK);
+    }
+
+
+    /**
+     * Provision the small empty schema on the first authenticated admin visit.
+     * The data backfill remains asynchronous. The Cron/CLI drivers can also
+     * install the schema, so missed admin visits do not strand installation.
+     */
+    public static function ensure_schema_on_admin() {
+        if (self::installed() || !current_user_can('manage_options')) { return; }
+        $runtime = get_option(ESP_Protection_State::RUNTIME_STATE_OPTION, null);
+        if (!is_array($runtime) || ($runtime['state'] ?? '') !== 'READY' ||
+            ($runtime['version'] ?? '') !== ESP_VERSION) { return; }
+        if (!self::install_schema()) {
+            error_log('ESP: media index schema preparation failed');
+        }
+    }
+
+    /**
+     * Display progress, never equate the WP option cache with authoritative
+     * SQL control state. Admin-only: each request may count attachment rows.
+     */
+    public static function build_status() {
+        global $wpdb;
+        $result = [
+            'installed' => self::installed(),
+            'ready' => false,
+            'enabled' => self::enabled(),
+            'cursor' => 0,
+            'total' => 0,
+            'scanned' => 0,
+            'dirty' => 0,
+            'error' => false,
+        ];
+        if (!is_object($wpdb)) { $result['error'] = true; return $result; }
+        $result['total'] = (int)$wpdb->get_var(
+            "SELECT COUNT(*) FROM {$wpdb->posts} WHERE post_type='attachment'");
+        if ($wpdb->last_error !== '') { $result['error'] = true; return $result; }
+        if (!$result['installed']) { return $result; }
+        $state = self::table(self::state_table());
+        $control = $wpdb->get_row("SELECT status,audit_cursor FROM $state
+            WHERE attachment_id=0", ARRAY_A);
+        if (!is_array($control) || $wpdb->last_error !== '') {
+            $result['error'] = true;
+            return $result;
+        }
+        $result['cursor'] = (int)$control['audit_cursor'];
+        $result['ready'] = self::ready() && $control['status'] === 'ready';
+        $result['scanned'] = (int)$wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM {$wpdb->posts} WHERE post_type='attachment'
+             AND ID<=%d", $result['cursor']));
+        if ($wpdb->last_error !== '') { $result['error'] = true; return $result; }
+        $result['dirty'] = (int)$wpdb->get_var(
+            "SELECT COUNT(*) FROM $state WHERE attachment_id>0
+             AND (status<>'ready' OR pending_count<>0)");
+        if ($wpdb->last_error !== '') { $result['error'] = true; }
+        return $result;
+    }
+
+    public static function render_bootstrap_notice() {
+        if (!current_user_can('manage_options')) { return; }
+        $runtime = get_option(ESP_Protection_State::RUNTIME_STATE_OPTION, null);
+        if (!is_array($runtime) || ($runtime['state'] ?? '') !== 'READY' ||
+            ($runtime['version'] ?? '') !== ESP_VERSION) { return; }
+        $status = self::build_status();
+        $url = admin_url('admin.php?page=esp-settings');
+        if ($status['ready']) {
+            // #43 has not yet approved the policy for files unknown to WP.
+            // Never automatically activate the strict index at this stage.
+            if (!$status['enabled']) {
+                echo '<div class="notice notice-info"><p>' .
+                    esc_html__('メディア保護テーブルの構築は完了しています。切替前の移行確認が必要です。', 'easy-slug-protect') .
+                    '</p></div>';
+            }
+            return;
+        }
+        echo '<div class="notice notice-warning"><p><strong>' .
+            esc_html__('メディア保護テーブルの構築が完了していません', 'easy-slug-protect') .
+            '</strong></p><p>' .
+            esc_html__('現在、メディアは簡易的な保護状態で動作しています。速やかに設定ページからメディア保護テーブルの構築を実行してください。', 'easy-slug-protect') .
+            '</p><p>' .
+            esc_html__('WP-Cronでも順次構築しますが、メディア数やサーバー環境によって時間がかかる場合があります。大規模サイトではWP-CLIによる構築を推奨します。', 'easy-slug-protect') .
+            '</p><p><a href="' . esc_url($url) . '">' .
+            esc_html__('設定ページで構築状況を確認', 'easy-slug-protect') .
+            '</a></p></div>';
+    }
+
+    /** One authenticated, nonce-protected, bounded work slice per request. */
+    public static function ajax_build_slice() {
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(['message' => 'Forbidden'], 403);
+        }
+        check_ajax_referer('esp_media_index_build', 'nonce');
+        $runtime = get_option(ESP_Protection_State::RUNTIME_STATE_OPTION, null);
+        if (!is_array($runtime) || ($runtime['state'] ?? '') !== 'READY' ||
+            ($runtime['version'] ?? '') !== ESP_VERSION) {
+            wp_send_json_error(['message' => 'Plugin runtime is not verified'], 409);
+        }
+        self::run_batch();
+        $status = self::build_status();
+        if ($status['error']) {
+            wp_send_json_error(['message' => 'Cannot read media index state'], 503);
+        }
+        wp_send_json_success($status);
     }
 
     /**
@@ -956,3 +1068,51 @@ final class ESP_Media_Index {
         update_option(self::CURSOR_OPTION, (int)end($ids), false);
     }
 }
+
+/** Opt-in operational driver: shares the same cursor and row locks as Cron. */
+class ESP_Media_Index_CLI {
+    public function status($args, $assoc_args) {
+        $status = ESP_Media_Index::build_status();
+        if ($status['error']) { \WP_CLI::error('Could not inspect index state'); }
+        \WP_CLI::line(wp_json_encode($status));
+    }
+
+    /**
+     * Build until the authoritative global READY is reached or work stalls.
+     *
+     * ## OPTIONS
+     *
+     * [--max-seconds=<seconds>]
+     * : Maximum time for continuous execution (default 900).
+     */
+    public function build($args, $assoc_args) {
+        $max_seconds = isset($assoc_args['max-seconds'])
+            ? (int)$assoc_args['max-seconds'] : 900;
+        if ($max_seconds < 1 || $max_seconds > 86400) {
+            \WP_CLI::error('--max-seconds must be between 1 and 86400');
+        }
+        $start = microtime(true);
+        $stalls = 0;
+        $previous = null;
+        while (microtime(true) - $start < $max_seconds) {
+            ESP_Media_Index::run_batch();
+            $status = ESP_Media_Index::build_status();
+            if ($status['error']) { \WP_CLI::error('Could not inspect index state'); }
+            if ($status['ready']) {
+                \WP_CLI::success('Media index initial coverage is READY; strict activation still requires #43 migration review');
+                return;
+            }
+            $signature = $status['cursor'] . ':' . $status['dirty'] . ':' .
+                ($status['installed'] ? '1' : '0');
+            if ($signature === $previous) { ++$stalls; }
+            else { $stalls = 0; }
+            if ($stalls >= 3) {
+                \WP_CLI::error('No progress; inspect pending/dirty rows, schema and worker lock');
+            }
+            $previous = $signature;
+            usleep(50000);
+        }
+        \WP_CLI::warning('Time budget exhausted; run again to resume from persisted cursor');
+    }
+}
+
