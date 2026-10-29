@@ -473,7 +473,11 @@ try {
         'F02 poison row does not revoke established global coverage or block healthy media');
     // When global coverage has been explicitly invalidated, it must NOT be
     // republished while a dirty attachment still has a deferred retry.
-    $options[ESP_Media_Index::READY_OPTION] = '0';
+    $options[ESP_Media_Index::ENABLE_OPTION] = '0';
+    esp63_assert(ESP_Media_Index::guard_delete_meta(null,10,
+        '_esp_media_protected_path_id','',true) === null,
+        'F02 explicit global invalidation advances audit epoch');
+    $options[ESP_Media_Index::ENABLE_OPTION] = '1';
     ESP_Media_Index::run_batch();
     ESP_Media_Index::run_batch();
     esp63_assert($options[ESP_Media_Index::READY_OPTION] === '0',
