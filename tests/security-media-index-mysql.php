@@ -747,13 +747,16 @@ try {
         'scan resumes after other driver releases the lock');
 
 
-    // Review R01: WordPress moves files by updating attached_file and
-    // metadata.file separately. Both orders must be admitted in strict mode
-    // without ever granting access to a partially updated attachment.
+    // Unsupported cross-directory migrations are the user's responsibility.
+    // We DO allow the WordPress metadata writes, but the first inconsistent
+    // step MUST revoke global READY (not guess future derivative filenames).
+    // Cron cannot publish inconsistent metadata, and resumes normal coverage
+    // once the canonical attached_file + metadata.file agree.
     foreach ([720 => 'attached_first', 721 => 'metadata_first'] as $move_id => $order) {
         $from = '2026/10/move-' . $move_id . '.jpg';
         $to_dir = $move_id === 720 ? '2026/09' : '2026/11';
         $to = $to_dir . '/move-' . $move_id . '.jpg';
+        $new_thumb = $to_dir . '/move-' . $move_id . '-150x150.jpg';
         $old_meta = ['file'=>$from, 'sizes'=>[
             'thumb'=>['file'=>'move-' . $move_id . '-150x150.jpg']]];
         $new_meta = ['file'=>$to, 'sizes'=>[
@@ -761,8 +764,22 @@ try {
         @mkdir($uploads . '/' . $to_dir, 0700, true);
         file_put_contents($uploads . '/' . $from, 'old');
         file_put_contents($uploads . '/' . $to, 'new');
-        file_put_contents($uploads . '/' . $to_dir .
-            '/move-' . $move_id . '-150x150.jpg', 'new thumb');
+        file_put_contents($uploads . '/' . $new_thumb, 'new thumb');
+
+        // A public owner already has the NEW thumbnail URL. Dirtying B
+        // alone is not enough: without global revocation A could serve it.
+        if ($move_id === 720) {
+            esp63_sql("INSERT INTO esp63_posts(ID,post_type) VALUES (719,'attachment')");
+            esp63_sql("INSERT INTO esp63_postmeta(post_id,meta_key,meta_value) VALUES
+                (719,'_wp_attached_file','$new_thumb')");
+            esp63_assert(ESP_Media_Index::reindex_attachment(719),
+                'public owner of future moved derivative indexed');
+            $prior_owner = ESP_Media_Index::resolve($uploads . '/' . $new_thumb);
+            esp63_assert($prior_owner['status'] === 'resolved' &&
+                $prior_owner['protected_path_id'] === '',
+                'future destination thumbnail is initially public');
+        }
+
         esp63_sql("INSERT INTO esp63_posts (ID,post_type) VALUES ($move_id,'attachment')");
         esp63_sql("INSERT INTO esp63_postmeta(post_id,meta_key,meta_value) VALUES
             ($move_id,'_wp_attached_file','$from'),
@@ -770,7 +787,7 @@ try {
             $db->real_escape_string(serialize($old_meta)) . "'),
             ($move_id,'_esp_media_protected_path_id','secret_move')");
         esp63_assert(ESP_Media_Index::reindex_attachment($move_id),
-            'R01 source attachment initially indexed ' . $order);
+            'source attachment initially indexed ' . $order);
         $first_key = $order === 'attached_first'
             ? '_wp_attached_file' : '_wp_attachment_metadata';
         $second_key = $order === 'attached_first'
@@ -778,7 +795,7 @@ try {
         foreach ([$first_key,$second_key] as $step => $key) {
             $value = $key === '_wp_attached_file' ? $to : $new_meta;
             esp63_assert(ESP_Media_Index::guard_meta(null,$move_id,$key,$value) === null,
-                "R01 strict guard admits $order step $step");
+                "cross-directory metadata write allowed $order step $step");
             if ($key === '_wp_attached_file') {
                 esp63_sql("UPDATE esp63_postmeta SET meta_value='" .
                     $db->real_escape_string($to) .
@@ -790,23 +807,48 @@ try {
             }
             ESP_Media_Index::on_meta_saved(800+$step,$move_id,$key,$value);
             esp63_assert(ESP_Media_Index::resolve($uploads . '/' . $to)['status']
-                === 'error', "R01 new location never authorized mid-move $order");
+                === 'error', "source cannot authorize during move $order");
             if ($step === 0) {
+                esp63_assert($options[ESP_Media_Index::READY_OPTION] === '0',
+                    "cross-directory transition revoked global READY $order");
+                esp63_assert(ESP_Media_Index::resolve(
+                    $uploads . '/' . $new_thumb)['status'] === 'error',
+                    "public new-directory thumbnail blocked during move $order");
                 esp63_assert(!ESP_Media_Index::reindex_attachment($move_id),
-                    "R01 incomplete cross-directory move cannot publish $order");
+                    "incomplete metadata cannot be published $order");
+                ESP_Media_Index::run_batch();
+                esp63_assert($options[ESP_Media_Index::READY_OPTION] === '0',
+                    "Cron cannot republish inconsistent metadata $order");
             }
         }
-        esp63_assert(ESP_Media_Index::reindex_attachment($move_id),
-            "R01 full move reindexes safely $order");
+        if ($move_id === 720) {
+            // Move public A away using an ordinary same-directory update:
+            // after the repair, B must own the derivative as protected.
+            $public_new_path = $to_dir . '/public-719.jpg';
+            esp63_assert(ESP_Media_Index::guard_meta(null,719,
+                '_wp_attached_file',$public_new_path) === null,
+                'public collision owner moved away by normal metadata update');
+            esp63_sql("UPDATE esp63_postmeta SET meta_value='$public_new_path'
+                WHERE post_id=719 AND meta_key='_wp_attached_file'");
+            ESP_Media_Index::on_meta_saved(819,719,'_wp_attached_file',$public_new_path);
+            esp63_assert(ESP_Media_Index::reindex_attachment(719),
+                'former public owner republished on distinct path');
+        }
+        // Cron should rebuild without a special migration API once BOTH
+        // WordPress canonical rows agree. The full audit may take >1 batch.
+        for ($try=0; $try<10 && !ESP_Media_Index::ready(); ++$try) {
+            ESP_Media_Index::run_batch();
+        }
+        esp63_assert(ESP_Media_Index::ready(),
+            "Cron republished complete coverage after canonical repair $order");
         $mapped = ESP_Media_Index::resolve($uploads . '/' . $to);
         esp63_assert($mapped['status'] === 'resolved' &&
             $mapped['protected_path_id'] === 'secret_move',
-            "R01 moved file maps to original protection $order");
-        $thumb = ESP_Media_Index::resolve($uploads . '/' . $to_dir .
-            '/move-' . $move_id . '-150x150.jpg');
+            "Cron repaired original after complete move $order");
+        $thumb = ESP_Media_Index::resolve($uploads . '/' . $new_thumb);
         esp63_assert($thumb['status'] === 'resolved' &&
             $thumb['protected_path_id'] === 'secret_move',
-            "R01 moved derivative follows protection $order");
+            "Cron repaired protected derivative after complete move $order");
     }
 
 
@@ -838,13 +880,13 @@ try {
     esp63_assert($gc_state['status'] === 'ready' &&
         (int)$gc_state['failure_count'] > 0 && $gc_rows === 3,
         'R03 cleanup failure leaves active READY and a persisted retry');
-    esp63_sql("UPDATE $state SET retry_after=0 WHERE attachment_id=$gc_id");
+    esp63_sql("UPDATE $state SET retry_after=1 WHERE attachment_id=$gc_id");
     ESP_Media_Index::run_batch(); // simulated continued DELETE outage
     esp63_assert((int)$wpdb->get_var(
         "SELECT failure_count FROM $state WHERE attachment_id=$gc_id") > 0,
         'R03 retry remains scheduled while DELETE is unavailable');
     $wpdb->fail_cleanup = false;
-    esp63_sql("UPDATE $state SET retry_after=0 WHERE attachment_id=$gc_id");
+    esp63_sql("UPDATE $state SET retry_after=1 WHERE attachment_id=$gc_id");
     ESP_Media_Index::run_batch();
     $gc_rows_after = (int)$wpdb->get_var(
         "SELECT COUNT(*) FROM $files WHERE attachment_id=$gc_id");
