@@ -23,6 +23,30 @@ if (!ESP_Media_Index::install_schema()) {
 }
 ESP_Media_Index::run_batch();
 ESP_Media_Index::run_batch();
+// Display-only COUNT(*) must not run on every admin/AJAX polling request.
+// The authoritative READY/cursor state is always freshly fetched.
+$cache_key = 'esp_media_index_progress_counts_v1';
+delete_transient($cache_key);
+$count_sql_calls = 0;
+$watch_count_queries = function ($sql) use (&$count_sql_calls) {
+    if (preg_match('/^\s*SELECT COUNT\(\*\)/i', $sql)) { ++$count_sql_calls; }
+    return $sql;
+};
+add_filter('query', $watch_count_queries, 99);
+ESP_Media_Index::build_status();
+$first_count = $count_sql_calls;
+ESP_Media_Index::build_status();
+$second_count = $count_sql_calls;
+delete_transient($cache_key);
+ESP_Media_Index::build_status(false);
+$fast_count = $count_sql_calls;
+remove_filter('query', $watch_count_queries, 99);
+if ($first_count < 2 || $second_count !== $first_count ||
+    $fast_count !== $second_count) {
+    throw new RuntimeException('Progress polling still reruns expensive count queries');
+}
+echo "PASS: progress counts cached and CLI lightweight state skips COUNT(*)\n";
+
 if (!ESP_Media_Index::ready()) {
     throw new RuntimeException('index batch did not publish verified initial scan');
 }
