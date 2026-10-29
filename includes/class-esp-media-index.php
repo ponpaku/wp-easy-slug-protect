@@ -1064,6 +1064,15 @@ final class ESP_Media_Index {
         $runtime = get_option(ESP_Protection_State::RUNTIME_STATE_OPTION, null);
         if (!is_array($runtime) || ($runtime['state'] ?? '') !== 'READY' ||
             ($runtime['version'] ?? '') !== ESP_VERSION) { return; }
+        if (!is_object($wpdb) || empty($wpdb->prefix)) { return; }
+        // One scan owns the global cursor at a time, regardless of the driver
+        // (Cron, admin AJAX or CLI). Individual metadata guards remain active.
+        $scan_lock_name = 'esp63_scan_' .
+            substr(hash('sha256', $wpdb->prefix), 0, 32);
+        $scan_lock = $wpdb->get_var($wpdb->prepare(
+            'SELECT GET_LOCK(%s, 0)', $scan_lock_name));
+        if ($wpdb->last_error !== '' || (string)$scan_lock !== '1') { return; }
+        try {
         if (!self::installed() && !self::install_schema()) {
             error_log('ESP: Media index schema install failed');
             return;
@@ -1150,6 +1159,10 @@ final class ESP_Media_Index {
             (int)end($ids), $epoch, $cursor));
         if ($advanced !== 1 || $wpdb->last_error !== '') { return; }
         update_option(self::CURSOR_OPTION, (int)end($ids), false);
+        } finally {
+            $wpdb->get_var($wpdb->prepare(
+                'SELECT RELEASE_LOCK(%s)', $scan_lock_name));
+        }
     }
 }
 
