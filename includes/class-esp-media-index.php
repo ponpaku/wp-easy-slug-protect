@@ -60,6 +60,9 @@ final class ESP_Media_Index {
         add_filter('update_post_metadata', [self::class, 'guard_update_meta'], 5, 5);
         add_filter('delete_post_metadata', [self::class, 'guard_delete_meta'], 5, 5);
         add_filter('update_post_metadata_by_mid', [self::class, 'guard_by_mid'], 5, 4);
+        // by-mid sanitizes AFTER its short-circuit pre-filter. This action
+        // exposes the final serialized value BEFORE WordPress persists it.
+        add_action('update_postmeta', [self::class, 'reserve_sanitized_by_mid'], 1, 4);
         add_filter('delete_post_metadata_by_mid', [self::class, 'guard_delete_by_mid'], 5, 2);
         foreach (['added_post_meta', 'updated_post_meta', 'deleted_post_meta'] as $hook) {
             add_action($hook, [self::class, 'on_meta_saved'], 20, 4);
@@ -605,17 +608,50 @@ final class ESP_Media_Index {
             return $wpdb->last_error !== '' ? self::failed_pre_fence() : $check;
         }
         if (!self::relevant($old->meta_key) && !self::relevant($meta_key)) { return $check; }
+        // Ordinary post meta must never poison the attachment index.
+        if (get_post_type((int)$old->post_id) !== 'attachment') { return $check; }
         if (self::mark_dirty((int)$old->post_id)) {
             self::$by_mid[(int)$meta_id] = (int)$old->post_id;
             self::track_local((int)$old->post_id);
-            $next_key = is_string($meta_key) ? $meta_key : $old->meta_key;
-            if (self::reserve_new_paths((int)$old->post_id, $next_key, $meta_value)) {
-                return null;
-            }
-            return self::failed_pre_fence();
+            // Unlike update_post_meta(), Core's by-mid API applies
+            // sanitize_meta() AFTER this filter. Reserving $meta_value here
+            // would miss the actual committed path. A later update_postmeta
+            // action reserves the final serialized value before the SQL write.
+            return null;
         }
         return self::failed_pre_fence();
     }
+
+    /**
+     * by-mid postmeta pre-write hook receives the actual, sanitized and
+     * serialized value that Core will persist. This action cannot veto a
+     * write through a return value, so failure must invalidate GLOBAL
+     * coverage before the SQL write, or throw to prevent that write.
+     * Never sanitize twice: plugins may have side effects or vary results.
+     */
+    public static function reserve_sanitized_by_mid($meta_id, $post_id, $meta_key, $stored_value) {
+        $meta_id = (int)$meta_id;
+        $post_id = (int)$post_id;
+        if (!isset(self::$by_mid[$meta_id]) ||
+            (int)self::$by_mid[$meta_id] !== $post_id) { return; }
+        if (!self::installed() || get_post_type($post_id) !== 'attachment') {
+            // An attachment changing type mid-operation is not a safe owner.
+            if (!self::invalidate_global()) {
+                throw new RuntimeException('ESP media index: cannot fence by-mid ownership change');
+            }
+            return;
+        }
+        // Core supplies maybe_serialize(sanitize_meta(...)) to this action.
+        // reserve_new_paths() deserializes metadata using maybe_unserialize().
+        if (self::reserve_new_paths($post_id, $meta_key, $stored_value)) { return; }
+        // Missing/invalid ownership evidence may be repaired on a future
+        // audit; until then, never let a READY global index authorize a
+        // newly persisted path as if it had no protected owner.
+        if (!self::invalidate_global()) {
+            throw new RuntimeException('ESP media index: cannot reserve sanitized by-mid ownership');
+        }
+    }
+
     public static function guard_delete_by_mid($check, $meta_id) {
         global $wpdb;
         if ($check !== null || !self::installed()) { return $check; }
@@ -624,6 +660,7 @@ final class ESP_Media_Index {
             return $wpdb->last_error !== '' ? self::failed_pre_fence() : $check;
         }
         if (!self::relevant($old->meta_key)) { return $check; }
+        if (get_post_type((int)$old->post_id) !== 'attachment') { return $check; }
         if (self::mark_dirty((int)$old->post_id)) {
             self::track_local((int)$old->post_id);
             return null;
