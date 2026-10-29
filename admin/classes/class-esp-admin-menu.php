@@ -572,6 +572,51 @@ class ESP_Admin_Menu {
                 <div class="esp-section">
                     <h2><?php _e('ツール', $text_domain); ?></h2>
                     <table class="form-table">
+                        <?php if (class_exists('ESP_Media_Index')): ?>
+                        <?php $esp_index_status = ESP_Media_Index::build_status(); ?>
+                        <tr>
+                            <th scope="row"><?php esc_html_e('メディア保護テーブル', $text_domain); ?></th>
+                            <td>
+                                <p id="esp-media-index-progress" aria-live="polite">
+                                    <?php if ($esp_index_status['error']): ?>
+                                        <?php esc_html_e('状態を確認できません。DB接続・テーブルを点検してください。', $text_domain); ?>
+                                    <?php elseif ($esp_index_status['ready']): ?>
+                                        <?php esc_html_e('初期構築・検証は完了しています。', $text_domain); ?>
+                                    <?php else: ?>
+                                        <?php echo esc_html(sprintf(
+                                            __('初期構築中：%1$s / %2$s 添付を走査済み（目安）', $text_domain),
+                                            number_format_i18n($esp_index_status['scanned']),
+                                            number_format_i18n($esp_index_status['total'])
+                                        )); ?>
+                                    <?php endif; ?>
+                                </p>
+                                <div style="max-width: 480px; background: #eee; height: 14px;" role="progressbar"
+                                    id="esp-media-index-bar" aria-valuemin="0" aria-valuemax="100"
+                                    aria-valuenow="<?php echo esc_attr($esp_index_status['ready'] ? 100 :
+                                        ($esp_index_status['total'] > 0 ?
+                                        min(99, (int)floor(100 * $esp_index_status['scanned'] / $esp_index_status['total'])) : 0)); ?>">
+                                    <div id="esp-media-index-fill" style="background: #2271b1; height: 100%; width: <?php
+                                        echo esc_attr($esp_index_status['ready'] ? 100 :
+                                        ($esp_index_status['total'] > 0 ?
+                                        min(99, (int)floor(100 * $esp_index_status['scanned'] / $esp_index_status['total'])) : 0)); ?>%;"></div>
+                                </div>
+                                <p>
+                                    <button type="button" class="button button-secondary" id="esp-media-index-build"
+                                        <?php disabled($esp_index_status['ready'] || $esp_index_status['error']); ?>>
+                                        <?php esc_html_e('メディア保護テーブルを構築・再開する', $text_domain); ?>
+                                    </button>
+                                    <button type="button" class="button" id="esp-media-index-stop" disabled>
+                                        <?php esc_html_e('手動処理を停止（Cronは継続）', $text_domain); ?>
+                                    </button>
+                                </p>
+                                <p class="description">
+                                    <?php esc_html_e('手動処理中もWP-Cronによる自動構築は継続します。正常な進捗はDBに保存され、画面を閉じても失われません。大規模サイトではWP-CLIでの構築を推奨します。', $text_domain); ?>
+                                </p>
+                                <p><code>wp esp media-index build</code></p>
+                                <div id="esp-media-index-message" role="status" aria-live="polite"></div>
+                            </td>
+                        </tr>
+                        <?php endif; ?>
                         <tr>
                             <th scope="row"><?php _e('パーマリンクパス情報', $text_domain); ?></th>
                             <td>
