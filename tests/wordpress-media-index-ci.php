@@ -96,6 +96,42 @@ $new_owner = ESP_Media_Index::resolve($uploads['basedir'] . '/' . $new_name);
 if ($new_owner['status'] !== 'resolved' || $new_owner['protected_path_id'] !== 'path_http') {
     throw new RuntimeException('new WP subsize was not indexed on metadata update');
 }
+// Newly proposed protected subsize must fence a previously public owner
+// BEFORE the independent worker publishes the new ownership generation.
+$collision = $meta;
+$collision['sizes']['esp63_colliding'] = [
+    'file'=>basename($public), 'width'=>150, 'height'=>150,
+    'mime-type'=>'image/jpeg'
+];
+if (!wp_update_attachment_metadata($id, $collision) ||
+    ESP_Media_Index::resolve($public)['status'] !== 'error') {
+    throw new RuntimeException('new protected competing owner was not pre-reserved');
+}
+if (!ESP_Media_Index::reindex_attachment($id) ||
+    ESP_Media_Index::resolve($public)['status'] !== 'ambiguous') {
+    throw new RuntimeException('competing protected/public file must be ambiguous');
+}
+if (!wp_update_attachment_metadata($id, $meta) ||
+    !ESP_Media_Index::reindex_attachment($id) ||
+    ESP_Media_Index::resolve($public)['status'] !== 'resolved') {
+    throw new RuntimeException('failed to restore noncolliding metadata');
+}
+
+// Emulate an unrelated plugin doing a no-op AFTER ESP's former shutdown
+// priority=1 callback. The final shutdown sweep must clear the ticket.
+$late_noop = function () use ($id) {
+    update_post_meta($id, ESP_Media_Index::PROTECTION_META, 'path_http');
+};
+add_action('shutdown', $late_noop, 10);
+do_action('shutdown');
+remove_action('shutdown', $late_noop, 10);
+$late_pending = (int)$wpdb->get_var($wpdb->prepare(
+    'SELECT pending_count FROM ' . ESP_Media_Index::state_table() .
+    ' WHERE attachment_id=%d', $id));
+if ($late_pending !== 0 || !ESP_Media_Index::reindex_attachment($id)) {
+    throw new RuntimeException('late shutdown no-op stranded pending completion');
+}
+
 // R01: real WordPress API, unique=true must NOT be treated as delete_all.
 $public_id = (int)$wpdb->get_var("SELECT ID FROM {$wpdb->posts}
     WHERE post_type='attachment' AND post_title='ESP31 public JPEG' LIMIT 1");
