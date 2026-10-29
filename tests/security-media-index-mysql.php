@@ -1022,6 +1022,66 @@ try {
             'attachments_per_second' => round($size / max($audit_seconds, .000001), 3)
         ], JSON_UNESCAPED_SLASHES) . "\n";
 
+        // Review performance R02: 100K healthy READY control rows (no
+        // scheduled cleanup) make retry_after<=NOW() nonselective. Compare
+        // actual MySQL 8.0 EXPLAIN ANALYZE before/after the >0 predicate,
+        // then measure the new query with three scheduled cleanup owners.
+        // These are synthetic state rows, not real WordPress attachments.
+        $dummy_base = 2000000;
+        for ($offset=0; $offset<100000; $offset+=500) {
+            $values = [];
+            for ($k=0; $k<500; ++$k) {
+                $dummy_id = $dummy_base + $offset + $k;
+                $values[] = "($dummy_id,'ready',1,1,0,0,0,0)";
+            }
+            esp63_sql("INSERT INTO $state
+                (attachment_id,status,revision,active_generation,
+                 pending_count,changed_at,retry_after,failure_count) VALUES " .
+                implode(',', $values));
+        }
+        $cleanup_common = "SELECT attachment_id,active_generation FROM $state
+            WHERE attachment_id>0 AND status='ready' AND pending_count=0
+              AND failure_count>0";
+        $cleanup_tail = " AND retry_after<=" . time() .
+            " ORDER BY changed_at ASC LIMIT 200";
+        $plans = [
+            'old_no_waiters' => $cleanup_common . $cleanup_tail,
+            'new_no_waiters' => $cleanup_common .
+                " AND retry_after>0" . $cleanup_tail
+        ];
+        esp63_sql("UPDATE $state SET failure_count=1,retry_after=1
+            WHERE attachment_id IN ($dummy_base," . ($dummy_base+1) .
+            "," . ($dummy_base+2) . ")");
+        $plans['new_three_waiters'] = $cleanup_common .
+            " AND retry_after>0" . $cleanup_tail;
+        foreach ($plans as $scenario => $query) {
+            // The old/no-waiters scenario must not observe the scheduled
+            // fixtures: it is meant to demonstrate the zero-waiter case.
+            if ($scenario === 'old_no_waiters' || $scenario === 'new_no_waiters') {
+                esp63_sql("UPDATE $state SET failure_count=0,retry_after=0
+                    WHERE attachment_id BETWEEN $dummy_base AND " .
+                    ($dummy_base+2));
+            } else {
+                esp63_sql("UPDATE $state SET failure_count=1,retry_after=1
+                    WHERE attachment_id BETWEEN $dummy_base AND " .
+                    ($dummy_base+2));
+            }
+            $plan_result = $db->query("EXPLAIN ANALYZE " . $query);
+            if ($plan_result === false) {
+                throw new RuntimeException('Cleanup EXPLAIN ANALYZE failed: ' . $db->error);
+            }
+            $explain_rows = [];
+            while ($explain = $plan_result->fetch_row()) {
+                $explain_rows[] = (string)$explain[0];
+            }
+            echo 'ESP63_CLEANUP_PLAN ' . json_encode([
+                'scenario'=>$scenario,
+                'healthy_ready_synthetic'=>100000,
+                'plan'=>implode("\n", $explain_rows)
+            ], JSON_UNESCAPED_SLASHES) . "\n";
+            $plan_result->free();
+        }
+
         sort($batches, SORT_NUMERIC);
         $p95 = $batches[(int)ceil(count($batches) * .95) - 1];
         $report = [
