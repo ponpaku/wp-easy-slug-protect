@@ -124,7 +124,12 @@ final class ESP_Media_Index {
      * Display progress, never equate the WP option cache with authoritative
      * SQL control state. Admin-only: each request may count attachment rows.
      */
-    public static function build_status() {
+    /**
+     * Lightweight authoritative progress state is sufficient for polling and
+     * CLI stall detection. Exact COUNT(*) values are display-only and cached
+     * briefly across AJAX requests (one PHP process per request).
+     */
+    public static function build_status($include_counts = true) {
         global $wpdb;
         $result = [
             'installed' => self::installed(),
@@ -138,28 +143,45 @@ final class ESP_Media_Index {
             'error' => false,
         ];
         if (!is_object($wpdb)) { $result['error'] = true; return $result; }
-        $result['total'] = (int)$wpdb->get_var(
-            "SELECT COUNT(*) FROM {$wpdb->posts} WHERE post_type='attachment'");
-        if ($wpdb->last_error !== '') { $result['error'] = true; return $result; }
-        if (!$result['installed']) { return $result; }
-        $state = self::table(self::state_table());
-        $control = $wpdb->get_row("SELECT status,audit_cursor,changed_at FROM $state
-            WHERE attachment_id=0", ARRAY_A);
-        if (!is_array($control) || $wpdb->last_error !== '') {
-            $result['error'] = true;
-            return $result;
+        if ($result['installed']) {
+            $state = self::table(self::state_table());
+            $control = $wpdb->get_row("SELECT status,audit_cursor,changed_at FROM $state
+                WHERE attachment_id=0", ARRAY_A);
+            if (!is_array($control) || $wpdb->last_error !== '') {
+                $result['error'] = true;
+                return $result;
+            }
+            $result['cursor'] = (int)$control['audit_cursor'];
+            $result['last_activity'] = (int)$control['changed_at'];
+            $result['ready'] = self::ready() && $control['status'] === 'ready';
         }
-        $result['cursor'] = (int)$control['audit_cursor'];
-        $result['last_activity'] = (int)$control['changed_at'];
-        $result['ready'] = self::ready() && $control['status'] === 'ready';
-        $result['scanned'] = (int)$wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(*) FROM {$wpdb->posts} WHERE post_type='attachment'
-             AND ID<=%d", $result['cursor']));
-        if ($wpdb->last_error !== '') { $result['error'] = true; return $result; }
-        $result['dirty'] = (int)$wpdb->get_var(
-            "SELECT COUNT(*) FROM $state WHERE attachment_id>0
-             AND (status<>'ready' OR pending_count<>0)");
-        if ($wpdb->last_error !== '') { $result['error'] = true; }
+        if (!$include_counts) { return $result; }
+        // One cached snapshot is intentionally approximate while building.
+        // Never cache or derive the authorization-relevant READY decision.
+        $cache_key = 'esp_media_index_progress_counts_v1';
+        $counts = get_transient($cache_key);
+        if (!is_array($counts) || !isset($counts['total'], $counts['scanned'], $counts['dirty'])) {
+            $counts = [];
+            $counts['total'] = (int)$wpdb->get_var(
+                "SELECT COUNT(*) FROM {$wpdb->posts} WHERE post_type='attachment'");
+            if ($wpdb->last_error !== '') { $result['error'] = true; return $result; }
+            $counts['scanned'] = (int)$wpdb->get_var($wpdb->prepare(
+                "SELECT COUNT(*) FROM {$wpdb->posts} WHERE post_type='attachment'
+                 AND ID<=%d", $result['cursor']));
+            if ($wpdb->last_error !== '') { $result['error'] = true; return $result; }
+            $counts['dirty'] = 0;
+            if ($result['installed']) {
+                $state = self::table(self::state_table());
+                $counts['dirty'] = (int)$wpdb->get_var(
+                    "SELECT COUNT(*) FROM $state WHERE attachment_id>0
+                     AND (status<>'ready' OR pending_count<>0)");
+                if ($wpdb->last_error !== '') { $result['error'] = true; return $result; }
+            }
+            set_transient($cache_key, $counts, 15);
+        }
+        $result['total'] = (int)$counts['total'];
+        $result['scanned'] = (int)$counts['scanned'];
+        $result['dirty'] = (int)$counts['dirty'];
         return $result;
     }
 
@@ -832,7 +854,10 @@ final class ESP_Media_Index {
         if ($id <= 0 || !self::installed()) { return false; }
         $state = self::table(self::state_table());
         $files = self::table(self::files_table());
-        $lock_name = 'esp63_' . substr(hash('sha256', $wpdb->prefix . ':' . $id), 0, 40);
+        $namespace = self::lock_namespace();
+        if ($namespace === null) { return false; }
+        $lock_name = 'esp63_' .
+            substr(hash('sha256', $namespace . "\0" . $id), 0, 40);
         $lock = $wpdb->get_var($wpdb->prepare('SELECT GET_LOCK(%s, 2)', $lock_name));
         if ($wpdb->last_error !== '' || (string)$lock !== '1') { return false; }
         try {
@@ -1023,7 +1048,10 @@ final class ESP_Media_Index {
         global $wpdb;
         $state = self::table(self::state_table());
         $files = self::table(self::files_table());
-        $lock_name = 'esp63_' . substr(hash('sha256', $wpdb->prefix . ':' . $id), 0, 40);
+        $namespace = self::lock_namespace();
+        if ($namespace === null) { return false; }
+        $lock_name = 'esp63_' .
+            substr(hash('sha256', $namespace . "\0" . $id), 0, 40);
         $lock = $wpdb->get_var($wpdb->prepare('SELECT GET_LOCK(%s, 2)', $lock_name));
         if ($wpdb->last_error !== '' || (string)$lock !== '1') { return false; }
         try {
@@ -1178,11 +1206,24 @@ final class ESP_Media_Index {
         $active = (int)$before['active_generation'];
         $index_rows = $wpdb->get_results($wpdb->prepare(
             "SELECT path_hash,file_path,generation,protected_path_id FROM $files
-             WHERE attachment_id=%d AND generation=%d", $id, $active), ARRAY_A);
+             WHERE attachment_id=%d", $id), ARRAY_A);
         if (!is_array($index_rows) || $wpdb->last_error !== '') { return null; }
-        if (count($index_rows) !== count($paths)) { return false; }
-        $expected = array_fill_keys($paths, true);
+        // The same indexed attachment_id scan also sees obsolete generations.
+        // If DELETE and its retry ticket both failed, a later normal audit
+        // still discovers and reclaims the old rows without rebuilding READY.
+        $active_rows = [];
+        $obsolete_rows = false;
         foreach ($index_rows as $row) {
+            if ((int)$row['generation'] < $active) {
+                $obsolete_rows = true;
+                continue;
+            }
+            if ((int)$row['generation'] !== $active) { return false; }
+            $active_rows[] = $row;
+        }
+        if (count($active_rows) !== count($paths)) { return false; }
+        $expected = array_fill_keys($paths, true);
+        foreach ($active_rows as $row) {
             $path = $row['file_path'];
             if (!is_string($path) || !isset($expected[$path]) ||
                 $row['path_hash'] !== hash('sha256', $path) ||
@@ -1196,11 +1237,32 @@ final class ESP_Media_Index {
             "SELECT status,revision,pending_count,active_generation FROM $state
              WHERE attachment_id=%d", $id), ARRAY_A);
         if (!is_array($after) || $wpdb->last_error !== '') { return null; }
-        return $before === $after && $after['status'] === 'ready' &&
+        $valid = $before === $after && $after['status'] === 'ready' &&
             (int)$after['pending_count'] === 0;
+        if ($valid && $obsolete_rows) {
+            // Best effort only: authorization of the active generation is
+            // already valid. A failed cleanup is retried on the next audit.
+            self::cleanup_obsolete_generations($id, $active);
+        }
+        return $valid;
     }
 
     /** Bounded incremental backfill and continuous audit; never HTTP path. */
+    /** Names include the actual DB and prefix: GET_LOCK is server-scoped. */
+    private static function lock_namespace() {
+        global $wpdb;
+        $db_name = isset($wpdb->dbname) && is_string($wpdb->dbname)
+            ? $wpdb->dbname : '';
+        if ($db_name === '') {
+            $db_name = $wpdb->get_var('SELECT DATABASE()');
+        }
+        if (!is_string($db_name) || $db_name === '' ||
+            $wpdb->last_error !== '' || empty($wpdb->prefix)) {
+            return null;
+        }
+        return $db_name . "\0" . $wpdb->prefix;
+    }
+
     public static function run_batch() {
         global $wpdb;
         $runtime = get_option(ESP_Protection_State::RUNTIME_STATE_OPTION, null);
@@ -1209,8 +1271,10 @@ final class ESP_Media_Index {
         if (!is_object($wpdb) || empty($wpdb->prefix)) { return; }
         // One scan owns the global cursor at a time, regardless of the driver
         // (Cron, admin AJAX or CLI). Individual metadata guards remain active.
+        $namespace = self::lock_namespace();
+        if ($namespace === null) { return; }
         $scan_lock_name = 'esp63_scan_' .
-            substr(hash('sha256', $wpdb->prefix), 0, 32);
+            substr(hash('sha256', $namespace), 0, 32);
         $scan_lock = $wpdb->get_var($wpdb->prepare(
             'SELECT GET_LOCK(%s, 0)', $scan_lock_name));
         if ($wpdb->last_error !== '' || (string)$scan_lock !== '1') { return; }
@@ -1349,13 +1413,13 @@ class ESP_Media_Index_CLI {
         $cycles = 0;
         while (microtime(true) - $start < $max_seconds) {
             ESP_Media_Index::run_batch();
-            $status = ESP_Media_Index::build_status();
+            $status = ESP_Media_Index::build_status(false);
             if ($status['error']) { \WP_CLI::error('Could not inspect index state'); }
             if ($status['ready']) {
                 \WP_CLI::success('Media index initial coverage is READY; strict activation still requires #43 migration review');
                 return;
             }
-            $signature = $status['cursor'] . ':' . $status['dirty'] . ':' .
+            $signature = $status['cursor'] . ':' . $status['last_activity'] . ':' .
                 ($status['installed'] ? '1' : '0');
             if ($signature === $previous) { ++$stalls; }
             else { $stalls = 0; }
@@ -1365,8 +1429,10 @@ class ESP_Media_Index_CLI {
             $previous = $signature;
             ++$cycles;
             if ($cycles % 20 === 0) {
-                \WP_CLI::log(sprintf('scanned=%d/%d cursor=%d dirty=%d',
-                    $status['scanned'], $status['total'], $status['cursor'], $status['dirty']));
+                $display = ESP_Media_Index::build_status();
+                if ($display['error']) { \WP_CLI::error('Could not inspect progress counts'); }
+                \WP_CLI::log(sprintf('scanned≈%d/%d cursor=%d dirty≈%d',
+                    $display['scanned'], $display['total'], $status['cursor'], $display['dirty']));
             }
             usleep($stalls > 0 ? 250000 : 50000);
         }
