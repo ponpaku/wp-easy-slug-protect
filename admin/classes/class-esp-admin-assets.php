@@ -90,6 +90,7 @@ class ESP_Admin_Assets {
                 'pages_list' => $pages_list,
                 'currentSettings' => $current_settings,
                 'settingsNonce' => wp_create_nonce('esp_settings_group-options'),
+                'mediaIndexNonce' => wp_create_nonce('esp_media_index_build'),
                 'regenerateNonce' => wp_create_nonce('esp_regenerate_permalinks_nonce'), // メタデータ再生成用Nonce
                 'clearCacheNonce' => wp_create_nonce('esp_clear_cache_nonce'),// キャッシュクリア用Nonce
                 'clearMediaCacheNonce' => wp_create_nonce('esp_clear_media_cache_nonce'),// メディア保護キャッシュ用
