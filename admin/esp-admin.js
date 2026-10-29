@@ -803,13 +803,13 @@
                         const signature = [status.installed, status.cursor, status.dirty].join(":");
                         stalls = signature === previous ? stalls + 1 : 0;
                         previous = signature;
-                        if (stalls >= 3) {
+                        if (stalls >= 20) {
                             finish("進捗が停止しています。未完了の更新・エラー・他の処理を確認してください。Cronは継続します。", false);
                             return;
                         }
                         $message.text("メディア保護テーブルを構築中…");
                         // Let the event loop repaint and allow a stop between slices.
-                        window.setTimeout(next, 100);
+                        window.setTimeout(next, stalls > 0 ? 1000 : 100);
                     }).fail(function (xhr) {
                         let detail = "";
                         if (xhr.responseJSON && xhr.responseJSON.data) {
