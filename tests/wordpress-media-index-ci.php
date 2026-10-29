@@ -406,6 +406,49 @@ try {
         ]) . "\n";
         // No explicit retry is sent: this tests the actual lost server OK,
         // not WordPress's potential reconnect/re-execute of the same UPDATE.
+
+        // Run the same after-commit TCP ACK-loss against actual WordPress wpdb.
+        // Inject a real mysqli transport with a five-second read timeout;
+        // on reconnection Core still uses its own standard db_connect path.
+        $q01_wpdb_proxy = getenv('ESP_Q01_WPDB_PROXY_HOST');
+        if ($q01_wpdb_proxy) {
+            if ($wpdb->query("REPLACE INTO $q01_table (id,pending_count) VALUES (1,2)") === false) {
+                throw new RuntimeException('Q01 cannot reset wpdb proxy fixture');
+            }
+            [$q01_wpdb_name, $q01_wpdb_port] = explode(':', $q01_wpdb_proxy, 2);
+            $q01_wpdb_test = new wpdb(DB_USER, DB_PASSWORD, DB_NAME, $q01_wpdb_proxy);
+            $q01_wpdb_test->suppress_errors(true);
+            if (!($q01_wpdb_test->dbh instanceof mysqli)) {
+                throw new RuntimeException('Q01 test wpdb did not connect');
+            }
+            $q01_wpdb_test->dbh->close();
+            $q01_timed_link = mysqli_init();
+            $q01_timed_link->options(MYSQLI_OPT_CONNECT_TIMEOUT, 5);
+            $q01_timed_link->options(MYSQLI_OPT_READ_TIMEOUT, 5);
+            if (!$q01_timed_link->real_connect(
+                $q01_wpdb_name, DB_USER, DB_PASSWORD, DB_NAME, (int)$q01_wpdb_port
+            )) {
+                throw new RuntimeException('Q01 timed wpdb transport failed');
+            }
+            $q01_wpdb_test->dbh = $q01_timed_link;
+            if ((int)$q01_wpdb_test->get_var('SELECT 1') !== 1) {
+                throw new RuntimeException('Q01 timed wpdb preliminary query failed');
+            }
+            $q01_wpdb_result = $q01_wpdb_test->query(
+                "UPDATE $q01_table SET pending_count=pending_count-1
+                 WHERE id=1 AND pending_count>0 /* ESP_Q01_DROP_ACK */");
+            $q01_wpdb_error = $q01_wpdb_test->last_error;
+            $q01_wpdb_count = (int)$wpdb->get_var("SELECT pending_count FROM $q01_table WHERE id=1");
+            if ($wpdb->last_error !== '' || !in_array($q01_wpdb_count, [0, 1], true)) {
+                throw new RuntimeException('Q01 wpdb TCP ACK-loss returned an invalid persisted state');
+            }
+            echo 'Q01_WPDB_ACK_LOSS ' . wp_json_encode([
+                'wpdb_return' => $q01_wpdb_result,
+                'wpdb_error' => $q01_wpdb_error,
+                'stored_pending' => $q01_wpdb_count,
+                'double_decrement_observed' => $q01_wpdb_count === 0,
+            ]) . "\n";
+        }
         // 0 documents a real double decrement, and is deliberately an
         // observational result rather than making diagnostic CI artificially
         // green by hiding the security-relevant value.
