@@ -297,6 +297,75 @@ if (ESP_Media_Index::resolve($path)['status'] !== 'resolved') {
 wp_set_current_user(0);
 echo "PASS: admin notice shows unresolved media index work and Cron restores it\\n";
 
+// Q01 diagnostic (disposable CI only): exercise real WordPress wpdb and MySQL.
+// No production index states are changed, only a dedicated disposable probe table.
+$q01_table = $wpdb->prefix . 'esp_q01_fault_probe';
+if (!preg_match('/^[a-zA-Z0-9_]+$/D', $q01_table) ||
+    strpos(DB_NAME, 'esp_') !== 0 || getenv('ESP_ALLOW_DISPOSABLE_DB') !== '1') {
+    throw new RuntimeException('Q01 fault probe refuses non-disposable WordPress');
+}
+$q01_procedure = $wpdb->prefix . 'esp_q01_after_write_error';
+$q01_old_suppression = $wpdb->suppress_errors(true);
+try {
+    if ($wpdb->query("CREATE TABLE IF NOT EXISTS $q01_table (
+            id int NOT NULL PRIMARY KEY, pending_count int NOT NULL
+        ) ENGINE=InnoDB") === false ||
+        $wpdb->query("REPLACE INTO $q01_table (id,pending_count) VALUES (1,0)") === false) {
+        throw new RuntimeException('Q01 cannot initialize MySQL probe');
+    }
+
+    // Kill the existing connection BEFORE sending UPDATE. Core may reconnect
+    // and execute the SQL on MySQL error 2006. This is not lost-after-commit ACK.
+    $q01_connection = (int)$wpdb->get_var('SELECT CONNECTION_ID()');
+    $q01_killer = new mysqli(DB_HOST, DB_USER, DB_PASSWORD, DB_NAME);
+    if ($q01_connection <= 0 || !$q01_killer->query('KILL CONNECTION ' . $q01_connection)) {
+        throw new RuntimeException('Q01 cannot kill initial MySQL session');
+    }
+    $q01_killer->close();
+    $q01_retry_result = $wpdb->query("UPDATE $q01_table SET pending_count=pending_count+1 WHERE id=1");
+    $q01_retry_value = $wpdb->get_var("SELECT pending_count FROM $q01_table WHERE id=1");
+    if ($wpdb->last_error !== '' || !in_array((int)$q01_retry_value, [0, 1], true)) {
+        throw new RuntimeException('Q01 broken-connection probe has invalid DB result');
+    }
+    echo 'Q01_PRE_SEND_CONNECTION_KILL ' . wp_json_encode([
+        'wpdb_update_return' => $q01_retry_result,
+        'stored_pending' => (int)$q01_retry_value,
+        'reconnected' => (int)$wpdb->get_var('SELECT CONNECTION_ID()') !== $q01_connection,
+    ]) . "\n";
+
+    // This is an actual MySQL autocommit UPDATE followed by SIGNAL. WordPress
+    // sees CALL as failed even though the preceding UPDATE was committed.
+    // This reproduces ambiguous observation, NOT TCP ACK-loss/2006/2013.
+    if ($wpdb->query("REPLACE INTO $q01_table (id,pending_count) VALUES (1,2)") === false ||
+        $wpdb->query("DROP PROCEDURE IF EXISTS $q01_procedure") === false ||
+        $wpdb->query("CREATE PROCEDURE $q01_procedure()
+            BEGIN
+                UPDATE $q01_table SET pending_count=pending_count-1
+                WHERE id=1 AND pending_count>0;
+                SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Q01 after-write diagnostic error';
+            END") === false) {
+        throw new RuntimeException('Q01 cannot install MySQL after-write probe');
+    }
+    $q01_ambiguous_result = $wpdb->query("CALL $q01_procedure()");
+    $q01_ambiguous_error = $wpdb->last_error;
+    $q01_actual_pending = (int)$wpdb->get_var(
+        "SELECT pending_count FROM $q01_table WHERE id=1");
+    if ($q01_ambiguous_result !== false || $q01_ambiguous_error === '' ||
+        $wpdb->last_error !== '' || $q01_actual_pending !== 1) {
+        throw new RuntimeException('Q01 after-write error did not preserve the committed decrement');
+    }
+    echo 'Q01_POST_WRITE_ERROR ' . wp_json_encode([
+        'wpdb_reported_failure' => true,
+        'stored_pending' => $q01_actual_pending,
+        'error_class' => 'SQLSTATE 45000 (not network ACK loss)',
+    ]) . "\n";
+    echo "PASS: Q01 real WordPress wpdb / MySQL diagnostic (Core retry, post-write failure)\n";
+} finally {
+    $wpdb->query("DROP PROCEDURE IF EXISTS $q01_procedure");
+    $wpdb->query("DROP TABLE IF EXISTS $q01_table");
+    $wpdb->suppress_errors($q01_old_suppression);
+}
+
 // Review R02: PHP shutdown callbacks registered AFTER ESP's own shutdown
 // finalizer can still perform no-op meta writes. The newly rearmed finalizer
 // must run after each late callback, even when the callback chain grows.
