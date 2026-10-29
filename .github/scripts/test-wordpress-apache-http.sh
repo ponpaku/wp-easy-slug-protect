@@ -11,7 +11,12 @@ fixture_root="$(mktemp -d "$RUNNER_TEMP/esp31-apache-http.XXXXXXXX")"
 container="esp31-http-$GITHUB_RUN_ID-$$"
 started=0
 q01_proxy_pid=0
+q01_wpdb_proxy_pid=0
 cleanup() {
+  if [[ $q01_wpdb_proxy_pid -gt 0 ]]; then
+    kill "$q01_wpdb_proxy_pid" >/dev/null 2>&1 || true
+    wait "$q01_wpdb_proxy_pid" >/dev/null 2>&1 || true
+  fi
   if [[ $q01_proxy_pid -gt 0 ]]; then
     kill "$q01_proxy_pid" >/dev/null 2>&1 || true
     wait "$q01_proxy_pid" >/dev/null 2>&1 || true
@@ -79,6 +84,7 @@ cat > "$fixture_root/q01-mysql-proxy.py" <<'PY'
 import socket
 import socketserver
 import struct
+import sys
 import threading
 
 TARGET = b'ESP_Q01_DROP_ACK'
@@ -147,18 +153,23 @@ class Server(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
 
-with Server(('0.0.0.0', 33307), Handler) as srv:
+with Server(('0.0.0.0', int(sys.argv[1])), Handler) as srv:
     print('Q01_PROXY_LISTENING', flush=True)
     srv.serve_forever()
 PY
-python3 -u "$fixture_root/q01-mysql-proxy.py" > "$fixture_root/q01-proxy.log" 2>&1 &
+python3 -u "$fixture_root/q01-mysql-proxy.py" 33307 > "$fixture_root/q01-proxy.log" 2>&1 &
 q01_proxy_pid=$!
+python3 -u "$fixture_root/q01-mysql-proxy.py" 33308 > "$fixture_root/q01-wpdb-proxy.log" 2>&1 &
+q01_wpdb_proxy_pid=$!
 for _ in $(seq 1 50); do
-  if grep -q Q01_PROXY_LISTENING "$fixture_root/q01-proxy.log"; then break; fi
+  if grep -q Q01_PROXY_LISTENING "$fixture_root/q01-proxy.log" &&
+     grep -q Q01_PROXY_LISTENING "$fixture_root/q01-wpdb-proxy.log"; then break; fi
   sleep 0.1
 done
-if ! grep -q Q01_PROXY_LISTENING "$fixture_root/q01-proxy.log"; then
+if ! grep -q Q01_PROXY_LISTENING "$fixture_root/q01-proxy.log" ||
+   ! grep -q Q01_PROXY_LISTENING "$fixture_root/q01-wpdb-proxy.log"; then
   cat "$fixture_root/q01-proxy.log" >&2
+  cat "$fixture_root/q01-wpdb-proxy.log" >&2
   exit 1
 fi
 
@@ -166,13 +177,17 @@ fi
 if ! timeout --signal=TERM 90s docker exec "$container" env \
   ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
   ESP_Q01_PROXY_HOST=host.docker.internal:33307 \
+  ESP_Q01_WPDB_PROXY_HOST=host.docker.internal:33308 \
   php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-ci.php; then
   echo 'Q01 WordPress/packet-proxy probe failed or timed out' >&2
   cat "$fixture_root/q01-proxy.log" >&2
+  cat "$fixture_root/q01-wpdb-proxy.log" >&2
   exit 1
 fi
 cat "$fixture_root/q01-proxy.log"
+cat "$fixture_root/q01-wpdb-proxy.log"
 grep -q Q01_PROXY_DROPPED_UPDATE_OK "$fixture_root/q01-proxy.log"
+grep -q Q01_PROXY_DROPPED_UPDATE_OK "$fixture_root/q01-wpdb-proxy.log"
 assert_http() {
   local path="$1" expected="$2"
   local status
