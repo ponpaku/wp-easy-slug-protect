@@ -20,6 +20,8 @@ jobs:
           coverage: none
       - name: Lint PHP source files
         run: find . -name '*.php' -print0 | xargs -0 -n1 php -l
+      - name: Lint admin JavaScript
+        run: node --check admin/esp-admin.js
       - name: Test login attempt reservation behavior
         run: php tests/security-rate-limit-test.php
       - name: Test InnoDB and rate limit schema validation
