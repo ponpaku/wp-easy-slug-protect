@@ -50,7 +50,7 @@ final class ESP_Media_Index {
         return (string)get_option(self::READY_OPTION, '0') === '1';
     }
     private static function installed() {
-        return (string)get_option(self::SCHEMA_OPTION, '0') === '2';
+        return (string)get_option(self::SCHEMA_OPTION, '0') === '3';
     }
 
     public static function register() {
@@ -97,7 +97,10 @@ final class ESP_Media_Index {
         if (!is_object($wpdb) || empty($wpdb->prefix)) { return false; }
         // Schema upgrades must never inherit READY from an older generation:
         // its audit did not check deleted owners or retry state.
-        if (!self::installed() && !self::invalidate_global()) { return false; }
+        if (!self::installed()) {
+            update_option(self::READY_OPTION, '0', false);
+            update_option(self::CURSOR_OPTION, 0, false);
+        }
         $files = self::table(self::files_table());
         $state = self::table(self::state_table());
         require_once ABSPATH . 'wp-admin/includes/upgrade.php';
@@ -121,6 +124,7 @@ final class ESP_Media_Index {
             changed_at bigint(20) unsigned NOT NULL DEFAULT 0,
             retry_after bigint(20) unsigned NOT NULL DEFAULT 0,
             failure_count int(11) unsigned NOT NULL DEFAULT 0,
+            audit_cursor bigint(20) unsigned NOT NULL DEFAULT 0,
             PRIMARY KEY  (attachment_id),
             KEY status (status),
             KEY retry_queue (status,pending_count,retry_after,changed_at)
@@ -131,13 +135,17 @@ final class ESP_Media_Index {
         }
         // dbDelta may report a partial upgrade without throwing. Verify
         // the specific columns required by the retry/ownership contract.
-        foreach (['retry_after', 'failure_count'] as $column) {
+        foreach (['retry_after', 'failure_count', 'audit_cursor'] as $column) {
             $row = $wpdb->get_var($wpdb->prepare(
                 "SHOW COLUMNS FROM $state LIKE %s", $column));
             if ($wpdb->last_error !== '' || $row !== $column) { return false; }
         }
-        return update_option(self::SCHEMA_OPTION, '2', false) ||
-            (string)get_option(self::SCHEMA_OPTION) === '2';
+        if ($wpdb->query("INSERT IGNORE INTO $state
+            (attachment_id,status,revision,audit_cursor) VALUES (0,'dirty',1,0)") === false) {
+            return false;
+        }
+        return update_option(self::SCHEMA_OPTION, '3', false) ||
+            (string)get_option(self::SCHEMA_OPTION) === '3';
     }
 
     /** WordPress metadata paths are relative to the uploads root. */
@@ -252,9 +260,11 @@ final class ESP_Media_Index {
         // a second post-ID lookup or trusting an unverified cached permission.
         $sql = $wpdb->prepare("SELECT f.file_path, f.attachment_id, f.generation,
                 f.protected_path_id, s.status, s.pending_count, s.active_generation,
-                p.post_type AS live_post_type, pm.meta_value AS live_protected_path
+                c.status AS coverage_status, p.post_type AS live_post_type,
+                pm.meta_value AS live_protected_path
             FROM $files f
             LEFT JOIN $state s ON s.attachment_id=f.attachment_id
+            LEFT JOIN $state c ON c.attachment_id=0
             LEFT JOIN {$wpdb->posts} p ON p.ID=f.attachment_id
             LEFT JOIN {$wpdb->postmeta} pm ON pm.post_id=f.attachment_id
                 AND pm.meta_key=%s
@@ -269,6 +279,7 @@ final class ESP_Media_Index {
                          $row['protected_path_id'], $row['status'], $row['pending_count'],
                          $row['generation'], $row['active_generation']) ||
                 !array_key_exists('live_protected_path', $row) ||
+                ($row['coverage_status'] ?? null) !== 'ready' ||
                 ($row['live_post_type'] ?? null) !== 'attachment' ||
                 !hash_equals((string)$row['file_path'], $relative) ||
                 !ctype_digit((string)$row['attachment_id']) ||
@@ -335,28 +346,84 @@ final class ESP_Media_Index {
         if (get_post_type((int)$post_id) !== 'attachment') { return $check; }
         if (self::mark_dirty((int)$post_id)) {
             self::track_local((int)$post_id);
-            return null;
+            if (self::reserve_new_paths((int)$post_id, $meta_key, $meta_value)) {
+                return null;
+            }
+            // The reservation failed, so the new path cannot be admitted
+            // under local dirty-state coverage alone.
+            return self::failed_pre_fence();
         }
         return self::failed_pre_fence();
     }
+    /**
+     * Reserve all proposed paths BEFORE WordPress writes the canonical meta.
+     * The dirty state was persisted by guard_meta() first. A prospective
+     * owner row immediately makes every matching old public owner fail closed.
+     * Within a caller-owned transaction the reservation commits atomically
+     * with WordPress metadata; without one it is visible earlier.
+     */
+    private static function reserve_new_paths($id, $key, $value) {
+        global $wpdb;
+        if ($key === self::PROTECTION_META) { return true; }
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT meta_key,meta_value FROM {$wpdb->postmeta}
+             WHERE post_id=%d AND meta_key IN (%s,%s) ORDER BY meta_id ASC",
+            $id, '_wp_attached_file', '_wp_attachment_metadata'), ARRAY_A);
+        if (!is_array($rows) || $wpdb->last_error !== '') { return false; }
+        $attached = null; $metadata = false;
+        foreach ($rows as $row) {
+            if ($row['meta_key'] === '_wp_attached_file') {
+                $attached = $row['meta_value'];
+            } else {
+                $metadata = maybe_unserialize($row['meta_value']);
+            }
+        }
+        if ($key === '_wp_attached_file') { $attached = $value; }
+        if ($key === '_wp_attachment_metadata') {
+            $metadata = is_string($value) ? maybe_unserialize($value) : $value;
+        }
+        // WordPress can write metadata during attachment initialization before
+        // the _wp_attached_file row exists. No safe candidate can be derived,
+        // so the caller must invalidate global coverage or reject the write.
+        $paths = self::enumerate($attached, $metadata);
+        if ($paths === null || !$paths) { return false; }
+        $state = self::table(self::state_table());
+        $revision = $wpdb->get_var($wpdb->prepare(
+            "SELECT revision FROM $state WHERE attachment_id=%d
+             AND status='dirty' AND pending_count>0", $id));
+        if ($wpdb->last_error !== '' || $revision === null) { return false; }
+        $files = self::table(self::files_table());
+        foreach ($paths as $path) {
+            $written = $wpdb->query($wpdb->prepare(
+                "INSERT INTO $files
+                 (path_hash,file_path,attachment_id,generation,protected_path_id)
+                 VALUES (%s,%s,%d,%d,'')",
+                hash('sha256', $path), $path, $id, $revision));
+            if ($written === false || $wpdb->last_error !== '') { return false; }
+        }
+        return true;
+    }
+
     /**
      * Persist global coverage invalidation before admitting a metadata write
      * whose per-attachment pre-fence failed. A direct DB read verifies the
      * stored value (not merely the local WordPress option cache).
      */
+    /** Revoke global coverage and start a NEW audit epoch atomically. */
     private static function invalidate_global() {
         global $wpdb;
+        $state = self::table(self::state_table());
+        $changed = $wpdb->query(
+            "UPDATE $state SET status='dirty',revision=revision+1,
+             audit_cursor=0 WHERE attachment_id=0"
+        );
+        if ($changed !== 1 || $wpdb->last_error !== '') { return false; }
         update_option(self::READY_OPTION, '0', false);
         update_option(self::CURSOR_OPTION, 0, false);
-        if (!isset($wpdb->options)) {
-            return (string)get_option(self::READY_OPTION, '1') === '0';
-        }
-        $value = $wpdb->get_var($wpdb->prepare(
-            "SELECT option_value FROM {$wpdb->options} WHERE option_name=%s",
-            self::READY_OPTION
-        ));
-        return $wpdb->last_error === '' && (string)$value === '0';
+        // The persisted control row, not a cached option, is authoritative.
+        return true;
     }
+
     private static function failed_pre_fence() {
         // In strict mode, do not admit the WordPress write. In compatibility
         // mode only allow it if coverage invalidation was durably verified.
