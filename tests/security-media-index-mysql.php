@@ -446,9 +446,10 @@ try {
         (41,'_wp_attached_file','2026/10/healthy.jpg'),
         (41,'_esp_media_protected_path_id','secret_Z')");
     file_put_contents($uploads . '/2026/10/healthy.jpg', 'healthy-file');
-    esp63_assert(ESP_Media_Index::guard_meta(null,40,'_wp_attached_file','../invalid.jpg')
-        === null, 'F02 invalid attachment enqueued');
-    ESP_Media_Index::on_meta_saved(401,40,'_wp_attached_file','../invalid.jpg');
+    // A broken legacy row is discovered by the independent index scan.
+    // The new strict pre-hook correctly rejects writing such a path.
+    esp63_assert(!ESP_Media_Index::reindex_attachment(40),
+        'F02 invalid attachment discovered and left dirty');
     esp63_assert(ESP_Media_Index::guard_meta(null,41,'_wp_attached_file',
         '2026/10/healthy.jpg') === null, 'F02 healthy attachment enqueued');
     ESP_Media_Index::on_meta_saved(411,41,'_wp_attached_file','2026/10/healthy.jpg');
