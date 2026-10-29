@@ -10,7 +10,12 @@ fi
 fixture_root="$(mktemp -d "$RUNNER_TEMP/esp31-apache-http.XXXXXXXX")"
 container="esp31-http-$GITHUB_RUN_ID-$$"
 started=0
+q01_proxy_pid=0
 cleanup() {
+  if [[ $q01_proxy_pid -gt 0 ]]; then
+    kill "$q01_proxy_pid" >/dev/null 2>&1 || true
+    wait "$q01_proxy_pid" >/dev/null 2>&1 || true
+  fi
   local result=$?
   if [[ $result -ne 0 && $started -eq 1 ]]; then
     docker logs "$container" >&2 || true
@@ -67,9 +72,102 @@ docker exec "$container" grep -q '# BEGIN ESP Media Protection' \
 ESP42_PDF_MANIFEST="$fixture_root/wordpress/wp-content/uploads/.esp42-pdf-fixture.json" \
   python3 tests/wordpress-http-check.py
 
+# Q01: deliberately discard the MySQL OK packet after an UPDATE commits.
+# The packet relay runs on the disposable GitHub Actions host, not production.
+cat > "$fixture_root/q01-mysql-proxy.py" <<'PY'
+#!/usr/bin/env python3
+import socket
+import socketserver
+import struct
+import threading
+
+TARGET = b'ESP_Q01_DROP_ACK'
+lock = threading.Lock()
+dropped = False
+
+def read_exact(sock, count):
+    data = b''
+    while len(data) < count:
+        chunk = sock.recv(count - len(data))
+        if not chunk:
+            raise EOFError('peer closed')
+        data += chunk
+    return data
+
+def read_packet(sock):
+    h = read_exact(sock, 4)
+    return h + read_exact(sock, int.from_bytes(h[:3], 'little'))
+
+class Handler(socketserver.BaseRequestHandler):
+    def handle(self):
+        global dropped
+        server = socket.create_connection(('127.0.0.1', 3306), timeout=10)
+        client = self.request
+        target = threading.Event()
+        finished = threading.Event()
+        def client_to_server():
+            try:
+                while not finished.is_set():
+                    p = read_packet(client)
+                    if len(p) > 5 and p[4] == 3 and TARGET in p:
+                        target.set()
+                        print('Q01_PROXY_TARGET_QUERY_SEEN', flush=True)
+                    server.sendall(p)
+            except (EOFError, OSError):
+                pass
+            finally:
+                finished.set()
+        thread = threading.Thread(target=client_to_server, daemon=True)
+        thread.start()
+        try:
+            while not finished.is_set():
+                p = read_packet(server)
+                if target.is_set() and len(p) > 4 and p[4] == 0:
+                    with lock:
+                        drop = not dropped
+                        if drop:
+                            dropped = True
+                    if drop:
+                        print('Q01_PROXY_DROPPED_UPDATE_OK', flush=True)
+                        client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
+                        break
+                client.sendall(p)
+        except (EOFError, OSError):
+            pass
+        finally:
+            finished.set()
+            for s in (client, server):
+                try:
+                    s.close()
+                except OSError:
+                    pass
+            thread.join(timeout=1)
+
+class Server(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+with Server(('0.0.0.0', 33307), Handler) as srv:
+    print('Q01_PROXY_LISTENING', flush=True)
+    srv.serve_forever()
+PY
+python3 -u "$fixture_root/q01-mysql-proxy.py" > "$fixture_root/q01-proxy.log" 2>&1 &
+q01_proxy_pid=$!
+for _ in $(seq 1 50); do
+  if grep -q Q01_PROXY_LISTENING "$fixture_root/q01-proxy.log"; then break; fi
+  sleep 0.1
+done
+if ! grep -q Q01_PROXY_LISTENING "$fixture_root/q01-proxy.log"; then
+  cat "$fixture_root/q01-proxy.log" >&2
+  exit 1
+fi
+
 # #63: exercise actual WordPress dbDelta/backfill and opt-in strict PHP delivery.
 docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+  ESP_Q01_PROXY_HOST=host.docker.internal:33307 \
   php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-ci.php
+cat "$fixture_root/q01-proxy.log"
+grep -q Q01_PROXY_DROPPED_UPDATE_OK "$fixture_root/q01-proxy.log"
 assert_http() {
   local path="$1" expected="$2"
   local status
