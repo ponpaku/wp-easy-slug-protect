@@ -855,18 +855,18 @@ final class ESP_Media_Index {
             // If the source changed while rebuilding, revision or pending
             // will differ, and the state must stay dirty until another pass.
             $published = $wpdb->query($wpdb->prepare(
-                "UPDATE $state SET status='ready',active_generation=%d,changed_at=%d
+                "UPDATE $state SET status='ready',active_generation=%d,changed_at=%d,
+                 failure_count=0,retry_after=0
                  WHERE attachment_id=%d AND revision=%d
                    AND pending_count=0 AND status='dirty'",
                 $revision, time(), $id, $revision));
             if ($published !== 1) {
                 throw new RuntimeException('stale revision or publish failure');
             }
-            // Cleanup happens AFTER generation switch. A failure leaves
-            // redundant inert rows, not a partially published ownership map.
-            $wpdb->query($wpdb->prepare(
-                "DELETE FROM $files WHERE attachment_id=%d AND generation<%d",
-                $id, $revision));
+            // Authorization has been published. Cleanup failures are not
+            // authorization failures; persist a bounded retry instead of
+            // silently accumulating obsolete generations forever.
+            self::cleanup_obsolete_generations($id, $revision);
             return true;
         } catch (\Throwable $e) {
             // Never undo another plugin's transaction. The committed dirty
@@ -876,6 +876,44 @@ final class ESP_Media_Index {
         } finally {
             $wpdb->get_var($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $lock_name));
         }
+    }
+
+    /**
+     * Cleanup is non-critical for the active generation, but not optional
+     * maintenance. Reuse failure_count/retry_after for a READY cleanup queue;
+     * DIRTY rows use the same fields for rebuild retries.
+     */
+    private static function cleanup_obsolete_generations($id, $generation) {
+        global $wpdb;
+        $state = self::table(self::state_table());
+        $files = self::table(self::files_table());
+        $deleted = $wpdb->query($wpdb->prepare(
+            "DELETE FROM $files WHERE attachment_id=%d AND generation<%d",
+            $id, $generation));
+        if ($deleted === false || $wpdb->last_error !== '') {
+            error_log('ESP: Media index obsolete generation cleanup failed: ' . $id);
+            // If another metadata write has dirtied the attachment, its next
+            // rebuild already cleans obsolete rows; don't mutate its ticket.
+            $flagged = $wpdb->query($wpdb->prepare(
+                "UPDATE $state SET failure_count=1,retry_after=%d
+                 WHERE attachment_id=%d AND active_generation=%d
+                   AND status='ready' AND pending_count=0",
+                time() + self::RETRY_BASE_SECONDS, $id, $generation));
+            if ($flagged === false || $wpdb->last_error !== '') {
+                error_log('ESP: Cannot persist obsolete generation cleanup retry: ' . $id);
+            }
+            return false;
+        }
+        $cleared = $wpdb->query($wpdb->prepare(
+            "UPDATE $state SET failure_count=0,retry_after=0
+             WHERE attachment_id=%d AND active_generation=%d AND status='ready'
+               AND pending_count=0 AND failure_count>0",
+            $id, $generation));
+        if ($cleared === false || $wpdb->last_error !== '') {
+            error_log('ESP: Cannot clear obsolete generation cleanup retry: ' . $id);
+            return false;
+        }
+        return true;
     }
 
     /**
@@ -1123,6 +1161,19 @@ final class ESP_Media_Index {
         // later, but a DB outage or failed orphan purge must halt the cycle.
         if (!self::reconcile_orphans(false)) { return; }
         $state = self::table(self::state_table());
+        // Promptly retry deferred obsolete-generation DELETEs without
+        // rebuilding READY owners or waiting for the next full audit cycle.
+        $cleanup_rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT attachment_id,active_generation FROM $state
+             WHERE attachment_id>0 AND status='ready' AND pending_count=0
+               AND failure_count>0 AND retry_after<=%d
+             ORDER BY changed_at ASC LIMIT %d", time(), self::BATCH_SIZE), ARRAY_A);
+        if (!is_array($cleanup_rows) || $wpdb->last_error !== '') { return; }
+        foreach ($cleanup_rows as $cleanup_row) {
+            self::cleanup_obsolete_generations(
+                (int)$cleanup_row['attachment_id'],
+                (int)$cleanup_row['active_generation']);
+        }
         $dirty_ids = $wpdb->get_col($wpdb->prepare(
             "SELECT attachment_id FROM $state
              WHERE attachment_id>0 AND status='dirty'
