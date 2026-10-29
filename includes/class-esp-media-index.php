@@ -534,6 +534,24 @@ final class ESP_Media_Index {
         // the _wp_attached_file row exists. No safe candidate can be derived,
         // so the caller must invalidate global coverage or reject the write.
         $paths = self::enumerate($attached, $metadata);
+        if ($paths === null && ($key === '_wp_attached_file' ||
+            $key === '_wp_attachment_metadata') &&
+            is_string($attached) && self::valid_path($attached) &&
+            is_array($metadata) && isset($metadata['file']) &&
+            is_string($metadata['file']) && self::valid_path($metadata['file']) &&
+            dirname($attached) !== dirname($metadata['file'])) {
+            // A WordPress move may write _wp_attached_file and metadata.file
+            // in separate operations. This intermediate state must NOT be
+            // published as READY, but both directories can be reserved safely
+            // before permitting the first mutation. All derivative evidence
+            // comes from validated metadata, never filename guessing.
+            $old_side = self::enumerate($attached, false);
+            $meta_side = self::enumerate($metadata['file'], $metadata);
+            if (is_array($old_side) && is_array($meta_side)) {
+                $union = array_fill_keys(array_merge($old_side, $meta_side), true);
+                $paths = count($union) <= self::MAX_PATHS ? array_keys($union) : null;
+            }
+        }
         if ($paths === null || !$paths) { return false; }
         $state = self::table(self::state_table());
         $revision = $wpdb->get_var($wpdb->prepare(
