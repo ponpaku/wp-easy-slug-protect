@@ -666,6 +666,114 @@ try {
     file_put_contents($uploads . '/2026/10/unknown.jpg', 'unregistered');
     esp63_assert(ESP_Media_Index::resolve($uploads . '/2026/10/unknown.jpg')['status']
         === 'unresolved', 'unregistered is not automatically known-public');
+
+    // Throughput experiment, opt-in only on benchmark workflow.
+    // This measures real run_batch()/reindex_attachment(), not the existing
+    // synthetic bulk-copy lookup benchmark. No WordPress/HTTP bootstrap.
+    if (getenv('ESP63_BUILD_BENCH') === '1') {
+        $size = 10000;
+        $base_id = 100000;
+        $seed_start = microtime(true);
+        $seed_posts = []; $seed_meta = [];
+        for ($i = 0; $i < $size; ++$i) {
+            $id = $base_id + $i;
+            $stem = sprintf('benchmark-%06d', $id);
+            $attached = '2026/10/' . $stem . '.jpg';
+            $meta = [
+                'file' => $attached,
+                'sizes' => [
+                    'thumb' => ['file' => $stem . '-150x150.jpg'],
+                    'medium' => ['file' => $stem . '-300x200.webp'],
+                    'large' => ['file' => $stem . '-1024x768.jpg']
+                ],
+                'original_image' => $stem . '-original.jpg'
+            ];
+            $seed_posts[] = "($id,'attachment')";
+            $seed_meta[] = "($id,'_wp_attached_file','$attached')";
+            $serial = $db->real_escape_string(serialize($meta));
+            $seed_meta[] = "($id,'_wp_attachment_metadata','$serial')";
+            if ($i % 8 === 0) {
+                $seed_meta[] = "($id,'_esp_media_protected_path_id','secret_Z')";
+            }
+            if (count($seed_posts) >= 200 || $i === $size - 1) {
+                esp63_sql('INSERT INTO esp63_posts(ID,post_type) VALUES ' .
+                    implode(',', $seed_posts));
+                esp63_sql('INSERT INTO esp63_postmeta(post_id,meta_key,meta_value) VALUES ' .
+                    implode(',', $seed_meta));
+                $seed_posts = []; $seed_meta = [];
+            }
+        }
+        $seed_seconds = microtime(true) - $seed_start;
+        // Begin a fresh audit at the first benchmark ID without rebuilding
+        // fixture attachments 10-61 (they were exercised by security tests).
+        esp63_sql("UPDATE $state SET status='dirty',revision=revision+1,
+            audit_cursor=99999 WHERE attachment_id=0");
+        $options[ESP_Media_Index::READY_OPTION] = '0';
+        $stops = [1000, 5000, 10000];
+        $samples = []; $batches = [];
+        $begin = microtime(true);
+        for ($batch = 1; $batch <= 50; ++$batch) {
+            $start = microtime(true);
+            ESP_Media_Index::run_batch();
+            $elapsed = microtime(true) - $start;
+            $batches[] = $elapsed;
+            $processed = $batch * 200;
+            $expected_cursor = 99999 + $processed;
+            $cursor = (int)$wpdb->get_var("SELECT audit_cursor FROM $state
+                WHERE attachment_id=0");
+            esp63_assert($cursor === $expected_cursor,
+                "bootstrap audit cursor advances at $processed attachments");
+            if (in_array($processed, $stops, true)) {
+                $duration = microtime(true) - $begin;
+                $ready_count = (int)$wpdb->get_var(
+                    "SELECT COUNT(*) FROM $state WHERE attachment_id>=$base_id
+                        AND attachment_id<($base_id+$size) AND status='ready'");
+                $index_count = (int)$wpdb->get_var(
+                    "SELECT COUNT(*) FROM $files WHERE attachment_id>=$base_id
+                        AND attachment_id<($base_id+$size)");
+                esp63_assert($ready_count === $processed &&
+                    $index_count === 5 * $processed,
+                    "bootstrap indexed $processed owners and " .
+                    (5 * $processed) . " file paths");
+                $samples[] = [
+                    'attachments' => $processed,
+                    'indexed_files' => $index_count,
+                    'build_seconds' => round($duration, 3),
+                    'attachments_per_second' => round($processed / max($duration, 0.000001), 3)
+                ];
+                echo 'ESP63_BUILD_SAMPLE ' . json_encode(end($samples),
+                    JSON_UNESCAPED_SLASHES) . "\n";
+            }
+        }
+        // One more pass performs final coverage checks and READY CAS.
+        $final_start = microtime(true);
+        ESP_Media_Index::run_batch();
+        $final_seconds = microtime(true) - $final_start;
+        $coverage = $wpdb->get_var("SELECT status FROM $state WHERE attachment_id=0");
+        esp63_assert($coverage === 'ready', 'bootstrap full coverage becomes READY');
+        sort($batches, SORT_NUMERIC);
+        $p95 = $batches[(int)ceil(count($batches) * .95) - 1];
+        $report = [
+            'measurement' => 'run_batch initial build with real PHP class and MySQL integration stub',
+            'limitations' => 'synthetic metadata; no full WordPress startup, HTTP, concurrency, remote MySQL or production load',
+            'php_version' => PHP_VERSION,
+            'mysql_version' => $db->server_info,
+            'sample_size' => $size,
+            'paths_per_attachment' => 5,
+            'cron_batch_size' => 200,
+            'seed_seconds_excluded' => round($seed_seconds, 3),
+            'batch_p95_seconds' => round($p95, 3),
+            'final_coverage_seconds' => round($final_seconds, 3),
+            'samples' => $samples
+        ];
+        $report_file = getenv('ESP63_BUILD_REPORT') ?: '';
+        if ($report_file !== '' && file_put_contents($report_file,
+            json_encode($report, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES)) === false) {
+            throw new RuntimeException('Cannot write bootstrap benchmark report');
+        }
+        echo 'ESP63_BUILD_REPORT ' . json_encode($report, JSON_UNESCAPED_SLASHES) . "\n";
+    }
+
     echo "Issue 63 production index MySQL tests passed.\n";
 } finally {
     foreach (glob($uploads . '/2026/10/*') as $file) { @unlink($file); }
