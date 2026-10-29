@@ -28,6 +28,9 @@ final class ESP_Media_Index {
     private static $by_mid = [];
     /** Pre-hooks whose metadata mutation did not produce a post-hook (e.g. no-op). */
     private static $local_pending = [];
+    // Once an UPDATE acknowledgment is ambiguous, retrying its decrement
+    // could consume another concurrent writer's pending ticket.
+    private static $ambiguous_pending = [];
     private static $deferred_noop_finalizer_queued = false;
 
     public static function files_table() {
@@ -807,7 +810,7 @@ final class ESP_Media_Index {
     }
     private static function complete_mutation($id) {
         global $wpdb;
-        if ($id <= 0) { return false; }
+        if ($id <= 0 || isset(self::$ambiguous_pending[$id])) { return false; }
         $state = self::table(self::state_table());
         // This is also used for post-hooks where another plugin bypassed the
         // corresponding pre-hook: reindex rather than trusting old data.
@@ -825,7 +828,14 @@ final class ESP_Media_Index {
         // The result is about THIS decrement, not whether other concurrent
         // writers still have pending operations. In particular there is no
         // separate SELECT whose failure could disguise a successful decrement.
-        if ($decremented !== 1 || $wpdb->last_error !== '') { return false; }
+        if ($decremented !== 1 || $wpdb->last_error !== '') {
+            // The server may have committed this UPDATE and lost the reply.
+            // Repeating it is NOT idempotent. Leave the state dirty and
+            // fail closed; durable ticket-level recovery is Q01 follow-up.
+            self::$ambiguous_pending[$id] = true;
+            error_log('ESP: Ambiguous media index pending decrement; no automatic retry for ' . $id);
+            return false;
+        }
         // Never START/COMMIT a transaction inside a WordPress metadata hook.
         // A caller may have an open transaction; the dirty marker participates
         // in that transaction and becomes visible atomically with the metadata.
