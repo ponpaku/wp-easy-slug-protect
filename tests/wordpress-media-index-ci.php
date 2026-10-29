@@ -201,17 +201,17 @@ update_option(ESP_Media_Index::ENABLE_OPTION, '1', false);
 // Review R02: PHP shutdown callbacks registered AFTER ESP's own shutdown
 // finalizer can still perform no-op meta writes. The newly rearmed finalizer
 // must run after each late callback, even when the callback chain grows.
-register_shutdown_function(function () use ($id) {
+register_shutdown_function(function () use ($id, $path) {
     global $wpdb;
     if (update_post_meta($id, ESP_Media_Index::PROTECTION_META, 'path_http') !== false) {
         throw new RuntimeException('R02 expected a no-op in late PHP shutdown A');
     }
-    register_shutdown_function(function () use ($id) {
+    register_shutdown_function(function () use ($id, $path) {
         global $wpdb;
         if (update_post_meta($id, ESP_Media_Index::PROTECTION_META, 'path_http') !== false) {
             throw new RuntimeException('R02 expected a no-op in late PHP shutdown B');
         }
-        register_shutdown_function(function () use ($id) {
+        register_shutdown_function(function () use ($id, $path) {
             global $wpdb;
             $pending = (int)$wpdb->get_var($wpdb->prepare(
                 'SELECT pending_count FROM ' . ESP_Media_Index::state_table() .
@@ -219,7 +219,16 @@ register_shutdown_function(function () use ($id) {
             if ($wpdb->last_error !== '' || $pending !== 0) {
                 throw new RuntimeException('R02 later PHP shutdown callback stranded pending=' . $pending);
             }
-            echo "PASS: R02 late PHP shutdown no-op rearmed finalizers\n";
+            // A late no-op was fenced before WordPress returned false:
+            // once pending is safely retired, an independent worker must
+            // rebuild the DIRTY owner before HTTP access resumes.
+            ESP_Media_Index::run_batch();
+            $indexed = ESP_Media_Index::resolve($path);
+            if ($indexed['status'] !== 'resolved' ||
+                ($indexed['protected_path_id'] ?? null) !== 'path_http') {
+                throw new RuntimeException('R02 later PHP shutdown no-op did not recover on worker batch');
+            }
+            echo "PASS: R02 late PHP shutdown no-op rearmed finalizers and Cron recovery\n";
         });
     });
 });
