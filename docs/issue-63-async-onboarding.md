@@ -136,6 +136,31 @@ WordPressのランタイムREADYと台帳READYは別状態であり、同じ意�
 - この簡素化で、PHP異常終了・SQL応答消失のQ01、管理外ファイルのIssue #43
   が解決したと主張しない。PR #65/mainは変更しない。
 
+## 2026-10-29追加レビュー：計数負荷、DB間ロック、掃除失敗時の復旧
+
+- **R01／Medium：進捗表示のDB負荷**：認可に必要なREADY・カーソル等は
+  都度SQL制御行から取得する一方、`COUNT(*)`による件数集計は
+  15秒の短期transientに保存し、AJAXや管理画面で毎回実行しない。
+  CLIの各バッチは`build_status(false)`で軽い状態判定のみ行い、
+  件数の表示は20バッチに1度に減らす。集計は近似の進捗表示用であり
+  認可・安全判定には利用しない。実WordPressで連続ポーリング時に
+  COUNTが再実行されないことを検証。
+- **R02／Medium：MySQLロック名前空間**：`GET_LOCK()`はMySQLサーバー単位のため、
+  接続先DB名（`$wpdb->dbname`、利用できなければ`SELECT DATABASE()`）、
+  テーブルprefix、必要なら添付IDをハッシュ化してscan/添付単位の
+  両ロック名を生成する。別DB・同prefixの2接続で独立性を実測。
+  DB名が取得できない場合は処理を中断し、既知の共有ロックにフォールバックしない。
+- **R03／Medium：DELETEと再試行記録の両方が失敗**：個々のREADY監査で
+  既存`attachment_id`索引を利用してactiveと旧世代の行を同時に読み、
+  世代不一致を検出する。正本・active世代・前後revisionが一致する時のみ
+  旧世代を`cleanup_obsolete_generations()`で再回収する。
+  正常READY添付の世代やファイル行は書き換えない。
+  DELETEとretryフラグの二重失敗を注入し、次の通常監査で自動回収する試験を追加。
+- **Q01／P0（別途要解決）**：pendingのUPDATEがDB側で成功したのに応答が
+  失われるケースは、非一意なcountの再減算では安全に回復できない。
+  耐障害的なmutation IDと冪等な消費記録などの独立設計・競合試験が必要。
+  今回の小規模改修で解決したとは扱わない。
+
 ## 実測の範囲
 
 [前段の100K初期構築計測](https://github.com/ponpaku/wp-easy-slug-protect/actions/runs/40803014462)
