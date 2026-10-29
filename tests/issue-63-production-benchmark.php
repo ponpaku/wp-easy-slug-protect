@@ -172,6 +172,8 @@ function esp63_seed(mysqli $mysqli, int $size): float {
     esp63_run_sql($mysqli, "INSERT INTO esp63_esp_media_file_state_v1
         (attachment_id,status,revision,active_generation,pending_count,changed_at)
         SELECT ID,'ready',1,1,0,0 FROM esp63_posts");
+    esp63_run_sql($mysqli, "INSERT INTO esp63_esp_media_file_state_v1
+        (attachment_id,status,revision,audit_cursor) VALUES (0,'ready',1,0)");
     return microtime(true) - $start;
 }
 function esp63_percentile(array $values, float $p): float {
@@ -231,6 +233,7 @@ try {
         changed_at BIGINT UNSIGNED NOT NULL DEFAULT 0,
         retry_after BIGINT UNSIGNED NOT NULL DEFAULT 0,
         failure_count INT UNSIGNED NOT NULL DEFAULT 0,
+        audit_cursor BIGINT UNSIGNED NOT NULL DEFAULT 0,
         KEY status (status),
         KEY retry_queue (status,pending_count,retry_after,changed_at)
     ) ENGINE=InnoDB");
