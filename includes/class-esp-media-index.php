@@ -1191,6 +1191,7 @@ class ESP_Media_Index_CLI {
         $start = microtime(true);
         $stalls = 0;
         $previous = null;
+        $cycles = 0;
         while (microtime(true) - $start < $max_seconds) {
             ESP_Media_Index::run_batch();
             $status = ESP_Media_Index::build_status();
@@ -1203,11 +1204,16 @@ class ESP_Media_Index_CLI {
                 ($status['installed'] ? '1' : '0');
             if ($signature === $previous) { ++$stalls; }
             else { $stalls = 0; }
-            if ($stalls >= 3) {
-                \WP_CLI::error('No progress; inspect pending/dirty rows, schema and worker lock');
+            if ($stalls >= 120) {
+                \WP_CLI::error('No progress for approximately 30s; inspect pending/dirty rows, schema and worker lock');
             }
             $previous = $signature;
-            usleep(50000);
+            ++$cycles;
+            if ($cycles % 20 === 0) {
+                \WP_CLI::log(sprintf('scanned=%d/%d cursor=%d dirty=%d',
+                    $status['scanned'], $status['total'], $status['cursor'], $status['dirty']));
+            }
+            usleep($stalls > 0 ? 250000 : 50000);
         }
         \WP_CLI::warning('Time budget exhausted; run again to resume from persisted cursor');
     }
