@@ -671,7 +671,10 @@ try {
     // This measures real run_batch()/reindex_attachment(), not the existing
     // synthetic bulk-copy lookup benchmark. No WordPress/HTTP bootstrap.
     if (getenv('ESP63_BUILD_BENCH') === '1') {
-        $size = 10000;
+        $size = (int)(getenv('ESP63_BUILD_TOTAL') ?: '10000');
+        if ($size < 10000 || $size > 100000 || $size % 200 !== 0) {
+            throw new RuntimeException('Invalid ESP63_BUILD_TOTAL benchmark size');
+        }
         $base_id = 100000;
         $seed_start = microtime(true);
         $seed_posts = []; $seed_meta = [];
@@ -709,10 +712,11 @@ try {
         esp63_sql("UPDATE $state SET status='dirty',revision=revision+1,
             audit_cursor=99999 WHERE attachment_id=0");
         $options[ESP_Media_Index::READY_OPTION] = '0';
-        $stops = [1000, 5000, 10000];
+        $stops = array_values(array_filter([1000, 5000, 10000, 50000, 100000],
+            static function ($checkpoint) use ($size) { return $checkpoint <= $size; }));
         $samples = []; $batches = [];
         $begin = microtime(true);
-        for ($batch = 1; $batch <= 50; ++$batch) {
+        for ($batch = 1; $batch <= (int)($size / 200); ++$batch) {
             $start = microtime(true);
             ESP_Media_Index::run_batch();
             $elapsed = microtime(true) - $start;
