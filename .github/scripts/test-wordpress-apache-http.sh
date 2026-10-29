@@ -163,9 +163,14 @@ if ! grep -q Q01_PROXY_LISTENING "$fixture_root/q01-proxy.log"; then
 fi
 
 # #63: exercise actual WordPress dbDelta/backfill and opt-in strict PHP delivery.
-docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+if ! timeout --signal=TERM 90s docker exec "$container" env \
+  ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
   ESP_Q01_PROXY_HOST=host.docker.internal:33307 \
-  php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-ci.php
+  php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-ci.php; then
+  echo 'Q01 WordPress/packet-proxy probe failed or timed out' >&2
+  cat "$fixture_root/q01-proxy.log" >&2
+  exit 1
+fi
 cat "$fixture_root/q01-proxy.log"
 grep -q Q01_PROXY_DROPPED_UPDATE_OK "$fixture_root/q01-proxy.log"
 assert_http() {
