@@ -87,6 +87,34 @@ WordPressのランタイムREADYと台帳READYは別状態であり、同じ意�
 **CI判定は各変更コミットの結果を参照し、PR #66がDraftの間はPR #65へ
 マージしない。** #43の自動切替条件とQ01は独立したブロッカー。
 
+## 2026-10-29 by-mid更新の追加レビューへの対応（PR #66のみ）
+
+- **新R01／High：サニタイズ後の予約漏れ**
+  `update_metadata_by_mid('post',...)` は `update_post_metadata_by_mid` の
+  prefilterを通過した後で `sanitize_meta()` を呼ぶ。
+  by-mid専用の事前ガードはdirty+pendingの確保に限り、
+  予約はCoreがサニタイズと直列化を終えた **`update_postmeta` action
+  （DB UPDATE直前）** で実行する。サニタイズの二重実行はしない。
+  保存対象が未予約なら `invalidate_global()` をSQLで確定して認可を
+  fail-closedにする。全体失効もできなければ例外でDB UPDATEを阻止する。
+  Apache上の匿名HTTP回帰試験で、公開Aのファイルパスに保護Bの
+  `_wp_attached_file` と `_wp_attachment_metadata` が
+  サニタイズ後衝突する両ケースを検査し、再構築前503、復旧後200を確認する。
+- **新R02／Medium：非添付投稿への誤適用**
+  `guard_by_mid()` と `guard_delete_by_mid()` の両方で
+  `get_post_type($post_id) === 'attachment'` を必要条件とする。
+  実WordPressの通常投稿で両メタキーのby-mid更新・削除を行い、
+  状態行・全体audit epoch・READY・公開画像認可が不変であることを検査する。
+- **新R03：遅いPHP shutdown callback**
+  直前のレビュー対応による動的finalizerを維持。
+  実WordPress／Apacheで通常終了時の回収・再構築・配信復旧を再検証する。
+  プロセス異常終了・SQL応答喪失のQ01は**引き続き未解決**。
+
+なお`update_postmeta`はactionであり、戻り値でDB UPDATEを中止できない。
+そのため、予約失敗時に**全体失効または例外による書込み中断**のいずれかを
+必須とする。この失効は厳格モードでも全体配信を一時停止し得るため、
+運用監視と回復手順が必要。
+
 ## 実測の範囲
 
 [前段の100K初期構築計測](https://github.com/ponpaku/wp-easy-slug-protect/actions/runs/40803014462)
