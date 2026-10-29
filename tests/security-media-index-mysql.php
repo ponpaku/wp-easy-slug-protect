@@ -23,6 +23,7 @@ final class ESP63_DB {
     public $dbname;
     public $before_cleanup = null;
     public $fail_pending_decrement_once = false;
+    public $lose_pending_decrement_ack_once = false;
     private $db;
     public function __construct($db) {
         $this->db = $db;
@@ -44,6 +45,16 @@ final class ESP63_DB {
     }
     public function query($sql) {
         $this->last_error = '';
+        if ($this->lose_pending_decrement_ack_once &&
+            strpos($sql, 'SET pending_count=pending_count-1') !== false) {
+            $this->lose_pending_decrement_ack_once = false;
+            $result = $this->db->query($sql);
+            if ($result === false || $this->db->affected_rows !== 1) {
+                throw new RuntimeException('Injected ACK-loss UPDATE failed before response');
+            }
+            $this->last_error = 'injected lost ACK after successful decrement';
+            return false;
+        }
         if ($this->fail_pending_decrement_once &&
             strpos($sql, 'SET pending_count=pending_count-1') !== false) {
             $this->fail_pending_decrement_once = false;
@@ -1202,6 +1213,42 @@ try {
         }
         echo 'ESP63_BUILD_REPORT ' . json_encode($report, JSON_UNESCAPED_SLASHES) . "\n";
     }
+
+    // Q01 containment: the server applied A's decrement but PHP received
+    // an error. Never execute it again in shutdown or it could consume B's
+    // outstanding ticket. Recovering the stuck owner requires an independent
+    // durable per-mutation record, not a blind counter reset.
+    $ambiguous_id = 740;
+    esp63_sql("INSERT INTO esp63_posts(ID,post_type) VALUES ($ambiguous_id,'attachment')");
+    esp63_sql("INSERT INTO esp63_postmeta(post_id,meta_key,meta_value) VALUES
+        ($ambiguous_id,'_wp_attached_file','2026/10/uncertain-740.jpg'),
+        ($ambiguous_id,'_esp_media_protected_path_id','secret_pending')");
+    esp63_assert(ESP_Media_Index::reindex_attachment($ambiguous_id),
+        'Q01 ACK-loss fixture initially ready');
+    esp63_assert(ESP_Media_Index::guard_meta(null, $ambiguous_id,
+        '_esp_media_protected_path_id','secret_pending') === null &&
+        ESP_Media_Index::guard_meta(null, $ambiguous_id,
+        '_esp_media_protected_path_id','secret_pending') === null,
+        'Q01 two independent pending writers fenced');
+    $wpdb->lose_pending_decrement_ack_once = true;
+    ESP_Media_Index::on_meta_saved(741,$ambiguous_id,
+        '_esp_media_protected_path_id','secret_pending');
+    $remaining_before_shutdown = (int)$wpdb->get_var(
+        "SELECT pending_count FROM $state WHERE attachment_id=$ambiguous_id");
+    esp63_assert($remaining_before_shutdown === 1,
+        'Q01 A decremented in MySQL but acknowledgment was lost');
+    ESP_Media_Index::finish_noop_writes();
+    $remaining_after_shutdown = (int)$wpdb->get_var(
+        "SELECT pending_count FROM $state WHERE attachment_id=$ambiguous_id");
+    esp63_assert($remaining_after_shutdown === 1 &&
+        !ESP_Media_Index::reindex_attachment($ambiguous_id),
+        'Q01 shutdown cannot steal concurrent B pending ticket or publish READY');
+    // This disposable fixture is intentionally not made READY; real
+    // recovery remains an unresolved P0 requiring durable ticket identities.
+    esp63_sql("DELETE FROM $files WHERE attachment_id=$ambiguous_id");
+    esp63_sql("DELETE FROM $state WHERE attachment_id=$ambiguous_id");
+    esp63_sql("DELETE FROM esp63_postmeta WHERE post_id=$ambiguous_id");
+    esp63_sql("DELETE FROM esp63_posts WHERE ID=$ambiguous_id");
 
     echo "Issue 63 production index MySQL tests passed.\n";
 } finally {
