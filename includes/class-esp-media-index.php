@@ -1228,7 +1228,7 @@ final class ESP_Media_Index {
         $cleanup_rows = $wpdb->get_results($wpdb->prepare(
             "SELECT attachment_id,active_generation FROM $state
              WHERE attachment_id>0 AND status='ready' AND pending_count=0
-               AND failure_count>0 AND retry_after<=%d
+               AND failure_count>0 AND retry_after>0 AND retry_after<=%d
              ORDER BY changed_at ASC LIMIT %d", time(), self::BATCH_SIZE), ARRAY_A);
         if (!is_array($cleanup_rows) || $wpdb->last_error !== '') { return; }
         foreach ($cleanup_rows as $cleanup_row) {
