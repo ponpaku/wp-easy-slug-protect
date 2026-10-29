@@ -83,6 +83,16 @@ assert_http() {
 }
 assert_http esp31-protected-150x150.jpg 302
 assert_http esp31-public-150x150.jpg 200
+# The new protected owner is visible as a dirty reservation BEFORE Cron runs.
+# A previously public image at the same path must no longer return 200.
+docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+  ESP_COLLISION_PHASE=prepare \
+  php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-collision-ci.php
+assert_http esp31-public-150x150.jpg 503
+docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+  ESP_COLLISION_PHASE=restore \
+  php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-collision-ci.php
+assert_http esp31-public-150x150.jpg 200
 assert_http esp63-unregistered.jpg 403
 echo 'PASS: issue 63 real WordPress/Apache strict index HTTP smoke suite'
 echo 'PASS: disposable Apache/WordPress media HTTP regression suite'
