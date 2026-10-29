@@ -711,7 +711,7 @@ final class ESP_Media_Index {
             // Cleanup happens AFTER generation switch. A failure leaves
             // redundant inert rows, not a partially published ownership map.
             $wpdb->query($wpdb->prepare(
-                "DELETE FROM $files WHERE attachment_id=%d AND generation<>%d",
+                "DELETE FROM $files WHERE attachment_id=%d AND generation<%d",
                 $id, $revision));
             return true;
         } catch (\Throwable $e) {
