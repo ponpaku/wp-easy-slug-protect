@@ -61,6 +61,32 @@ WordPressのランタイムREADYと台帳READYは別状態であり、同じ意�
 - **P1** 導入直後の警告が保護OFFやindex ON時にも正しい意味になるよう、
   設定に応じて文言を区別する。
 
+## 2026-10-29 PR #65 読取りレビュー R01–R03 への対応
+
+元レビューは PR #65 の `78d492df` を対象としており、下記修正は
+**派生PR #66のみ**に含まれる。PR #65の旧HEADで解決済みと表現しないこと。
+
+- **R01 異なる年月ディレクトリへの移動**：
+  `_wp_attached_file` と `_wp_attachment_metadata.file` の更新順がずれている間、
+  元の添付パスと（妥当性確認した）metadata側のファイル・派生パスを両方予約。
+  中間メタデータはREADY公開しない。両順序についてMySQL回帰テストを追加。
+  不正形式、パス外参照、上限超過などは従来どおり拒否。
+- **R02 後から登録されたPHP shutdown callbackでのno-op**：
+  メタ更新のpre-hookでlocal pendingを取得する時点で、後続PHP shutdown
+  finalizerを動的に登録する。shutdown中に新たなpre-hookが呼ばれた場合も
+  キュー末尾に追記し、後続callbackより後に自分のpendingを回収する。
+  実WordPressのPHP終了時の連鎖callback回帰試験を追加。
+  **異常終了／SQL応答消失のQ01と永続pendingの安全な回復契約は未解決**。
+- **R03 旧世代DELETE失敗**：
+  新世代のREADY公開は維持しつつ、削除失敗をerror_logに記録。
+  READY行の`failure_count>0` と`retry_after`を「旧世代掃除待ち」として使用し、
+  Cron/手動/CLIの次回バッチで再試行する。DELETE復旧後にフラグを解除。
+  正常なready添付を毎回再構築する方式には戻さない。
+  複数回のDELETE失敗と復旧のMySQL回帰試験を追加。
+
+**CI判定は各変更コミットの結果を参照し、PR #66がDraftの間はPR #65へ
+マージしない。** #43の自動切替条件とQ01は独立したブロッカー。
+
 ## 実測の範囲
 
 [前段の100K初期構築計測](https://github.com/ponpaku/wp-easy-slug-protect/actions/runs/40803014462)
