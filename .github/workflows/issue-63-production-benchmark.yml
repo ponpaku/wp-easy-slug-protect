@@ -52,6 +52,21 @@ jobs:
           echo '\`\`\`json' >> "$GITHUB_STEP_SUMMARY"
           cat issue-63-production-benchmark.json >> "$GITHUB_STEP_SUMMARY"
           echo '\`\`\`' >> "$GITHUB_STEP_SUMMARY"
+      - name: Measure real run_batch initial build at 1K, 5K and 10K (MySQL)
+        env:
+          ESP_TEST_DB_HOST: 127.0.0.1
+          ESP_TEST_DB_USER: root
+          ESP_TEST_DB_PASSWORD: test-password
+          ESP_TEST_DB_NAME: esp_test
+          ESP63_BUILD_BENCH: '1'
+          ESP63_BUILD_REPORT: issue-63-build-benchmark.json
+        run: |
+          php tests/security-media-index-mysql.php | tee issue-63-build-benchmark.log
+          echo '## Issue #63 initial build with real run_batch()' >> "$GITHUB_STEP_SUMMARY"
+          echo '1K/5K/10K attachment corpus; five file paths each. Direct MySQL stub with real class; NOT production WordPress/HTTP or 100K measurement.' >> "$GITHUB_STEP_SUMMARY"
+          echo '~~~json' >> "$GITHUB_STEP_SUMMARY"
+          cat issue-63-build-benchmark.json >> "$GITHUB_STEP_SUMMARY"
+          echo '~~~' >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -59,5 +74,7 @@ jobs:
           path: |
             issue-63-production-benchmark.json
             issue-63-production-benchmark.log
+            issue-63-build-benchmark.json
+            issue-63-build-benchmark.log
           if-no-files-found: warn
           retention-days: 30
