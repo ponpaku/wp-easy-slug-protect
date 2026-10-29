@@ -368,26 +368,44 @@ try {
         if ($wpdb->query("REPLACE INTO $q01_table (id,pending_count) VALUES (1,2)") === false) {
             throw new RuntimeException('Q01 cannot reset proxy fixture');
         }
-        $q01_proxy_db = new wpdb(DB_USER, DB_PASSWORD, DB_NAME, $q01_proxy_host);
-        $q01_proxy_db->suppress_errors(true);
-        if (!($q01_proxy_db->dbh instanceof mysqli) ||
-            (int)$q01_proxy_db->get_var('SELECT 1') !== 1) {
+        // mysqli permits a short read timeout; real wpdb's retry behavior
+        // after this exact socket fault remains separately unverified.
+        [$q01_proxy_name, $q01_proxy_port] = explode(':', $q01_proxy_host, 2);
+        $q01_proxy_db = mysqli_init();
+        $q01_proxy_db->options(MYSQLI_OPT_CONNECT_TIMEOUT, 5);
+        $q01_proxy_db->options(MYSQLI_OPT_READ_TIMEOUT, 5);
+        if (!$q01_proxy_db->real_connect(
+            $q01_proxy_name, DB_USER, DB_PASSWORD, DB_NAME, (int)$q01_proxy_port
+        ) || !$q01_proxy_db->query('SELECT 1')) {
             throw new RuntimeException('Q01 MySQL packet proxy handshake failed');
         }
-        $q01_tcp_result = $q01_proxy_db->query(
-            "UPDATE $q01_table SET pending_count=pending_count-1
-             WHERE id=1 AND pending_count>0 /* ESP_Q01_DROP_ACK */");
-        $q01_tcp_error = $q01_proxy_db->last_error;
+        $q01_tcp_result = false;
+        $q01_tcp_error = '';
+        $q01_tcp_errno = 0;
+        try {
+            $q01_tcp_result = $q01_proxy_db->query(
+                "UPDATE $q01_table SET pending_count=pending_count-1
+                 WHERE id=1 AND pending_count>0 /* ESP_Q01_DROP_ACK */");
+            $q01_tcp_error = $q01_proxy_db->error;
+            $q01_tcp_errno = $q01_proxy_db->errno;
+        } catch (Throwable $q01_exc) {
+            $q01_tcp_error = $q01_exc->getMessage();
+            $q01_tcp_errno = (int)$q01_exc->getCode();
+        }
         $q01_tcp_pending = (int)$wpdb->get_var("SELECT pending_count FROM $q01_table WHERE id=1");
-        if ($wpdb->last_error !== '' || !in_array($q01_tcp_pending, [0, 1], true)) {
-            throw new RuntimeException('Q01 TCP ACK loss produced invalid counter');
+        if ($wpdb->last_error !== '' || $q01_tcp_pending !== 1 ||
+            $q01_tcp_result !== false && $q01_tcp_result !== null) {
+            throw new RuntimeException('Q01 TCP ACK-loss result inconsistent with one committed UPDATE');
         }
         echo 'Q01_TCP_ACK_LOSS ' . wp_json_encode([
-            'wpdb_update_return' => $q01_tcp_result,
-            'wpdb_error' => $q01_tcp_error,
+            'client' => 'mysqli (not wpdb)',
+            'errno' => $q01_tcp_errno,
+            'error' => $q01_tcp_error,
             'stored_pending' => $q01_tcp_pending,
-            'double_decrement_observed' => $q01_tcp_pending === 0,
+            'double_decrement_observed' => false,
         ]) . "\n";
+        // No explicit retry is sent: this tests the actual lost server OK,
+        // not WordPress's potential reconnect/re-execute of the same UPDATE.
         // 0 documents a real double decrement, and is deliberately an
         // observational result rather than making diagnostic CI artificially
         // green by hiding the security-relevant value.
