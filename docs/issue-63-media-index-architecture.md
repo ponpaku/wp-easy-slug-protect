@@ -12,7 +12,8 @@ WordPressの正本を `_wp_attached_file`・`_wp_attachment_metadata`・
   候補行のパスをPHPの `hash_equals()` で完全一致確認。
 - `{prefix}esp_media_file_state_v1`：添付単位の `dirty/ready`、
   `pending_count`、`revision`、`active_generation`、更新時刻、
-  `retry_after`・`failure_count`。
+  `retry_after`・`failure_count`。添付ID `0` を予約した制御行のみ
+  `status`を全体READY、`revision`を監査世代、`audit_cursor`を監査位置に使う。
   更新中の旧世代・新世代のどちらも公開判断に使わない。
 - `resolve()`：`resolved(attachment_id, protected_path_id)`／
   `unresolved`／`ambiguous`／`error`。
@@ -23,7 +24,9 @@ WordPressの正本を `_wp_attached_file`・`_wp_attachment_metadata`・
   メディアレスポンスを共有キャッシュしてはならない。
   なお、通常PHP配信では専用索引を検索する**同じSQL文**でWordPressの
   保護メタをLEFT JOINし、コピー済み保護IDと不一致・重複なら503として拒否する。
-  （DBへの往復は1回。索引行だけを権限の絶対的正本にはしない。）
+  さらに同一SQL内の全体制御行が `ready` であることも照合する。
+  （DBへの往復は1回。索引行やWordPressのREADYオプションキャッシュだけを
+  権限の絶対的正本にはしない。）
 - 高速ゲート #37 は索引クラスをHTTPから呼ばない。別途生成・検証する
   認可スナップショットの設計が必要。現段階でゲート自体は変更しない。
 
@@ -40,7 +43,22 @@ add/update/deleteのガードを分離する。失効のDB書込みが失敗し�
 `pending_count` の変更は同じトランザクションに参加する。ROLLBACKで
 一緒に戻り、COMMITで一緒に可視化される。更新後フックは
 pendingを減らすだけで、同期的に`ready`には戻さない。
-no-op更新で後フックが来ない場合は、同じリクエストの終了時にpendingを処理する。
+no-op更新で後フックが来ない場合は、WordPress `shutdown`の最終優先度と
+後続PHP shutdownコールバックでpendingを処理する。
+SQL減算が成功した場合にのみローカルの完了追跡を消し、
+他更新のpendingがまだ残っていることと、今回の減算失敗を区別する。
+DB接続喪失など結果不明の書込みには二重減算の危険があるため、
+自動的に `pending=0` に補正せず、長期残存は診断対象とする。
+
+**新規所有パスの事前予約**：`_wp_attached_file`／`_wp_attachment_metadata`
+の更新前に、提案された正本からファイルパスを列挙し、添付のdirty化の後に
+同じファイル索引へ未確定世代の所有者行を挿入する。
+既存の公開所有者と競合すると、そのパスは再構築完了までエラーになる。
+WordPressの呼出元にトランザクションがあれば正本と予約行は同じCOMMITに参加する。
+予約不能な更新は厳格モードでは拒否する。互換モードで許可する場合は、
+先に全体READYを取り消して監査世代を進める。
+ファイル列挙は#42に合わせ、トップレベル`file`のない非PDFの
+派生`sizes`から所有関係を確定しない。PDFのみ既存の例外を認める。
 
 独立Cronワーカーが、コミット済み `dirty, pending=0` を優先して処理する。
 再構築は1添付につき名前付きDBロックで直列化し、次を実施する。
@@ -88,7 +106,12 @@ no-op更新で後フックが来ない場合は、同じリクエストの終了
   状態行なしのファイル行が残っていないことが必要。
   すでに`READY=1`であれば、個別添付の`dirty`は**その添付だけ503**とし、
   正常な添付は配信可能に保つ。所有者不足・孤立状態など全体の帰属範囲が
-  不明な場合に限りREADYを取り消す。schema v1→v2移行でも全体失効・再監査を行う。
+  不明な場合に限りREADYを取り消す。schema v1/v2→v3移行でも
+  全体失効・再監査を行う。
+- **監査世代のCAS**：全体失効時に制御行の`revision`を進め
+  `audit_cursor=0, status=dirty`にする。Cronは読み取った世代・カーソルに
+  一致する場合のみカーソルを前進／READYを公開できる。
+  途中で別接続が全体失効した場合、古いCronのCASは成立しない。
 
 個別のデータエラーは他の添付と切り離し、DB全体の障害や孤立行の回収失敗では
 バッチを中断する。長時間残るpendingは自動的に公開せず、管理者の点検を要する。
@@ -110,7 +133,7 @@ wp option get esp_media_index_v1_ready
 wp option get esp_media_index_v1_cursor
 ```
 
-`schema=2, ready=1` は**初期照合を完了したこと**を意味し、
+`schema=3, ready=1` は**初期照合を完了したこと**を意味し、
 現在のDB・uploadsの任意変更まで完全に追跡できている証明ではない。
 
 ステージングで厳格モードと既存URLの回帰検証を行う場合：
