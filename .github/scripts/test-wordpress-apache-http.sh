@@ -77,6 +77,36 @@ docker exec "$container" grep -q '# BEGIN ESP Media Protection' \
 ESP42_PDF_MANIFEST="$fixture_root/wordpress/wp-content/uploads/.esp42-pdf-fixture.json" \
   python3 tests/wordpress-http-check.py
 
+# Test index bootstrap, lock contention, AJAX capabilities/nonce, and WP-CLI.
+for phase in bootstrap cron-lock; do
+  docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+    ESP_INDEX_DRIVER_PHASE="$phase" \
+    php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-drivers-ci.php
+done
+denied="$(docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+    ESP_INDEX_DRIVER_PHASE=ajax-denied \
+    php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-drivers-ci.php)"
+printf '%s' "$denied" | grep -q '"success":false'
+printf '%s' "$denied" | grep -q '"Forbidden"'
+bad_nonce="$(docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+    ESP_INDEX_DRIVER_PHASE=ajax-bad-nonce \
+    php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-drivers-ci.php)"
+[[ "$bad_nonce" == "-1" ]]
+allowed="$(docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+    ESP_INDEX_DRIVER_PHASE=ajax-allowed \
+    php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-drivers-ci.php)"
+printf '%s' "$allowed" | python3 -c 'import json,sys; a=json.load(sys.stdin); assert a["success"] is True and a["data"]["installed"] is True and a["data"]["enabled"] is False, a'
+echo "PASS: real registered admin AJAX callback, capability, nonce and bounded slice"
+
+# Restart via a different PHP/WordPress entrypoint: CLI sees persisted progress.
+docker exec "$container" php /opt/wp-cli.phar --allow-root --path=/var/www/html \
+    esp media-index status | python3 -c 'import json,sys; x=json.load(sys.stdin); assert x["installed"] is True and x["enabled"] is False, x'
+docker exec "$container" php /opt/wp-cli.phar --allow-root --path=/var/www/html \
+    esp media-index build --max-seconds=15
+docker exec "$container" php /opt/wp-cli.phar --allow-root --path=/var/www/html \
+    esp media-index status | python3 -c 'import json,sys; x=json.load(sys.stdin); assert x["installed"] is True and x["ready"] is True and x["enabled"] is False, x'
+echo "PASS: real WP-CLI status/build resumes AJAX work and preserves strict OFF"
+
 # Q01: deliberately discard the MySQL OK packet after an UPDATE commits.
 # The packet relay runs on the disposable GitHub Actions host, not production.
 cat > "$fixture_root/q01-mysql-proxy.py" <<'PY'
