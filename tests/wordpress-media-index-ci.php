@@ -359,6 +359,39 @@ try {
         'stored_pending' => $q01_actual_pending,
         'error_class' => 'SQLSTATE 45000 (not network ACK loss)',
     ]) . "\n";
+    // The optional packet relay forwards an UPDATE to real MySQL, receives
+    // the server's successful OK response, then discards it and closes the
+    // client socket. Observe actual persisted state through an independent
+    // direct wpdb connection. This exercises the real Core reconnect path.
+    $q01_proxy_host = getenv('ESP_Q01_PROXY_HOST');
+    if ($q01_proxy_host) {
+        if ($wpdb->query("REPLACE INTO $q01_table (id,pending_count) VALUES (1,2)") === false) {
+            throw new RuntimeException('Q01 cannot reset proxy fixture');
+        }
+        $q01_proxy_db = new wpdb(DB_USER, DB_PASSWORD, DB_NAME, $q01_proxy_host);
+        $q01_proxy_db->suppress_errors(true);
+        if (!($q01_proxy_db->dbh instanceof mysqli) ||
+            (int)$q01_proxy_db->get_var('SELECT 1') !== 1) {
+            throw new RuntimeException('Q01 MySQL packet proxy handshake failed');
+        }
+        $q01_tcp_result = $q01_proxy_db->query(
+            "UPDATE $q01_table SET pending_count=pending_count-1
+             WHERE id=1 AND pending_count>0 /* ESP_Q01_DROP_ACK */");
+        $q01_tcp_error = $q01_proxy_db->last_error;
+        $q01_tcp_pending = (int)$wpdb->get_var("SELECT pending_count FROM $q01_table WHERE id=1");
+        if ($wpdb->last_error !== '' || !in_array($q01_tcp_pending, [0, 1], true)) {
+            throw new RuntimeException('Q01 TCP ACK loss produced invalid counter');
+        }
+        echo 'Q01_TCP_ACK_LOSS ' . wp_json_encode([
+            'wpdb_update_return' => $q01_tcp_result,
+            'wpdb_error' => $q01_tcp_error,
+            'stored_pending' => $q01_tcp_pending,
+            'double_decrement_observed' => $q01_tcp_pending === 0,
+        ]) . "\n";
+        // 0 documents a real double decrement, and is deliberately an
+        // observational result rather than making diagnostic CI artificially
+        // green by hiding the security-relevant value.
+    }
     echo "PASS: Q01 real WordPress wpdb / MySQL diagnostic (Core retry, post-write failure)\n";
 } finally {
     $wpdb->query("DROP PROCEDURE IF EXISTS $q01_procedure");
