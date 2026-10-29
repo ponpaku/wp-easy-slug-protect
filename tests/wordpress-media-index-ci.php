@@ -244,6 +244,35 @@ update_option(ESP_Media_Index::ENABLE_OPTION, '1', false);
 // Keep strict mode on for the following real Apache curl checks.
 update_option(ESP_Media_Index::ENABLE_OPTION, '1', false);
 
+// Admin guidance must also be visible when global READY remains true but
+// individual owners await a Cron rebuild. This is a transient/no-op fixture;
+// a persistent inconsistent attachment uses the same dirty status indicator.
+if (!ESP_Media_Index::ready()) {
+    throw new RuntimeException('Cannot test dirty admin notice without READY coverage');
+}
+wp_set_current_user(1);
+if (!current_user_can('manage_options')) {
+    throw new RuntimeException('Disposable WP test requires admin user 1');
+}
+if (update_post_meta($id, ESP_Media_Index::PROTECTION_META, 'path_http') !== false) {
+    throw new RuntimeException('Admin notice test expected no-op mutation');
+}
+$dirty_notice_status = ESP_Media_Index::build_status();
+ob_start();
+ESP_Media_Index::render_bootstrap_notice();
+$dirty_notice_html = ob_get_clean();
+if ($dirty_notice_status['dirty'] < 1 ||
+    strpos($dirty_notice_html, '再構築待ち') === false) {
+    throw new RuntimeException('Admin did not receive media index rebuild notice');
+}
+ESP_Media_Index::finish_noop_writes();
+ESP_Media_Index::run_batch();
+if (ESP_Media_Index::resolve($path)['status'] !== 'resolved') {
+    throw new RuntimeException('Cron failed to recover admin notice fixture');
+}
+wp_set_current_user(0);
+echo "PASS: admin notice shows unresolved media index work and Cron restores it\\n";
+
 // Review R02: PHP shutdown callbacks registered AFTER ESP's own shutdown
 // finalizer can still perform no-op meta writes. The newly rearmed finalizer
 // must run after each late callback, even when the callback chain grows.
