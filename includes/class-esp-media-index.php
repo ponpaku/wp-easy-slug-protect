@@ -980,6 +980,84 @@ final class ESP_Media_Index {
         return true;
     }
 
+
+    /**
+     * Read-only audit of a ready attachment against WordPress canonical meta
+     * AND the actual active index rows. Cached fingerprints alone are unsafe:
+     * silently missing index rows must not pass verification.
+     *
+     * true: identical (leave ready generation untouched).
+     * false: mismatch (reindex must first fence dirty).
+     * null: DB error; stop this scan rather than publish READY.
+     */
+    private static function verify_ready_attachment($id) {
+        global $wpdb;
+        $state = self::table(self::state_table());
+        $files = self::table(self::files_table());
+        $before = $wpdb->get_row($wpdb->prepare(
+            "SELECT status,revision,pending_count,active_generation FROM $state
+             WHERE attachment_id=%d", $id), ARRAY_A);
+        if ($wpdb->last_error !== '') { return null; }
+        if (!$before || $before['status'] !== 'ready' ||
+            (int)$before['pending_count'] !== 0 ||
+            (int)$before['active_generation'] === 0) { return false; }
+
+        $type = $wpdb->get_var($wpdb->prepare(
+            "SELECT post_type FROM {$wpdb->posts} WHERE ID=%d", $id));
+        if ($wpdb->last_error !== '') { return null; }
+        if ($type !== 'attachment') { return false; }
+
+        $meta_rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT meta_key,meta_value FROM {$wpdb->postmeta}
+             WHERE post_id=%d AND meta_key IN (%s,%s,%s)
+             ORDER BY meta_id ASC",
+            $id, '_wp_attached_file', '_wp_attachment_metadata',
+            self::PROTECTION_META), ARRAY_A);
+        if (!is_array($meta_rows) || $wpdb->last_error !== '') { return null; }
+        $seen = [];
+        $attached = null;
+        $meta = false;
+        $protection = '';
+        foreach ($meta_rows as $row) {
+            if (isset($seen[$row['meta_key']])) { return false; }
+            $seen[$row['meta_key']] = true;
+            if ($row['meta_key'] === '_wp_attached_file') {
+                $attached = $row['meta_value'];
+            } elseif ($row['meta_key'] === '_wp_attachment_metadata') {
+                $meta = maybe_unserialize($row['meta_value']);
+            } elseif ($row['meta_key'] === self::PROTECTION_META) {
+                $protection = $row['meta_value'];
+            }
+        }
+        if (!is_string($attached) || !self::valid_path($attached) ||
+            !is_string($protection) || strlen($protection) > 191) { return false; }
+        $paths = self::enumerate($attached, $meta);
+        if (!is_array($paths) || !$paths) { return false; }
+        $active = (int)$before['active_generation'];
+        $index_rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT path_hash,file_path,generation,protected_path_id FROM $files
+             WHERE attachment_id=%d AND generation=%d", $id, $active), ARRAY_A);
+        if (!is_array($index_rows) || $wpdb->last_error !== '') { return null; }
+        if (count($index_rows) !== count($paths)) { return false; }
+        $expected = array_fill_keys($paths, true);
+        foreach ($index_rows as $row) {
+            $path = $row['file_path'];
+            if (!is_string($path) || !isset($expected[$path]) ||
+                $row['path_hash'] !== hash('sha256', $path) ||
+                $row['protected_path_id'] !== $protection) { return false; }
+            unset($expected[$path]);
+        }
+        if ($expected) { return false; }
+        // A guarded WordPress mutation may have changed the state between
+        // reads. Never use a mismatched snapshot as an affirmative audit.
+        $after = $wpdb->get_row($wpdb->prepare(
+            "SELECT status,revision,pending_count,active_generation FROM $state
+             WHERE attachment_id=%d", $id), ARRAY_A);
+        if (!is_array($after) || $wpdb->last_error !== '') { return null; }
+        return $before === $after && $after['status'] === 'ready' &&
+            (int)$after['pending_count'] === 0;
+    }
+
     /** Bounded incremental backfill and continuous audit; never HTTP path. */
     public static function run_batch() {
         global $wpdb;
@@ -1057,6 +1135,12 @@ final class ESP_Media_Index {
                 ($current['status'] === 'dirty' &&
                  (int)$current['retry_after'] > time()))) {
                 continue;
+            }
+            if ($current && $current['status'] === 'ready' &&
+                (int)$current['pending_count'] === 0) {
+                $valid = self::verify_ready_attachment($id);
+                if ($valid === null) { return; }
+                if ($valid === true) { continue; }
             }
             if (!self::rebuild_in_batch($id)) { return; }
         }
