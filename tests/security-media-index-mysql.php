@@ -256,7 +256,7 @@ try {
     esp63_assert(ESP_Media_Index::resolve($uploads . '/2026/10/cat-150x150.jpg')['status']
         === 'error', 'old generation still blocks during rebuild');
     $stage_generation = (int)$wpdb->get_var("SELECT revision FROM $state WHERE attachment_id=11");
-    esp63_sql("INSERT INTO $files (path_hash,file_path,attachment_id,generation,protected_path_id)
+    esp63_sql("INSERT IGNORE INTO $files (path_hash,file_path,attachment_id,generation,protected_path_id)
         VALUES ('" . hash('sha256', '2026/10/cat-150x150.jpg') . "',
                 '2026/10/cat-150x150.jpg',11,$stage_generation,'')");
     esp63_assert(ESP_Media_Index::resolve($uploads . '/2026/10/cat-150x150.jpg')['status']
