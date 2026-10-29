@@ -663,25 +663,24 @@ try {
     esp63_assert($options[ESP_Media_Index::READY_OPTION] === '1',
         'R03 fresh audit epoch eventually republishes coverage');
 
-    // R02/R03 pending completion: an injected SQL error must retain the
-    // local ticket, and retry must not consume another writer's ticket.
+    // Ordinary concurrent completions each retire exactly one count.
+    // Unacknowledged/ambiguous responses are a separate fail-closed
+    // scenario at the end of this test, not a recoverable blind retry.
     esp63_assert(ESP_Media_Index::guard_meta(null,50,
         '_esp_media_protected_path_id','') === null, 'pending writer A');
     esp63_assert(ESP_Media_Index::guard_meta(null,50,
         '_esp_media_protected_path_id','') === null, 'pending writer B');
-    $wpdb->fail_pending_decrement_once = true;
+    esp63_assert((int)$wpdb->get_var("SELECT pending_count FROM $state
+        WHERE attachment_id=50") === 2, 'two pending tickets recorded');
     ESP_Media_Index::on_meta_saved(502,50,'_esp_media_protected_path_id','');
     esp63_assert((int)$wpdb->get_var("SELECT pending_count FROM $state
-        WHERE attachment_id=50") === 2,
-        'failed decrement does not consume either pending ticket');
-    ESP_Media_Index::on_meta_saved(503,50,'_esp_media_protected_path_id','');
-    esp63_assert((int)$wpdb->get_var("SELECT pending_count FROM $state
         WHERE attachment_id=50") === 1,
-        'successful concurrent completion decrements exactly one ticket');
+        'first normal completion preserves second writer ticket');
+    ESP_Media_Index::on_meta_saved(503,50,'_esp_media_protected_path_id','');
     ESP_Media_Index::finish_noop_writes();
     esp63_assert((int)$wpdb->get_var("SELECT pending_count FROM $state
         WHERE attachment_id=50") === 0,
-        'late completion retries only the remaining local ticket');
+        'both acknowledged completions retire exactly their tickets');
     esp63_assert(ESP_Media_Index::reindex_attachment(50),
         'R03 recovered attachment returns to READY');
 
