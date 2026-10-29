@@ -585,7 +585,7 @@ try {
             $GLOBALS['wpdb'] = $original_wpdb;
         }
     };
-    esp63_assert(ESP_Media_Index::reindex_attachment(60),
+    esp63_assert(ESP_Media_Index::reindex_attachment(61),
         'R01 worker publishes then cleans older generation');
     $reservation = (int)$wpdb->get_var($wpdb->prepare(
         "SELECT COUNT(*) FROM $files WHERE attachment_id=61 AND
