@@ -19,6 +19,7 @@ final class ESP63_DB {
     public $dbh;
     public $fail_state_write = false;
     public $fail_cleanup = false;
+    public $fail_pending_decrement_once = false;
     private $db;
     public function __construct($db) { $this->db = $db; $this->dbh = $db; }
     public function esc_like($str) { return addcslashes($str, '_%\\'); }
@@ -36,6 +37,12 @@ final class ESP63_DB {
     }
     public function query($sql) {
         $this->last_error = '';
+        if ($this->fail_pending_decrement_once &&
+            strpos($sql, 'SET pending_count=pending_count-1') !== false) {
+            $this->fail_pending_decrement_once = false;
+            $this->last_error = 'injected pending completion failure';
+            return false;
+        }
         if ($this->fail_state_write &&
             strpos($sql, 'INSERT INTO esp63_esp_media_file_state_v1') !== false) {
             $this->last_error = 'injected index state failure';
@@ -483,6 +490,92 @@ try {
         ESP_Media_Index::resolve($uploads . '/2026/10/fixed.jpg')['status']
           === 'resolved',
         'F02 repaired attachment eventually restores complete coverage');
+
+    // Ownership evidence must match the #42 Resolver's PDF-only exception.
+    esp63_assert(ESP_Media_Index::enumerate('2026/10/nonpdf.jpg',
+        ['sizes'=>['thumb'=>['file'=>'other-file.jpg']]]) === null,
+        'R02 no non-PDF derivatives without top-level file');
+    esp63_assert(ESP_Media_Index::enumerate('2026/10/pdf.pdf',
+        ['sizes'=>['full'=>['file'=>'pdf-pdf.jpg']]]) !== null,
+        'R02 PDF exception remains supported');
+
+    // R01: NEW protected owner must block an already READY/public owner
+    // before WordPress commits metadata and before the Cron reindexes it.
+    esp63_sql("INSERT INTO esp63_posts (ID,post_type) VALUES
+        (50,'attachment'),(51,'attachment')");
+    esp63_sql("INSERT INTO esp63_postmeta(post_id,meta_key,meta_value) VALUES
+        (50,'_wp_attached_file','2026/10/shared.jpg'),
+        (51,'_wp_attached_file','2026/10/protected-base.jpg'),
+        (51,'_esp_media_protected_path_id','secret_Z')");
+    file_put_contents($uploads . '/2026/10/shared.jpg', 'overlap');
+    file_put_contents($uploads . '/2026/10/protected-base.jpg', 'protected');
+    esp63_assert(ESP_Media_Index::reindex_attachment(50) &&
+        ESP_Media_Index::reindex_attachment(51), 'R01 initial owners indexed');
+    esp63_assert(ESP_Media_Index::resolve($uploads . '/2026/10/shared.jpg')['status']
+        === 'resolved', 'R01 public owner initially accessible');
+    $new_metadata = ['file'=>'2026/10/protected-base.jpg',
+        'sizes'=>['share'=>['file'=>'shared.jpg']]];
+    esp63_assert(ESP_Media_Index::guard_meta(null,51,
+        '_wp_attachment_metadata',$new_metadata) === null,
+        'R01 prospective ownership reserved BEFORE metadata write');
+    esp63_assert(ESP_Media_Index::resolve($uploads . '/2026/10/shared.jpg')['status']
+        === 'error', 'R01 overlapping public path blocked before commit');
+    $escaped_new = $db->real_escape_string(serialize($new_metadata));
+    esp63_sql("INSERT INTO esp63_postmeta(post_id,meta_key,meta_value) VALUES
+        (51,'_wp_attachment_metadata','$escaped_new')");
+    ESP_Media_Index::on_meta_saved(501,51,'_wp_attachment_metadata',$new_metadata);
+    esp63_assert(ESP_Media_Index::resolve($uploads . '/2026/10/shared.jpg')['status']
+        === 'error', 'R01 new owner remains a blocker before worker runs');
+    esp63_assert(ESP_Media_Index::reindex_attachment(51), 'R01 worker publishes new owner');
+    esp63_assert(ESP_Media_Index::resolve($uploads . '/2026/10/shared.jpg')['status']
+        === 'ambiguous', 'R01 committed overlap is never known public');
+
+    // R03: an earlier audit worker must not overwrite the cursor of an
+    // invalidation occurring on another MySQL connection.
+    $before = $wpdb->get_row("SELECT revision,audit_cursor FROM $state
+        WHERE attachment_id=0");
+    $epoch_peer = new mysqli(
+        getenv('ESP_TEST_DB_HOST') ?: '127.0.0.1',
+        getenv('ESP_TEST_DB_USER') ?: 'root',
+        getenv('ESP_TEST_DB_PASSWORD') ?: '',
+        getenv('ESP_TEST_DB_NAME') ?: 'esp_test'
+    );
+    $epoch_peer->query("UPDATE $state SET revision=revision+1,status='dirty',
+        audit_cursor=0 WHERE attachment_id=0");
+    $options[ESP_Media_Index::READY_OPTION] = '0';
+    $stale = $wpdb->query($wpdb->prepare("UPDATE $state SET audit_cursor=%d
+        WHERE attachment_id=0 AND revision=%d AND audit_cursor=%d",
+        999, (int)$before['revision'], (int)$before['audit_cursor']));
+    esp63_assert($stale === 0 &&
+        (int)$wpdb->get_var("SELECT audit_cursor FROM $state WHERE attachment_id=0") === 0,
+        'R03 obsolete Cron cannot advance cursor after another-connection invalidate');
+    $epoch_peer->close();
+    ESP_Media_Index::run_batch();
+    ESP_Media_Index::run_batch();
+    esp63_assert($options[ESP_Media_Index::READY_OPTION] === '1',
+        'R03 fresh audit epoch eventually republishes coverage');
+
+    // R02/R03 pending completion: an injected SQL error must retain the
+    // local ticket, and retry must not consume another writer's ticket.
+    esp63_assert(ESP_Media_Index::guard_meta(null,50,
+        '_esp_media_protected_path_id','') === null, 'pending writer A');
+    esp63_assert(ESP_Media_Index::guard_meta(null,50,
+        '_esp_media_protected_path_id','') === null, 'pending writer B');
+    $wpdb->fail_pending_decrement_once = true;
+    ESP_Media_Index::on_meta_saved(502,50,'_esp_media_protected_path_id','');
+    esp63_assert((int)$wpdb->get_var("SELECT pending_count FROM $state
+        WHERE attachment_id=50") === 2,
+        'failed decrement does not consume either pending ticket');
+    ESP_Media_Index::on_meta_saved(503,50,'_esp_media_protected_path_id','');
+    esp63_assert((int)$wpdb->get_var("SELECT pending_count FROM $state
+        WHERE attachment_id=50") === 1,
+        'successful concurrent completion decrements exactly one ticket');
+    ESP_Media_Index::finish_noop_writes();
+    esp63_assert((int)$wpdb->get_var("SELECT pending_count FROM $state
+        WHERE attachment_id=50") === 0,
+        'late completion retries only the remaining local ticket');
+    esp63_assert(ESP_Media_Index::reindex_attachment(50),
+        'R03 recovered attachment returns to READY');
 
     file_put_contents($uploads . '/2026/10/unknown.jpg', 'unregistered');
     esp63_assert(ESP_Media_Index::resolve($uploads . '/2026/10/unknown.jpg')['status']
