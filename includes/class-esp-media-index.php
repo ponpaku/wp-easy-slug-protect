@@ -166,6 +166,12 @@ final class ESP_Media_Index {
             ($runtime['version'] ?? '') !== ESP_VERSION) { return; }
         $status = self::build_status();
         $url = admin_url('admin.php?page=esp-settings');
+        if ($status['error']) {
+            echo '<div class="notice notice-error"><p>' .
+                esc_html__('メディア保護テーブルの状態を確認できません。DBとプラグイン設定を点検してください。', 'easy-slug-protect') .
+                '</p></div>';
+            return;
+        }
         if ($status['ready']) {
             // #43 has not yet approved the policy for files unknown to WP.
             // Never automatically activate the strict index at this stage.
@@ -174,6 +180,22 @@ final class ESP_Media_Index {
                     esc_html__('メディア保護テーブルの構築は完了しています。切替前の移行確認が必要です。', 'easy-slug-protect') .
                     '</p></div>';
             }
+            return;
+        }
+        // Avoid falsely calling protection "simplified" when disabled, or
+        // when strict indexing has already been enabled but must fail closed.
+        $media = ESP_Option::get_current_setting('media');
+        if (is_array($media) && isset($media['enabled']) && !$media['enabled']) {
+            echo '<div class="notice notice-info"><p>' .
+                esc_html__('メディア保護はOFFです。メディア保護テーブルの構築は未完了です。', 'easy-slug-protect') .
+                '</p></div>';
+            return;
+        }
+        if ($status['enabled']) {
+            echo '<div class="notice notice-error"><p>' .
+                esc_html__('メディア保護テーブルが未完成のため、索引による配信判定は安全側で拒否される場合があります。台帳の状態を確認してください。', 'easy-slug-protect') .
+                ' <a href="' . esc_url($url) . '">' .
+                esc_html__('台帳の構築画面', 'easy-slug-protect') . '</a></p></div>';
             return;
         }
         echo '<div class="notice notice-warning"><p><strong>' .
