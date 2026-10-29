@@ -32,6 +32,46 @@ if ($mode === 'prepare') {
         ESP_Media_Index::resolve($public)['status'] !== 'error') {
         throw new RuntimeException('New protected owner did not block public path');
     }
+} elseif ($mode === 'by_mid_prepare') {
+    // WordPress Core sanitizes update_metadata_by_mid() AFTER its prefilter.
+    // A protected B must reserve the actual sanitized path belonging to
+    // public A before WP commits B's new _wp_attached_file.
+    $mid = (int)$wpdb->get_var($wpdb->prepare(
+        "SELECT meta_id FROM {$wpdb->postmeta}
+         WHERE post_id=%d AND meta_key='_wp_attached_file' LIMIT 1", $id));
+    $original = (string)get_post_meta($id, '_wp_attached_file', true);
+    if ($mid < 1 || $original === '') { throw new RuntimeException('Missing by-mid attachment meta'); }
+    update_option('esp63_test_by_mid_original', $original, false);
+    $calls = 0;
+    $sanitizer = function ($value) use (&$calls) {
+        ++$calls;
+        return 'esp31-public-150x150.jpg';
+    };
+    add_filter('sanitize_post_meta__wp_attached_file', $sanitizer, 10, 1);
+    $saved = update_metadata_by_mid('post', $mid, $original . '-ignored-input');
+    remove_filter('sanitize_post_meta__wp_attached_file', $sanitizer, 10);
+    if (!$saved || $calls !== 1 ||
+        (string)get_post_meta($id, '_wp_attached_file', true) !==
+            'esp31-public-150x150.jpg' ||
+        ESP_Media_Index::resolve($public)['status'] !== 'error' ||
+        !ESP_Media_Index::ready()) {
+        throw new RuntimeException('by-mid sanitized path was not pre-reserved before SQL');
+    }
+} elseif ($mode === 'by_mid_restore') {
+    $mid = (int)$wpdb->get_var($wpdb->prepare(
+        "SELECT meta_id FROM {$wpdb->postmeta}
+         WHERE post_id=%d AND meta_key='_wp_attached_file' LIMIT 1", $id));
+    $original = get_option('esp63_test_by_mid_original', '');
+    if ($mid < 1 || !is_string($original) || $original === '' ||
+        !update_metadata_by_mid('post', $mid, $original) ||
+        !ESP_Media_Index::reindex_attachment($id)) {
+        throw new RuntimeException('Could not restore original attached-file by-mid');
+    }
+    delete_option('esp63_test_by_mid_original');
+    $resolved = ESP_Media_Index::resolve($public);
+    if ($resolved['status'] !== 'resolved' || $resolved['protected_path_id'] !== '') {
+        throw new RuntimeException('by-mid restoration left public owner blocked');
+    }
 } elseif ($mode === 'restore') {
     unset($meta['sizes']['esp63_new_owner_overlap']);
     if (!wp_update_attachment_metadata($id, $meta) ||
