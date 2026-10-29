@@ -809,6 +809,50 @@ try {
             "R01 moved derivative follows protection $order");
     }
 
+
+    // Review R03: repeated obsolete-generation DELETE failure is visible,
+    // keeps published READY authorization intact, and is retried by Cron
+    // without rebuilding otherwise healthy attachments.
+    $gc_id = 730;
+    esp63_sql("INSERT INTO esp63_posts(ID,post_type) VALUES ($gc_id,'attachment')");
+    esp63_sql("INSERT INTO esp63_postmeta(post_id,meta_key,meta_value) VALUES
+        ($gc_id,'_wp_attached_file','2026/10/cleanup-730.jpg'),
+        ($gc_id,'_esp_media_protected_path_id','before')");
+    esp63_assert(ESP_Media_Index::reindex_attachment($gc_id),
+        'R03 cleanup fixture initially ready');
+    $wpdb->fail_cleanup = true;
+    foreach (['second','third'] as $step) {
+        esp63_assert(ESP_Media_Index::guard_meta(null,$gc_id,
+            '_esp_media_protected_path_id',$step) === null,
+            'R03 metadata change fenced during failed cleanup');
+        esp63_sql("UPDATE esp63_postmeta SET meta_value='$step'
+            WHERE post_id=$gc_id AND meta_key='_esp_media_protected_path_id'");
+        ESP_Media_Index::on_meta_saved(900,$gc_id,'_esp_media_protected_path_id',$step);
+        esp63_assert(ESP_Media_Index::reindex_attachment($gc_id),
+            'R03 active owner publishes even if obsolete cleanup fails');
+    }
+    $gc_rows = (int)$wpdb->get_var(
+        "SELECT COUNT(*) FROM $files WHERE attachment_id=$gc_id");
+    $gc_state = $wpdb->get_row("SELECT status,failure_count,active_generation
+        FROM $state WHERE attachment_id=$gc_id", ARRAY_A);
+    esp63_assert($gc_state['status'] === 'ready' &&
+        (int)$gc_state['failure_count'] > 0 && $gc_rows === 3,
+        'R03 cleanup failure leaves active READY and a persisted retry');
+    esp63_sql("UPDATE $state SET retry_after=0 WHERE attachment_id=$gc_id");
+    ESP_Media_Index::run_batch(); // simulated continued DELETE outage
+    esp63_assert((int)$wpdb->get_var(
+        "SELECT failure_count FROM $state WHERE attachment_id=$gc_id") > 0,
+        'R03 retry remains scheduled while DELETE is unavailable');
+    $wpdb->fail_cleanup = false;
+    esp63_sql("UPDATE $state SET retry_after=0 WHERE attachment_id=$gc_id");
+    ESP_Media_Index::run_batch();
+    $gc_rows_after = (int)$wpdb->get_var(
+        "SELECT COUNT(*) FROM $files WHERE attachment_id=$gc_id");
+    $gc_failure_after = (int)$wpdb->get_var(
+        "SELECT failure_count FROM $state WHERE attachment_id=$gc_id");
+    esp63_assert($gc_rows_after === 1 && $gc_failure_after === 0,
+        'R03 Cron maintenance removes old generations and clears retry flag');
+
     // Throughput experiment, opt-in only on benchmark workflow.
     // This measures real run_batch()/reindex_attachment(), not the existing
     // synthetic bulk-copy lookup benchmark. No WordPress/HTTP bootstrap.
