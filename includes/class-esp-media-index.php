@@ -28,6 +28,7 @@ final class ESP_Media_Index {
     private static $by_mid = [];
     /** Pre-hooks whose metadata mutation did not produce a post-hook (e.g. no-op). */
     private static $local_pending = [];
+    private static $deferred_noop_finalizer_queued = false;
 
     public static function files_table() {
         global $wpdb;
@@ -682,6 +683,21 @@ final class ESP_Media_Index {
 
     private static function track_local($id) {
         self::$local_pending[$id] = (self::$local_pending[$id] ?? 0) + 1;
+        // A plugin's PHP shutdown callback may execute AFTER our original
+        // finalizer, and WordPress may return a no-op without a post-hook.
+        // Register a trailing finalizer when a NEW write actually begins,
+        // including writes initiated from a late PHP shutdown callback.
+        // PHP appends callbacks registered during shutdown to its queue.
+        if (!self::$deferred_noop_finalizer_queued) {
+            self::$deferred_noop_finalizer_queued = true;
+            register_shutdown_function([self::class, 'finish_deferred_noop_writes']);
+        }
+    }
+
+    public static function finish_deferred_noop_writes() {
+        // Allow a still-later callback to enqueue another finalizer.
+        self::$deferred_noop_finalizer_queued = false;
+        self::finish_noop_writes();
     }
     private static function finish_local($id) {
         if (!empty(self::$local_pending[$id])) {
