@@ -176,6 +176,14 @@ final class ESP_Media_Index {
                 '</p></div>';
             return;
         }
+        if ($status['ready'] && $status['dirty'] > 0) {
+            // Healthy coverage does not imply every individual attachment
+            // has finished its latest asynchronous rebuild.
+            echo '<div class="notice notice-warning"><p>' .
+                esc_html__('メディア保護テーブルに再構築待ちの添付ファイルがあります。通常はCronで再試行します。長期間解消しない場合は添付ファイルの保存先とメタデータを確認してください。', 'easy-slug-protect') .
+                ' <a href="' . esc_url($url) . '">' .
+                esc_html__('台帳の状態を確認', 'easy-slug-protect') . '</a></p></div>';
+        }
         if ($status['ready']) {
             // #43 has not yet approved the policy for files unknown to WP.
             // Never automatically activate the strict index at this stage.
@@ -496,13 +504,18 @@ final class ESP_Media_Index {
         if (get_post_type((int)$post_id) !== 'attachment') { return $check; }
         if (self::mark_dirty((int)$post_id)) {
             self::track_local((int)$post_id);
-            if (!$reserve || self::reserve_new_paths((int)$post_id, $meta_key, $meta_value)) {
+            $cross_directory = false;
+            if (!$reserve || self::reserve_new_paths(
+                (int)$post_id, $meta_key, $meta_value, $cross_directory)) {
                 return null;
             }
-            // The reservation failed. Strict mode rejects the write,
-            // retaining the attachment's dirty state, without revoking every
-            // unrelated public file. Compatibility mode admits it only after
-            // globally revoking coverage and restarting the audit epoch.
+            // Moving an attachment between directories is not a supported
+            // atomic operation. Do not guess new derivative filenames or
+            // block the user's metadata update: revoke ALL indexed delivery
+            // before allowing this transitional WordPress API write. Cron
+            // repairs only after the canonical metadata becomes consistent.
+            if ($cross_directory && self::invalidate_global()) { return null; }
+            // Other reservation failures remain strict write failures.
             return self::enabled() ? false : self::failed_pre_fence();
         }
         return self::failed_pre_fence();
@@ -514,7 +527,8 @@ final class ESP_Media_Index {
      * Within a caller-owned transaction the reservation commits atomically
      * with WordPress metadata; without one it is visible earlier.
      */
-    private static function reserve_new_paths($id, $key, $value) {
+    private static function reserve_new_paths($id, $key, $value, &$cross_directory = false) {
+        $cross_directory = false;
         global $wpdb;
         if ($key === self::PROTECTION_META) { return true; }
         $rows = $wpdb->get_results($wpdb->prepare(
@@ -544,17 +558,12 @@ final class ESP_Media_Index {
             is_array($metadata) && isset($metadata['file']) &&
             is_string($metadata['file']) && self::valid_path($metadata['file']) &&
             dirname($attached) !== dirname($metadata['file'])) {
-            // A WordPress move may write _wp_attached_file and metadata.file
-            // in separate operations. This intermediate state must NOT be
-            // published as READY, but both directories can be reserved safely
-            // before permitting the first mutation. All derivative evidence
-            // comes from validated metadata, never filename guessing.
-            $old_side = self::enumerate($attached, false);
-            $meta_side = self::enumerate($metadata['file'], $metadata);
-            if (is_array($old_side) && is_array($meta_side)) {
-                $union = array_fill_keys(array_merge($old_side, $meta_side), true);
-                $paths = count($union) <= self::MAX_PATHS ? array_keys($union) : null;
-            }
+            // An intermediate cross-directory move cannot reliably name
+            // the new derivatives. Never reserve an incomplete path set.
+            // guard_meta() invalidates global coverage before allowing the
+            // update; by-mid's post-sanitize pre-write hook does the same.
+            $cross_directory = true;
+            return false;
         }
         if ($paths === null || !$paths) { return false; }
         $state = self::table(self::state_table());
