@@ -69,7 +69,11 @@ final class ESP_Media_Index {
         add_filter('cron_schedules', [self::class, 'cron_intervals']);
         add_action(self::BATCH_HOOK, [self::class, 'run_batch']);
         add_action('init', [self::class, 'schedule'], 20);
-        add_action('shutdown', [self::class, 'finish_noop_writes'], 1);
+        // WordPress shutdown callbacks may themselves call update_post_meta()
+        // and get a no-op result. A late WP hook plus PHP's post-WordPress
+        // shutdown callback close that normal lifecycle gap.
+        add_action('shutdown', [self::class, 'finish_noop_writes'], PHP_INT_MAX);
+        register_shutdown_function([self::class, 'finish_noop_writes']);
     }
     public static function cron_intervals($schedules) {
         $schedules['esp_media_index_five_minutes'] = [
@@ -184,6 +188,12 @@ final class ESP_Media_Index {
         $dir = dirname($base);
         $prefix = $dir === '.' ? '' : $dir . '/';
         $sizes = $metadata['sizes'] ?? [];
+        // Match #42's ownership evidence: absent top-level file may
+        // authorize derivatives ONLY for real PDF attachment metadata.
+        if (!isset($metadata['file']) && !empty($sizes) &&
+            strtolower(pathinfo($attached, PATHINFO_EXTENSION)) !== 'pdf') {
+            return null;
+        }
         if (!is_array($sizes) || count($sizes) > self::MAX_METADATA_SIZES) {
             return null;
         }
@@ -471,14 +481,18 @@ final class ESP_Media_Index {
         unset(self::$by_mid[$mid]);
         if (!self::relevant($meta_key) && $was_by_mid === null) { return; }
         if (get_post_type((int)$post_id) !== 'attachment') { return; }
-        self::finish_local((int)$post_id);
-        self::complete_mutation((int)$post_id);
+        // Only retire our local ticket AFTER its DB decrement succeeds.
+        // A nonzero pending_count belonging to another writer is not failure.
+        if (self::complete_mutation((int)$post_id)) {
+            self::finish_local((int)$post_id);
+        }
     }
     public static function on_attachment_created($id) {
         if (self::installed() && self::mark_dirty((int)$id)) {
             self::track_local((int)$id);
-            self::finish_local((int)$id);
-            self::complete_mutation((int)$id);
+            if (self::complete_mutation((int)$id)) {
+                self::finish_local((int)$id);
+            }
         }
     }
     public static function on_attachment_deleting($id) {
@@ -505,8 +519,9 @@ final class ESP_Media_Index {
             // the orphan collector can now purge the deleted attachment.
             return;
         }
-        self::finish_local((int)$id);
-        self::complete_mutation((int)$id);
+        if (self::complete_mutation((int)$id)) {
+            self::finish_local((int)$id);
+        }
     }
 
     private static function track_local($id) {
@@ -525,11 +540,15 @@ final class ESP_Media_Index {
      * remains independently tracked in the DB.
      */
     public static function finish_noop_writes() {
-        $pending = self::$local_pending;
-        self::$local_pending = [];
-        foreach ($pending as $id => $count) {
+        // This snapshot is intentionally not cleared first. An SQL failure
+        // retains the ticket for the later PHP shutdown pass.
+        foreach (self::$local_pending as $id => $count) {
             for ($i = 0; $i < $count; ++$i) {
-                self::complete_mutation((int)$id);
+                if (!self::complete_mutation((int)$id)) {
+                    error_log('ESP: Media index pending completion not confirmed: ' . $id);
+                    break;
+                }
+                self::finish_local((int)$id);
             }
         }
     }
@@ -560,13 +579,13 @@ final class ESP_Media_Index {
         } else if ((int)$row['pending_count'] === 0) {
             if (!self::mark_dirty($id)) { return false; }
         }
-        if ($wpdb->query($wpdb->prepare("UPDATE $state SET pending_count=GREATEST(pending_count-1,0)
-              WHERE attachment_id=%d", $id)) === false) { return false; }
-        $pending = $wpdb->get_var($wpdb->prepare(
-            "SELECT pending_count FROM $state WHERE attachment_id=%d", $id));
-        if ($wpdb->last_error !== '' || $pending === null || (int)$pending !== 0) {
-            return false;
-        }
+        $decremented = $wpdb->query($wpdb->prepare(
+            "UPDATE $state SET pending_count=pending_count-1
+             WHERE attachment_id=%d AND pending_count>0", $id));
+        // The result is about THIS decrement, not whether other concurrent
+        // writers still have pending operations. In particular there is no
+        // separate SELECT whose failure could disguise a successful decrement.
+        if ($decremented !== 1 || $wpdb->last_error !== '') { return false; }
         // Never START/COMMIT a transaction inside a WordPress metadata hook.
         // A caller may have an open transaction; the dirty marker participates
         // in that transaction and becomes visible atomically with the metadata.
