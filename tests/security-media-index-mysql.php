@@ -720,6 +720,32 @@ try {
     esp63_assert($repaired_revision > $after_revision && $nonempty === 0,
         'audit detects changed protection mapping and repairs from canonical meta');
 
+
+    // Cron, wp-admin and CLI must never own the audit cursor concurrently.
+    // Hold the scan-level named lock on a SECOND MySQL connection.
+    $scan_connection = new mysqli(
+        getenv('ESP_TEST_DB_HOST') ?: '127.0.0.1',
+        getenv('ESP_TEST_DB_USER') ?: 'root',
+        getenv('ESP_TEST_DB_PASSWORD') ?: '',
+        getenv('ESP_TEST_DB_NAME') ?: 'esp_test');
+    $scan_name = 'esp63_scan_' . substr(hash('sha256', $wpdb->prefix), 0, 32);
+    $lock_sql = "SELECT GET_LOCK('" . $scan_connection->real_escape_string($scan_name) . "',0)";
+    $scan_lock = $scan_connection->query($lock_sql)->fetch_row()[0] ?? null;
+    esp63_assert((string)$scan_lock === '1', 'separate scan worker acquired lock');
+    esp63_sql("UPDATE $state SET audit_cursor=699,revision=revision+1
+        WHERE attachment_id=0");
+    ESP_Media_Index::run_batch();
+    esp63_assert((int)$wpdb->get_var(
+        "SELECT audit_cursor FROM $state WHERE attachment_id=0") === 699,
+        'concurrent driver cannot advance cursor while scan lock is held');
+    $scan_connection->query(
+        "SELECT RELEASE_LOCK('" . $scan_connection->real_escape_string($scan_name) . "')");
+    $scan_connection->close();
+    ESP_Media_Index::run_batch();
+    esp63_assert((int)$wpdb->get_var(
+        "SELECT audit_cursor FROM $state WHERE attachment_id=0") === 700,
+        'scan resumes after other driver releases the lock');
+
     // Throughput experiment, opt-in only on benchmark workflow.
     // This measures real run_batch()/reindex_attachment(), not the existing
     // synthetic bulk-copy lookup benchmark. No WordPress/HTTP bootstrap.
