@@ -19,6 +19,7 @@ final class ESP63_DB {
     public $dbh;
     public $fail_state_write = false;
     public $fail_cleanup = false;
+    public $before_cleanup = null;
     public $fail_pending_decrement_once = false;
     private $db;
     public function __construct($db) { $this->db = $db; $this->dbh = $db; }
@@ -50,9 +51,16 @@ final class ESP63_DB {
         }
         if ($this->fail_cleanup &&
             strpos($sql, 'DELETE FROM esp63_esp_media_files_v1') !== false &&
-            strpos($sql, 'generation<>') !== false) {
+            strpos($sql, 'generation<') !== false) {
             $this->last_error = 'injected post-publication cleanup failure';
             return false;
+        }
+        if ($this->before_cleanup !== null &&
+            strpos($sql, 'DELETE FROM esp63_esp_media_files_v1') !== false &&
+            strpos($sql, 'generation<') !== false) {
+            $callback = $this->before_cleanup;
+            $this->before_cleanup = null;
+            $callback();
         }
         try {
             $result = $this->db->query($sql);
@@ -536,6 +544,77 @@ try {
     esp63_assert(ESP_Media_Index::reindex_attachment(51), 'R01 worker publishes new owner');
     esp63_assert(ESP_Media_Index::resolve($uploads . '/2026/10/shared.jpg')['status']
         === 'ambiguous', 'R01 committed overlap is never known public');
+
+    // A genuine second MySQL connection reserves a protected ownership path
+    // AFTER the worker publishes g but BEFORE its obsolete-row DELETE runs.
+    // A DELETE with generation<>g would erase the new g+1 reservation.
+    esp63_sql("INSERT INTO esp63_posts (ID,post_type) VALUES
+        (60,'attachment'),(61,'attachment')");
+    esp63_sql("INSERT INTO esp63_postmeta(post_id,meta_key,meta_value) VALUES
+        (60,'_wp_attached_file','2026/10/interleave.jpg'),
+        (61,'_wp_attached_file','2026/10/interleave-base.jpg'),
+        (61,'_esp_media_protected_path_id','secret_Z')");
+    file_put_contents($uploads . '/2026/10/interleave.jpg', 'public');
+    file_put_contents($uploads . '/2026/10/interleave-base.jpg', 'private');
+    esp63_assert(ESP_Media_Index::reindex_attachment(60) &&
+        ESP_Media_Index::reindex_attachment(61),
+        'R01 cleanup interleave initial public and protected owners');
+    $race_peer = new mysqli(
+        getenv('ESP_TEST_DB_HOST') ?: '127.0.0.1',
+        getenv('ESP_TEST_DB_USER') ?: 'root',
+        getenv('ESP_TEST_DB_PASSWORD') ?: '',
+        getenv('ESP_TEST_DB_NAME') ?: 'esp_test'
+    );
+    $race_peer->set_charset('utf8mb4');
+    $race_wpdb = new ESP63_DB($race_peer);
+    $race_metadata = ['file'=>'2026/10/interleave-base.jpg',
+        'sizes'=>['share'=>['file'=>'interleave.jpg']]];
+    $race_generation = 0;
+    $wpdb->before_cleanup = function () use (
+        &$race_generation, $race_wpdb, $race_metadata, $state
+    ) {
+        $original_wpdb = $GLOBALS['wpdb'];
+        $GLOBALS['wpdb'] = $race_wpdb;
+        try {
+            esp63_assert(ESP_Media_Index::guard_meta(null,61,
+                '_wp_attachment_metadata',$race_metadata) === null,
+                'R01 peer pre-hook successfully reserves protected ownership');
+            $race_generation = (int)$race_wpdb->get_var(
+                "SELECT revision FROM $state WHERE attachment_id=61");
+        } finally {
+            $GLOBALS['wpdb'] = $original_wpdb;
+        }
+    };
+    esp63_assert(ESP_Media_Index::reindex_attachment(60),
+        'R01 worker publishes then cleans older generation');
+    $reservation = (int)$wpdb->get_var($wpdb->prepare(
+        "SELECT COUNT(*) FROM $files WHERE attachment_id=61 AND
+         generation=%d AND file_path=%s", $race_generation,
+        '2026/10/interleave.jpg'));
+    esp63_assert($race_generation > 0 && $reservation === 1,
+        'R01 new protected reservation survives obsolete-generation cleanup');
+    esp63_assert(ESP_Media_Index::resolve($uploads . '/2026/10/interleave.jpg')['status']
+        === 'error', 'R01 dirty peer reservation denies public authorization');
+    $race_value = $race_peer->real_escape_string(serialize($race_metadata));
+    esp63_assert($race_peer->query("INSERT INTO esp63_postmeta
+        (post_id,meta_key,meta_value) VALUES
+        (61,'_wp_attachment_metadata','$race_value')") === true,
+        'R01 peer commits protected attachment metadata');
+    $original_wpdb = $GLOBALS['wpdb'];
+    $GLOBALS['wpdb'] = $race_wpdb;
+    try {
+        ESP_Media_Index::on_meta_saved(611,61,
+            '_wp_attachment_metadata',$race_metadata);
+    } finally {
+        $GLOBALS['wpdb'] = $original_wpdb;
+    }
+    esp63_assert(ESP_Media_Index::resolve($uploads . '/2026/10/interleave.jpg')['status']
+        === 'error', 'R01 completed peer mutation remains blocked before rebuild');
+    esp63_assert(ESP_Media_Index::reindex_attachment(61),
+        'R01 peer protected owner publishes successfully');
+    esp63_assert(ESP_Media_Index::resolve($uploads . '/2026/10/interleave.jpg')['status']
+        === 'ambiguous', 'R01 final overlapping ownership cannot be public');
+    $race_peer->close();
 
     // R03: an earlier audit worker must not overwrite the cursor of an
     // invalidation occurring on another MySQL connection.
