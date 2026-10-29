@@ -713,9 +713,6 @@ try {
     ESP_Media_Index::run_batch();
     $repaired_revision = (int)$wpdb->get_var(
         "SELECT revision FROM $state WHERE attachment_id=$audit_id");
-    $incorrect = (int)$wpdb->get_var(
-        "SELECT COUNT(*) FROM $files WHERE attachment_id=$audit_id
-         AND generation=$repaired_revision AND protected_path_id<>' '");
     // There must be no incorrectly published nonempty protection ID.
     $nonempty = (int)$wpdb->get_var(
         "SELECT COUNT(*) FROM $files WHERE attachment_id=$audit_id
