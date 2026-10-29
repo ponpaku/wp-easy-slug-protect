@@ -160,6 +160,52 @@ foreach (['1', '0'] as $mode) {
     }
 }
 
+// Review R02: by-mid must not fence ordinary post metadata, even when
+// the meta_key resembles WordPress attachment metadata. Verify no overall
+// audit epoch or state rows are touched and both update/delete succeed.
+$ordinary_id = wp_insert_post([
+    'post_type' => 'post',
+    'post_status' => 'draft',
+    'post_title' => 'ESP63 disposable non-attachment by-mid test'
+], true);
+if (is_wp_error($ordinary_id) || (int)$ordinary_id < 1) {
+    throw new RuntimeException('Could not create non-attachment by-mid fixture');
+}
+$ordinary_id = (int)$ordinary_id;
+$control_table = ESP_Media_Index::state_table();
+$control_before = $wpdb->get_row("SELECT status,revision,audit_cursor
+    FROM $control_table WHERE attachment_id=0", ARRAY_A);
+foreach (['_wp_attached_file','_wp_attachment_metadata'] as $ordinary_key) {
+    $first = $ordinary_key === '_wp_attached_file'
+        ? '2026/10/post-file.txt'
+        : ['file'=>'2026/10/post-file.txt'];
+    $next = $ordinary_key === '_wp_attached_file'
+        ? '2026/11/post-file.txt'
+        : ['file'=>'2026/11/post-file.txt'];
+    if (!add_post_meta($ordinary_id, $ordinary_key, $first)) {
+        throw new RuntimeException('Could not create ordinary post meta');
+    }
+    $ordinary_mid = (int)$wpdb->get_var($wpdb->prepare(
+        "SELECT meta_id FROM {$wpdb->postmeta} WHERE post_id=%d
+         AND meta_key=%s LIMIT 1", $ordinary_id, $ordinary_key));
+    if ($ordinary_mid < 1 ||
+        !update_metadata_by_mid('post', $ordinary_mid, $next) ||
+        get_post_meta($ordinary_id, $ordinary_key, true) !== $next ||
+        !delete_metadata_by_mid('post', $ordinary_mid)) {
+        throw new RuntimeException('by-mid incorrectly guarded ordinary post: ' . $ordinary_key);
+    }
+}
+$control_after = $wpdb->get_row("SELECT status,revision,audit_cursor
+    FROM $control_table WHERE attachment_id=0", ARRAY_A);
+$ordinary_state = $wpdb->get_var($wpdb->prepare(
+    "SELECT attachment_id FROM $control_table WHERE attachment_id=%d", $ordinary_id));
+if ($control_before !== $control_after || $ordinary_state !== null ||
+    ESP_Media_Index::resolve($public)['status'] !== 'resolved') {
+    throw new RuntimeException('Non-attachment by-mid operation modified media index');
+}
+wp_delete_post($ordinary_id, true);
+echo "PASS: non-attachment by-mid update/delete leave index and READY unchanged\n";
+
 // R02: WP API called under an external transaction may not cause an
 // implicit COMMIT. The pre-fence rolls back with the metadata itself.
 $probe_table = $wpdb->prefix . 'esp63_transaction_probe';
