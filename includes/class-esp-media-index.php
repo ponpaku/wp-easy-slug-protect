@@ -359,9 +359,11 @@ final class ESP_Media_Index {
             if (!$reserve || self::reserve_new_paths((int)$post_id, $meta_key, $meta_value)) {
                 return null;
             }
-            // The reservation failed, so the new path cannot be admitted
-            // under local dirty-state coverage alone.
-            return self::failed_pre_fence();
+            // The reservation failed. Strict mode rejects the write,
+            // retaining the attachment's dirty state, without revoking every
+            // unrelated public file. Compatibility mode admits it only after
+            // globally revoking coverage and restarting the audit epoch.
+            return self::enabled() ? false : self::failed_pre_fence();
         }
         return self::failed_pre_fence();
     }
