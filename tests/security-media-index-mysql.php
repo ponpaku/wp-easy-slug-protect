@@ -104,7 +104,9 @@ final class ESP63_DB {
     }
     public function get_col($sql) {
         $rows = $this->get_results($sql);
-        return is_array($rows) ? array_map('reset', $rows) : null;
+        return is_array($rows) ? array_map(static function ($row) {
+            return reset($row);
+        }, $rows) : null;
     }
 }
 $db = new mysqli(
