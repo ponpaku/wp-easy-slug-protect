@@ -667,6 +667,62 @@ try {
     esp63_assert(ESP_Media_Index::resolve($uploads . '/2026/10/unknown.jpg')['status']
         === 'unresolved', 'unregistered is not automatically known-public');
 
+
+    // Read-only audit must NOT rewrite healthy ready generations.
+    // A missing or corrupted active row must still be repaired and verified.
+    $audit_id = 700;
+    $audit_path = '2026/10/audit-700.jpg';
+    $audit_meta = serialize([
+        'file' => $audit_path,
+        'sizes' => ['thumb'=>['file'=>'audit-700-150x150.jpg']]
+    ]);
+    esp63_sql("INSERT INTO esp63_posts(ID,post_type) VALUES ($audit_id,'attachment')");
+    esp63_sql("INSERT INTO esp63_postmeta(post_id,meta_key,meta_value) VALUES
+        ($audit_id,'_wp_attached_file','$audit_path')");
+    esp63_sql("INSERT INTO esp63_postmeta(post_id,meta_key,meta_value) VALUES
+        ($audit_id,'_wp_attachment_metadata','" .
+        $db->real_escape_string($audit_meta) . "')");
+    esp63_assert(ESP_Media_Index::reindex_attachment($audit_id),
+        'prepare separate ready attachment for read-only audit');
+    $before_revision = (int)$wpdb->get_var(
+        "SELECT revision FROM $state WHERE attachment_id=$audit_id");
+    esp63_sql("UPDATE $state SET audit_cursor=699,status='ready',
+        revision=revision+1 WHERE attachment_id=0");
+    ESP_Media_Index::run_batch();
+    $same_revision = (int)$wpdb->get_var(
+        "SELECT revision FROM $state WHERE attachment_id=$audit_id");
+    esp63_assert($same_revision === $before_revision,
+        'healthy audit preserves revision and avoids index rewrites');
+    // Simulate undetected SQL corruption bypassing WordPress hooks.
+    esp63_sql("DELETE FROM $files WHERE attachment_id=$audit_id
+        AND file_path='2026/10/audit-700-150x150.jpg'");
+    esp63_sql("UPDATE $state SET audit_cursor=699,revision=revision+1
+        WHERE attachment_id=0");
+    ESP_Media_Index::run_batch();
+    $after_revision = (int)$wpdb->get_var(
+        "SELECT revision FROM $state WHERE attachment_id=$audit_id");
+    $restored = (int)$wpdb->get_var(
+        "SELECT COUNT(*) FROM $files WHERE attachment_id=$audit_id
+         AND generation=$after_revision");
+    esp63_assert($after_revision > $same_revision && $restored === 2,
+        'audit detects missing active file row and repairs generation');
+    esp63_sql("UPDATE $files SET protected_path_id='corrupted'
+        WHERE attachment_id=$audit_id AND generation=$after_revision");
+    esp63_sql("UPDATE $state SET audit_cursor=699,revision=revision+1
+        WHERE attachment_id=0");
+    ESP_Media_Index::run_batch();
+    $repaired_revision = (int)$wpdb->get_var(
+        "SELECT revision FROM $state WHERE attachment_id=$audit_id");
+    $incorrect = (int)$wpdb->get_var(
+        "SELECT COUNT(*) FROM $files WHERE attachment_id=$audit_id
+         AND generation=$repaired_revision AND protected_path_id<>' '");
+    // There must be no incorrectly published nonempty protection ID.
+    $nonempty = (int)$wpdb->get_var(
+        "SELECT COUNT(*) FROM $files WHERE attachment_id=$audit_id
+         AND generation=$repaired_revision AND protected_path_id<>''");
+    esp63_assert($repaired_revision > $after_revision && $nonempty === 0,
+        'audit detects changed protection mapping and repairs from canonical meta');
+
     // Throughput experiment, opt-in only on benchmark workflow.
     // This measures real run_batch()/reindex_attachment(), not the existing
     // synthetic bulk-copy lookup benchmark. No WordPress/HTTP bootstrap.
