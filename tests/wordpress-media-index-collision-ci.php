@@ -57,6 +57,50 @@ if ($mode === 'prepare') {
         !ESP_Media_Index::ready()) {
         throw new RuntimeException('by-mid sanitized path was not pre-reserved before SQL');
     }
+} elseif ($mode === 'by_mid_metadata_prepare') {
+    // Verify the serialized _wp_attachment_metadata path as well as the
+    // scalar _wp_attached_file path. Core passes a serialized value to
+    // update_postmeta after sanitize_meta() has changed the sizes array.
+    $mid = (int)$wpdb->get_var($wpdb->prepare(
+        "SELECT meta_id FROM {$wpdb->postmeta}
+         WHERE post_id=%d AND meta_key='_wp_attachment_metadata' LIMIT 1", $id));
+    if ($mid < 1) { throw new RuntimeException('Missing by-mid attachment metadata row'); }
+    update_option('esp63_test_by_mid_original_meta', $meta, false);
+    $calls = 0;
+    $sanitizer = function ($value) use (&$calls) {
+        ++$calls;
+        if (!is_array($value)) { return $value; }
+        $value['sizes']['esp63_sanitized_collision'] = [
+            'file'=>'esp31-public-150x150.jpg',
+            'width'=>150,'height'=>150,'mime-type'=>'image/jpeg'
+        ];
+        return $value;
+    };
+    add_filter('sanitize_post_meta__wp_attachment_metadata', $sanitizer, 10, 1);
+    $saved = update_metadata_by_mid('post', $mid, $meta);
+    remove_filter('sanitize_post_meta__wp_attachment_metadata', $sanitizer, 10);
+    $updated_meta = wp_get_attachment_metadata($id, true);
+    if (!$saved || $calls !== 1 ||
+        !isset($updated_meta['sizes']['esp63_sanitized_collision']) ||
+        ESP_Media_Index::resolve($public)['status'] !== 'error' ||
+        !ESP_Media_Index::ready()) {
+        throw new RuntimeException('by-mid sanitized serialized metadata was not pre-reserved');
+    }
+} elseif ($mode === 'by_mid_metadata_restore') {
+    $mid = (int)$wpdb->get_var($wpdb->prepare(
+        "SELECT meta_id FROM {$wpdb->postmeta}
+         WHERE post_id=%d AND meta_key='_wp_attachment_metadata' LIMIT 1", $id));
+    $original = get_option('esp63_test_by_mid_original_meta', false);
+    if ($mid < 1 || !is_array($original) ||
+        !update_metadata_by_mid('post', $mid, $original) ||
+        !ESP_Media_Index::reindex_attachment($id)) {
+        throw new RuntimeException('Could not restore original attachment metadata by-mid');
+    }
+    delete_option('esp63_test_by_mid_original_meta');
+    $resolved = ESP_Media_Index::resolve($public);
+    if ($resolved['status'] !== 'resolved' || $resolved['protected_path_id'] !== '') {
+        throw new RuntimeException('by-mid metadata restoration left public owner blocked');
+    }
 } elseif ($mode === 'by_mid_restore') {
     $mid = (int)$wpdb->get_var($wpdb->prepare(
         "SELECT meta_id FROM {$wpdb->postmeta}
