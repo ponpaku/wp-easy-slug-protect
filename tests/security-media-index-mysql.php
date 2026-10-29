@@ -19,10 +19,16 @@ final class ESP63_DB {
     public $dbh;
     public $fail_state_write = false;
     public $fail_cleanup = false;
+    public $fail_cleanup_retry_write = false;
+    public $dbname;
     public $before_cleanup = null;
     public $fail_pending_decrement_once = false;
     private $db;
-    public function __construct($db) { $this->db = $db; $this->dbh = $db; }
+    public function __construct($db) {
+        $this->db = $db;
+        $this->dbh = $db;
+        $this->dbname = getenv('ESP_TEST_DB_NAME') ?: 'esp_test';
+    }
     public function esc_like($str) { return addcslashes($str, '_%\\'); }
     public function prepare($sql, ...$args) {
         if (count($args) === 1 && is_array($args[0])) { $args = $args[0]; }
@@ -53,6 +59,11 @@ final class ESP63_DB {
             strpos($sql, 'DELETE FROM esp63_esp_media_files_v1') !== false &&
             strpos($sql, 'generation<') !== false) {
             $this->last_error = 'injected post-publication cleanup failure';
+            return false;
+        }
+        if ($this->fail_cleanup_retry_write &&
+            strpos($sql, 'SET failure_count=1,retry_after=') !== false) {
+            $this->last_error = 'injected cleanup retry-ticket write failure';
             return false;
         }
         if ($this->before_cleanup !== null &&
@@ -728,7 +739,8 @@ try {
         getenv('ESP_TEST_DB_USER') ?: 'root',
         getenv('ESP_TEST_DB_PASSWORD') ?: '',
         getenv('ESP_TEST_DB_NAME') ?: 'esp_test');
-    $scan_name = 'esp63_scan_' . substr(hash('sha256', $wpdb->prefix), 0, 32);
+    $scan_name = 'esp63_scan_' .
+        substr(hash('sha256', $wpdb->dbname . "\0" . $wpdb->prefix), 0, 32);
     $lock_sql = "SELECT GET_LOCK('" . $scan_connection->real_escape_string($scan_name) . "',0)";
     $scan_lock = $scan_connection->query($lock_sql)->fetch_row()[0] ?? null;
     esp63_assert((string)$scan_lock === '1', 'separate scan worker acquired lock');
@@ -745,6 +757,48 @@ try {
     esp63_assert((int)$wpdb->get_var(
         "SELECT audit_cursor FROM $state WHERE attachment_id=0") === 700,
         'scan resumes after other driver releases the lock');
+
+    // GET_LOCK is MySQL server-scoped, not database-scoped. Two WordPress
+    // sites using the same prefix but different DB names must not share a
+    // scan lock or block each other's Cron/AJAX/CLI progress.
+    $other_db_name = $wpdb->dbname . '_esp63_lock_peer';
+    if (!preg_match('/^esp_[A-Za-z0-9_]+$/', $other_db_name)) {
+        throw new RuntimeException('Unsafe peer DB name for disposable lock test');
+    }
+    esp63_sql("CREATE DATABASE IF NOT EXISTS $other_db_name");
+    $other_db = new mysqli(
+        getenv('ESP_TEST_DB_HOST') ?: '127.0.0.1',
+        getenv('ESP_TEST_DB_USER') ?: 'root',
+        getenv('ESP_TEST_DB_PASSWORD') ?: '',
+        $other_db_name
+    );
+    $other_db->set_charset('utf8mb4');
+    $peer_scan_name = 'esp63_scan_' .
+        substr(hash('sha256', $other_db_name . "\0" . $wpdb->prefix), 0, 32);
+    esp63_assert($peer_scan_name !== $scan_name,
+        'different MySQL databases have distinct scan lock names');
+    $peer_locked = $other_db->query("SELECT GET_LOCK('" .
+        $other_db->real_escape_string($peer_scan_name) . "',0)")->fetch_row()[0] ?? null;
+    esp63_assert((string)$peer_locked === '1', 'second database holds own scan lock');
+    esp63_sql("UPDATE $state SET audit_cursor=699,revision=revision+1 WHERE attachment_id=0");
+    ESP_Media_Index::run_batch();
+    esp63_assert((int)$wpdb->get_var(
+        "SELECT audit_cursor FROM $state WHERE attachment_id=0") === 700,
+        'different DB scan lock does not stall this site Cron');
+    $other_db->query("SELECT RELEASE_LOCK('" .
+        $other_db->real_escape_string($peer_scan_name) . "')");
+    $other_db->close();
+    esp63_sql("DROP DATABASE $other_db_name");
+
+    // Owner-scoped locks must similarly separate same attachment ID/prefix
+    // across distinct databases on a single MySQL server.
+    $owner_a = 'esp63_' . substr(hash('sha256',
+        $wpdb->dbname . "\0" . $wpdb->prefix . "\0" . '10'), 0, 40);
+    $owner_b = 'esp63_' . substr(hash('sha256',
+        $other_db_name . "\0" . $wpdb->prefix . "\0" . '10'), 0, 40);
+    esp63_assert($owner_a !== $owner_b,
+        'owner locks include database name as well as prefix and attachment ID');
+
 
 
     // Unsupported cross-directory migrations are the user's responsibility.
@@ -894,6 +948,46 @@ try {
         "SELECT failure_count FROM $state WHERE attachment_id=$gc_id");
     esp63_assert($gc_rows_after === 1 && $gc_failure_after === 0,
         'R03 Cron maintenance removes old generations and clears retry flag');
+
+    // R03: after the active generation publishes, DELETE may fail and the
+    // retry-ticket UPDATE may fail too. A full audit must detect the orphaned
+    // old generation without a ticket and reclaim it without a new mutation.
+    $lost_gc = 731;
+    esp63_sql("INSERT INTO esp63_posts(ID,post_type) VALUES ($lost_gc,'attachment')");
+    esp63_sql("INSERT INTO esp63_postmeta(post_id,meta_key,meta_value) VALUES
+        ($lost_gc,'_wp_attached_file','2026/10/cleanup-731.jpg'),
+        ($lost_gc,'_esp_media_protected_path_id','old')");
+    esp63_assert(ESP_Media_Index::reindex_attachment($lost_gc),
+        'lost cleanup ticket initial READY');
+    esp63_assert(ESP_Media_Index::guard_meta(null,$lost_gc,
+        '_esp_media_protected_path_id','new') === null,
+        'lost cleanup ticket update is properly pre-fenced');
+    esp63_sql("UPDATE esp63_postmeta SET meta_value='new'
+        WHERE post_id=$lost_gc AND meta_key='_esp_media_protected_path_id'");
+    ESP_Media_Index::on_meta_saved(901,$lost_gc,'_esp_media_protected_path_id','new');
+    $wpdb->fail_cleanup = true;
+    $wpdb->fail_cleanup_retry_write = true;
+    esp63_assert(ESP_Media_Index::reindex_attachment($lost_gc),
+        'active generation publishes even when cleanup and retry ticket both fail');
+    $wpdb->fail_cleanup = false;
+    $wpdb->fail_cleanup_retry_write = false;
+    $pre = $wpdb->get_row("SELECT status,revision,active_generation,failure_count
+        FROM $state WHERE attachment_id=$lost_gc", ARRAY_A);
+    esp63_assert($pre['status'] === 'ready' &&
+        (int)$pre['failure_count'] === 0 &&
+        (int)$wpdb->get_var("SELECT COUNT(*) FROM $files
+            WHERE attachment_id=$lost_gc") === 2,
+        'orphaned old generation exists with no retry ticket');
+    esp63_sql("UPDATE $state SET audit_cursor=730,revision=revision+1
+        WHERE attachment_id=0");
+    ESP_Media_Index::run_batch();
+    $post = $wpdb->get_row("SELECT status,revision,active_generation,failure_count
+        FROM $state WHERE attachment_id=$lost_gc", ARRAY_A);
+    esp63_assert($post === $pre &&
+        (int)$wpdb->get_var("SELECT COUNT(*) FROM $files
+            WHERE attachment_id=$lost_gc") === 1,
+        'ordinary full audit scavenges old generation without rebuilding READY');
+
 
     // Throughput experiment, opt-in only on benchmark workflow.
     // This measures real run_batch()/reindex_attachment(), not the existing
