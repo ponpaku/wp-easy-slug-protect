@@ -429,6 +429,41 @@ f01_phase restore | tee "$report_root/f01-recovery.log"
 assert_http esp31-protected.jpg 302
 echo 'PASS: F01 two real WordPress workers, duplicate post-hooks, pending isolation and protected HTTP recovery'
 
+# R02: measure fresh independent Apache media requests, including the Core
+# SELECT VERSION() and optional get_option SQL outside the 1-query owner lookup.
+docker exec "$container" mkdir -p /var/www/html/wp-content/mu-plugins
+docker exec "$container" cp \
+  /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-http-sql-probe.php \
+  /var/www/html/wp-content/mu-plugins/esp-http-sql-ci.php
+for phase in protected1 protected2; do
+  status="$(curl -sS -o /dev/null -w '%{http_code}' \
+    -H "X-ESP-Sql-Probe: $phase" \
+    http://127.0.0.1:8094/wp-content/uploads/esp31-protected-150x150.jpg)"
+  [[ "$status" == 302 ]]
+done
+status="$(curl -sS -o /dev/null -w '%{http_code}' \
+  -H 'X-ESP-Sql-Probe: public1' \
+  http://127.0.0.1:8094/wp-content/uploads/esp31-public-150x150.jpg)"
+[[ "$status" == 200 ]]
+cp "$fixture_root/wordpress/wp-content/uploads/.esp-http-sql-profile.jsonl" \
+  "$report_root/media-http-sql-roundtrips.jsonl"
+python3 - "$report_root/media-http-sql-roundtrips.jsonl" <<'PY'
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+by_id = {x["request"]: x for x in rows}
+assert all(k in by_id for k in ("protected1", "protected2", "public1")), by_id
+for k in ("protected1", "protected2", "public1"):
+    v = by_id[k]
+    assert v["index_lookup_sql"] == 1, v
+    assert v["version_sql"] >= 1, v
+    assert v["queries_total"] >= 2, v
+print("ESP63_HTTP_SQL_ROUNDTRIPS " + json.dumps(
+    {k: by_id[k] for k in ("protected1", "protected2", "public1")},
+    ensure_ascii=False, separators=(",", ":")))
+print("PASS: R02 fresh Apache requests include owner lookup and DB version SQL")
+PY
+docker exec "$container" rm -f /var/www/html/wp-content/mu-plugins/esp-http-sql-ci.php
+
 # R01: a normal post already carrying protection metadata is promoted to an
 # attachment via WordPress Core. A second PHP/MySQL worker and real HTTP probe
 # check the pre-write and post-Cron ownership fences.
