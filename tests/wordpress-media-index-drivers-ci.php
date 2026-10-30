@@ -4,12 +4,13 @@
  * authenticated AJAX slices, invalid requests, and Cron lock contention.
  *
  * Each invocation runs in a fresh PHP worker. Disposable esp_* DB only.
- * ESP_INDEX_DRIVER_PHASE=bootstrap|ajax-allowed|ajax-denied|ajax-bad-nonce|cron-lock
+ * ESP_INDEX_DRIVER_PHASE=bootstrap|ajax-allowed|ajax-denied|ajax-bad-nonce|cron-lock|db-unsupported|ajax-unsupported
  */
 $phase = getenv('ESP_INDEX_DRIVER_PHASE');
 if (getenv('ESP_ALLOW_DISPOSABLE_DB') !== '1' ||
     !getenv('ESP_WP_ROOT') ||
-    !in_array($phase, ['bootstrap', 'ajax-allowed', 'ajax-denied', 'ajax-bad-nonce', 'cron-lock'], true)) {
+    !in_array($phase, ['bootstrap', 'ajax-allowed', 'ajax-denied', 'ajax-bad-nonce', 'cron-lock',
+        'db-unsupported', 'ajax-unsupported'], true)) {
     exit(1);
 }
 define('WP_ADMIN', true);
@@ -28,6 +29,56 @@ function esp_index_driver_assert($condition, $message) {
     }
 }
 wp_set_current_user(1);
+
+// On a real WordPress+MySQL fixture, spoof only SELECT VERSION() to exercise
+// old-server rejection without running an end-of-life MySQL daemon in CI.
+// Separate PHP workers prevent the request-local capability cache leaking.
+if ($phase === 'db-unsupported' || $phase === 'ajax-unsupported') {
+    add_filter('query', static function ($sql) {
+        return trim($sql) === 'SELECT VERSION()' ? "SELECT '5.6.51'" : $sql;
+    });
+}
+if ($phase === 'db-unsupported') {
+    $before = ESP_Media_Index::build_status(false);
+    esp_index_driver_assert($before['installed'] && !$before['database_supported'] &&
+        !$before['ready'] && $before['error'] &&
+        $before['database_version'] === '5.6.51',
+        'unsupported DB falsely reported safe index coverage');
+    esp_index_driver_assert(ESP_Media_Index::install_schema() === false,
+        'unsupported DB unexpectedly installed or upgraded index schema');
+    global $wpdb;
+    $table = ESP_Media_Index::state_table();
+    $control_before = $wpdb->get_row("SELECT audit_cursor,revision,status FROM $table WHERE attachment_id=0", ARRAY_A);
+    $queries = [];
+    $observer = static function ($sql) use (&$queries) {
+        $queries[] = $sql;
+        return $sql;
+    };
+    add_filter('query', $observer, 99);
+    ESP_Media_Index::run_batch();
+    remove_filter('query', $observer, 99);
+    esp_index_driver_assert(!array_filter($queries, static function ($sql) {
+        return strpos($sql, 'GET_LOCK(') !== false;
+    }), 'unsupported DB attempted to acquire named lock');
+    $control_after = $wpdb->get_row("SELECT audit_cursor,revision,status FROM $table WHERE attachment_id=0", ARRAY_A);
+    esp_index_driver_assert($control_before === $control_after,
+        'unsupported DB unexpectedly advanced index cursor');
+
+    // Even if strict indexing had been enabled before a DB downgrade, it
+    // must reject index authorization and must not fall back to legacy.
+    $old_option = get_option(ESP_Media_Index::ENABLE_OPTION, '0');
+    try {
+        update_option(ESP_Media_Index::ENABLE_OPTION, '1', false);
+        esp_index_driver_assert(
+            ESP_Media_Index::resolve(wp_upload_dir()['basedir'] .
+                '/esp31-protected-150x150.jpg')['status'] === 'error',
+            'strict index authorized protected media on unsupported DB');
+    } finally {
+        update_option(ESP_Media_Index::ENABLE_OPTION, $old_option, false);
+    }
+    echo "PASS: simulated legacy MySQL rejects index setup/scan/resolve and preserves strict fail-closed\n";
+    exit(0);
+}
 if ($phase === 'bootstrap') {
     $before = ESP_Media_Index::build_status(false);
     esp_index_driver_assert(!$before['installed'] && !$before['ready'] && !$before['enabled'],
