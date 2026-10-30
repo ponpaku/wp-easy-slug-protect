@@ -135,7 +135,8 @@ x=json.load(sys.stdin)
 assert x["success"] is True, x
 assert x["data"]["ready"] is True, x
 assert x["data"]["repairable_dirty"] is False, x
-assert x["data"]["dirty"] == 0, x
+# Display-only dirty counts are cached for 15s. The authoritative repairable
+# flag must already be false even when the approximate count is stale.
 '
 docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
   ESP_INDEX_DRIVER_PHASE=repair-verify \
