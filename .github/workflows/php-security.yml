@@ -138,10 +138,18 @@ jobs:
           --health-interval=5s --health-timeout=5s --health-retries=20
     steps:
       - uses: actions/checkout@v4
-      - name: End-to-end Apache/WordPress media access and caching
+      - name: End-to-end Apache/WordPress media access, UI and performance
         env:
           ESP_ALLOW_DISPOSABLE_DB: "1"
         run: bash .github/scripts/test-wordpress-apache-http.sh
+      - name: Upload real WordPress media-index E2E measurements
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp63-real-wordpress-ui-media-db-e2e
+          path: ${{ runner.temp }}/esp-media-index-e2e/*.log
+          if-no-files-found: warn
+          retention-days: 14
   package-plugin:
     runs-on: ubuntu-latest
     steps:
