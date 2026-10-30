@@ -422,7 +422,7 @@ fi
 f01_phase update-a | tee "$report_root/f01-worker-a.log"
 assert_http esp31-protected.jpg 503
 ! grep -q ESP31_PROTECTED_JPEG "$fixture_root/http-probe-body"
-touch "$f01_signal/b-resume"
+docker exec "$container" touch /var/www/html/wp-content/uploads/.esp-f01-ci/b-resume
 wait "$f01_b_pid"
 cat "$report_root/f01-worker-b.log"
 f01_phase restore | tee "$report_root/f01-recovery.log"
