@@ -43,9 +43,11 @@ def button_enabled(html):
 session = opener()
 # Exercise unauthenticated HTTP route, not only a direct PHP callback.
 code, body, _ = request(opener(), AJAX, {"action": "esp_media_index_build_slice", "nonce": "bogus"})
-require(code == 403 and b"Forbidden" in body,
-        "anonymous AJAX must reject media-index build with 403")
-print("PASS: actual HTTP AJAX denies unauthenticated requests")
+# WordPress has no wp_ajax_nopriv_ handler for this action. Core returns
+# 400 and body "0" before the plugin's capability check is reached.
+require(code == 400 and body.strip() == b"0",
+        "anonymous AJAX must be rejected by WP Core with 400/0")
+print("PASS: actual HTTP AJAX rejects unauthenticated requests without invoking plugin")
 
 # Browser-equivalent WordPress admin login with persistent cookie jar.
 request(session, "/wp-login.php")
@@ -92,7 +94,7 @@ print("PASS: refreshed actual settings UI reflects completed repair")
 
 print("ESP63_UI_HTTP_REPORT " + json.dumps({
     "admin_login": "verified",
-    "anonymous_ajax": 403,
+    "anonymous_ajax": 400,
     "invalid_nonce_ajax": 403,
     "authorized_ajax": code,
     "repairable_dirty_after": status["repairable_dirty"],
