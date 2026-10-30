@@ -11,6 +11,31 @@ function esp63_assert($ok, $message) {
     if (!$ok) { fwrite(STDERR, "FAIL: $message\n"); exit(1); }
     echo "PASS: $message\n";
 }
+// R02: conservative support boundary for nested GET_LOCK() on one connection.
+// Some MariaDB servers prepend MySQL's "5.5.5-" compatibility version.
+foreach ([
+    '5.5.62' => false,
+    '5.6.51' => false,
+    '5.7.4-log' => false,
+    '5.7.5-log' => true,
+    '5.7.44' => true,
+    '8.0.46' => true,
+    '5.5.5-5.5.68-MariaDB' => false,
+    '5.5.5-10.0.1-MariaDB' => false,
+    '5.5.5-10.0.2-MariaDB' => true,
+    '5.5.5-10.4.32-MariaDB' => true,
+    '10.11.8-MariaDB-0+deb12u1' => true,
+    '5.5.5-10.11.2' => false,
+    '5.7.30-TiDB-v6.5.0' => false,
+    '8.0.29-ProxySQL' => false,
+    'unknown' => false,
+    '' => false,
+] as $version => $supported) {
+    esp63_assert(
+        ESP_Media_Index::supports_nested_named_locks($version) === $supported,
+        'R02 nested GET_LOCK DB support parser ' . ($version ?: '(empty)')
+    );
+}
 final class ESP63_DB {
     public $prefix = 'esp63_';
     public $posts = 'esp63_posts';
