@@ -58,6 +58,7 @@ if ($phase === 'seed') {
         $file = 'esp-cli-fixture/attachment-' . $id . '.jpg';
         esp_cli_assert(add_post_meta((int)$id, '_wp_attached_file', $file, true) !== false,
             'failed to save canonical attachment path');
+        ESP_Media_Index::finish_noop_writes(); // Model per-attachment request completion in this long-lived fixture.
         // Only fixture rows, not production. Two are intentionally ineligible.
         if ($i >= 201) {
             $set = $i === 201
