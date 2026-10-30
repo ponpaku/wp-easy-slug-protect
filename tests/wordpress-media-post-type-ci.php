@@ -5,7 +5,7 @@
  */
 $phase = getenv('ESP_TYPE_PHASE');
 if (getenv('ESP_ALLOW_DISPOSABLE_DB') !== '1' || !getenv('ESP_WP_ROOT') ||
-    !in_array($phase, ['seed', 'convert', 'during', 'after'], true)) { exit(1); }
+    !in_array($phase, ['seed', 'failure', 'convert', 'during', 'after'], true)) { exit(1); }
 define('WP_DISABLE_FATAL_ERROR_HANDLER', true);
 require rtrim(getenv('ESP_WP_ROOT'), '/') . '/wp-load.php';
 if (strpos(DB_NAME, 'esp_') !== 0 || !class_exists('ESP_Media_Index')) {
@@ -49,6 +49,41 @@ if ($phase === 'seed') {
     exit;
 }
 esp_type_assert($id > 0, 'conversion fixture ID absent');
+if ($phase === 'failure') {
+    // Simulate a failure in the global-coverage UPDATE. WordPress's
+    // pre_post_update action cannot cancel by returning false: the ESP guard
+    // must throw BEFORE wp_posts changes.
+    $intercepted = 0;
+    $fail_guard = function ($sql) use (&$intercepted) {
+        if (strpos($sql, 'audit_cursor=0 WHERE attachment_id=0') !== false &&
+            strpos($sql, 'UPDATE ') !== false) {
+            ++$intercepted;
+            return 'R01_INTENTIONALLY_INVALID_GLOBAL_FENCE_SQL';
+        }
+        return $sql;
+    };
+    add_filter('query', $fail_guard, 1);
+    $threw = false;
+    $wpdb->suppress_errors(true);
+    try {
+        wp_update_post(['ID' => $id, 'post_type' => 'attachment',
+            'post_status' => 'inherit'], true);
+    } catch (RuntimeException $e) {
+        $threw = strpos($e->getMessage(), 'cannot revoke coverage') !== false;
+    } finally {
+        remove_filter('query', $fail_guard, 1);
+        $wpdb->suppress_errors(false);
+    }
+    esp_type_assert($intercepted === 1 && $threw,
+        'failed pre-update global fence did not stop the Core write');
+    esp_type_assert(get_post_type($id) === 'post' &&
+        ESP_Media_Index::ready(), 'failed fence changed wp_posts or global READY');
+    ESP_Media_Index::finish_noop_writes();
+    esp_type_assert(ESP_Media_Index::resolve($path)['status'] === 'resolved',
+        'failed post-type transition unexpectedly changed public ownership');
+    echo "PASS: R01 failed global fence blocks post-type UPDATE before Core writes\n";
+    exit;
+}
 if ($phase === 'convert') {
     $seen_attachment_updated = false;
     add_action('attachment_updated', function ($updated) use ($id, &$seen_attachment_updated) {
