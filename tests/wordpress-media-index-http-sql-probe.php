@@ -18,6 +18,7 @@ register_shutdown_function(static function () use ($probe, &$esp_http_sql_querie
     $count_index = 0;
     $count_version = 0;
     $count_options = 0;
+    $count_index_options = 0;
     foreach ($esp_http_sql_queries as $sql) {
         if (preg_match('/^\s*SELECT\b/i', $sql) &&
             strpos($sql, 'esp_media_files_v1') !== false) { ++$count_index; }
@@ -27,6 +28,9 @@ register_shutdown_function(static function () use ($probe, &$esp_http_sql_querie
         if (preg_match('/^\s*SELECT\b/i', $sql) &&
             preg_match('/\b(?:wp_[a-z0-9_]*options|[a-z0-9_]+_options)\b/i', $sql)) {
             ++$count_options;
+            if (strpos($sql, 'esp_media_index_v1_') !== false) {
+                ++$count_index_options;
+            }
         }
     }
     $record = [
@@ -36,6 +40,7 @@ register_shutdown_function(static function () use ($probe, &$esp_http_sql_querie
         'index_lookup_sql' => $count_index,
         'version_sql' => $count_version,
         'options_sql' => $count_options,
+        'media_index_option_sql' => $count_index_options,
     ];
     file_put_contents(WP_CONTENT_DIR . '/uploads/.esp-http-sql-profile.jsonl',
         json_encode($record, JSON_UNESCAPED_SLASHES) . "\n",
