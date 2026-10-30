@@ -432,6 +432,8 @@ echo 'PASS: F01 two real WordPress workers, duplicate post-hooks, pending isolat
 # R02: measure fresh independent Apache media requests, including the Core
 # SELECT VERSION() and optional get_option SQL outside the 1-query owner lookup.
 docker exec "$container" mkdir -p /var/www/html/wp-content/mu-plugins
+# Apache's www-data must be able to append to this disposable measurement log.
+docker exec "$container" sh -c 'touch /var/www/html/wp-content/uploads/.esp-http-sql-profile.jsonl && chmod 666 /var/www/html/wp-content/uploads/.esp-http-sql-profile.jsonl'
 docker exec "$container" cp \
   /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-http-sql-probe.php \
   /var/www/html/wp-content/mu-plugins/esp-http-sql-ci.php
