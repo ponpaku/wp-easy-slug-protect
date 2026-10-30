@@ -476,6 +476,8 @@ type_phase() {
 }
 type_phase seed | tee "$report_root/post-type-seed.log"
 assert_http esp31-public-150x150.jpg 200
+type_phase failure | tee "$report_root/post-type-failed-fence.log"
+assert_http esp31-public-150x150.jpg 200
 type_phase convert >"$report_root/post-type-worker.log" 2>&1 &
 type_pid=$!
 type_signal="$fixture_root/wordpress/wp-content/uploads/.esp-type-transition-ci"
