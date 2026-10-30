@@ -795,23 +795,39 @@
                         const scanned = Number(status.scanned) || 0;
                         const percent = status.ready ? 100 :
                             (total > 0 ? Math.min(99, Math.floor(100 * scanned / total)) : 0);
-                        $progress.text(status.ready ? "初期構築・検証が完了しました。" :
-                            "走査済み添付（目安）: " + scanned.toLocaleString() +
-                            " / " + total.toLocaleString() + " （" + percent + "%）");
+                        const repairable = status.repairable_dirty === true;
+                        $progress.text(status.ready
+                            ? (repairable ? "初期構築・検証は完了しています。再構築待ちの添付を処理中です。"
+                                : (Number(status.dirty) > 0
+                                    ? "初期構築・検証は完了しています。更新中または再試行待ちの添付があります。"
+                                    : "初期構築・検証が完了しました。"))
+                            : "走査済み添付（目安）: " + scanned.toLocaleString() +
+                                " / " + total.toLocaleString() + " （" + percent + "%）");
                         $bar.attr("aria-valuenow", percent);
                         $fill.css("width", percent + "%");
-                        if (status.ready) {
-                            finish("初期構築・検証は完了しました。新方式への切替には移行条件の確認が必要です。", true);
+                        // Global coverage READY does not mean every attachment
+                        // is READY. Continue if a dirty row can be repaired now,
+                        // but do not spin on pending writers or retry backoff.
+                        if (status.ready && !repairable) {
+                            const remaining = Number(status.dirty) > 0;
+                            finish(remaining
+                                ? "再構築可能な添付の処理は終了しました。残りは更新中または再試行待ちです。Cronによる再試行を確認してください。"
+                                : "初期構築・検証は完了しました。新方式への切替には移行条件の確認が必要です。",
+                                !remaining);
                             return;
                         }
-                        const signature = [status.installed, status.cursor, status.dirty].join(":");
+                        const signature = [
+                            status.installed, status.cursor, status.dirty, repairable
+                        ].join(":");
                         stalls = signature === previous ? stalls + 1 : 0;
                         previous = signature;
                         if (stalls >= 20) {
                             finish("進捗が停止しています。未完了の更新・エラー・他の処理を確認してください。Cronは継続します。", false);
                             return;
                         }
-                        $message.text("メディア保護テーブルを構築中…");
+                        $message.text(status.ready
+                            ? "再構築待ちの添付を処理中…"
+                            : "メディア保護テーブルを構築中…");
                         // Let the event loop repaint and allow a stop between slices.
                         window.setTimeout(next, stalls > 0 ? 1000 : 100);
                     }).fail(function (xhr) {
