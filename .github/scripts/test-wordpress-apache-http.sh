@@ -357,5 +357,34 @@ docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html
 assert_http esp31-public-150x150.jpg 200
 
 assert_http esp63-unregistered.jpg 403
+
+# Issue #43: formal WordPress-owned media scope, with no unregistered-file
+# whitelist or automatic strict migration. Only the disposable CI DB changes.
+scope_fixture="/var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-scope-policy-ci.php"
+scope_phase() {
+  docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+    ESP_SCOPE_PHASE="$1" php "$scope_fixture"
+}
+scope_phase compat
+assert_http esp63-unregistered.jpg 200
+grep -q ESP63_UNREGISTERED_BUT_REAL_FILE "$fixture_root/http-probe-body"
+assert_http esp31-protected-150x150.jpg 302
+scope_phase strict
+assert_http esp63-unregistered.jpg 403
+! grep -q ESP63_UNREGISTERED_BUT_REAL_FILE "$fixture_root/http-probe-body"
+assert_http esp31-protected-150x150.jpg 302
+# Missing index row does not prove a WordPress derivative is public.
+scope_phase index-gap
+assert_http esp31-protected-150x150.jpg 403
+! grep -q ESP42_PROTECTED_THUMB "$fixture_root/http-probe-body"
+scope_phase restore
+assert_http esp31-protected-150x150.jpg 302
+# Confirm the independent dirty authorization path also fails closed.
+scope_phase dirty
+assert_http esp31-protected-150x150.jpg 503
+! grep -q ESP42_PROTECTED_THUMB "$fixture_root/http-probe-body"
+scope_phase restore
+assert_http esp31-protected-150x150.jpg 302
+echo 'PASS: #43 WordPress-owned scope: compatible outside-scope access, strict 403/503 and repair'
 echo 'PASS: issue 63 real WordPress/Apache strict index HTTP smoke suite'
 echo 'PASS: disposable Apache/WordPress media HTTP regression suite'
