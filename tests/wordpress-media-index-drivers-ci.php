@@ -153,6 +153,8 @@ if (in_array($phase, ['repair-seed', 'repair-check', 'repair-verify'], true)) {
             $status['repairable_dirty'] && $row['status'] === 'dirty',
             'F02 manual repair not available after global READY');
         // Exercise the actual admin HTML, not just a copied button predicate.
+        fwrite(STDERR, "F02 HTML fixture: beginning admin render; class_exists=" .
+            (class_exists('ESP_Admin_Menu') ? 'yes' : 'no') . "\n");
         if (!class_exists('ESP_Admin_Menu')) {
             throw new RuntimeException('F02 admin settings menu was not loaded');
         }
@@ -160,9 +162,14 @@ if (in_array($phase, ['repair-seed', 'repair-check', 'repair-verify'], true)) {
         try {
             (new ESP_Admin_Menu())->render_settings_page();
             $html = ob_get_contents();
+        } catch (Throwable $e) {
+            fwrite(STDERR, "F02 HTML render exception: " . get_class($e) .
+                ': ' . $e->getMessage() . "\n");
+            throw $e;
         } finally {
             ob_end_clean();
         }
+        fwrite(STDERR, "F02 HTML render completed: " . strlen($html) . " bytes\n");
         esp_index_driver_assert(
             preg_match('/<button\b[^>]*id="esp-media-index-build"[^>]*>/s', $html, $button) === 1 &&
             !preg_match('/\bdisabled(?:\s|=|>)/', $button[0]),
