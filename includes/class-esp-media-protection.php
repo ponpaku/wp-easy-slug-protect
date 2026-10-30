@@ -753,12 +753,16 @@ class ESP_Media_Protection {
             return;
         }
         
-        // Resolverが不明・矛盾・障害を検出した場合は公開扱いにしない。
-        // 正常な未登録の移行ポリシーは#43で別途決定する。
+        // #43 scope: ESP guarantees WordPress attachment originals and
+        // canonical metadata derivatives, not unmanaged disk files.
+        // However, "unresolved" cannot distinguish an unmanaged file from a
+        // missing index row for a protected WordPress derivative. Strict mode
+        // must NOT convert uncertainty into public authorization.
+        // No automatic strict activation or unmanaged-file allowlist.
         if (class_exists('ESP_Media_Index') && ESP_Media_Index::enabled()) {
             // #63: verified index returns ownership + protection ID together.
             // Unknown paths and ambiguous owners are never public. The index is
-            // opt-in until initial backfill and the #43 migration are verified.
+            // explicitly opt-in; initial backfill never enables it automatically.
             $ownership = ESP_Media_Index::resolve($file_path);
             if ($ownership['status'] === 'unresolved' ||
                 $ownership['status'] === 'ambiguous') {
@@ -772,8 +776,9 @@ class ESP_Media_Protection {
             $attachment_id = $ownership['attachment_id'];
             $protected_path_id = $ownership['protected_path_id'];
         } else {
-            // Compatibility mode: retain #62 Resolver behavior until #43
-            // migration is explicitly performed. This is not strict mode.
+            // Compatibility mode retains #62 behavior, including legacy
+            // delivery of truly unregistered files. This is not strict mode
+            // and never claims index-verified protection for unknown files.
             $attachment_id = $this->get_attachment_id_from_path($file_path);
             if ($attachment_id === null) {
                 $this->send_503();

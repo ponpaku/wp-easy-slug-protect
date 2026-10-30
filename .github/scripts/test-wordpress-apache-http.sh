@@ -10,6 +10,9 @@ fi
 # Run the EXIT-trap regression before starting disposable Docker/WordPress.
 bash tests/test-wordpress-apache-cleanup.sh
 
+# Preserve audit/performance evidence as CI artifacts after disposable cleanup.
+report_root="$RUNNER_TEMP/esp-media-index-e2e"
+mkdir -p "$report_root"
 fixture_root="$(mktemp -d "$RUNNER_TEMP/esp31-apache-http.XXXXXXXX")"
 container="esp31-http-$GITHUB_RUN_ID-$$"
 started=0
@@ -121,6 +124,16 @@ unsupported_ajax="$(docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_W
   php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-drivers-ci.php)"
 printf '%s' "$unsupported_ajax" | python3 -c 'import json,sys; x=json.load(sys.stdin); assert x["success"] is False and "Unsupported DB" in x["data"]["message"], x'
 echo "PASS: unsupported old DB rejects media-index AJAX with explicit minimum version"
+
+# Real HTTP admin workflow (actual wp-login cookie, settings form HTML, nonce,
+# capability checks, and admin-ajax endpoint), not just direct PHP callbacks.
+docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+  ESP_UI_PHASE=seed \
+  php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-ui-fixture.php
+python3 tests/wordpress-media-index-ui-http.py | tee "$report_root/admin-http.log"
+docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+  ESP_UI_PHASE=verify \
+  php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-ui-fixture.php
 
 # F02: global READY is not "all owners READY". Prepare an eligible dirty
 # attachment in a fresh worker; verify real settings-page button and repair
@@ -286,6 +299,8 @@ if ! timeout --signal=TERM 90s docker exec "$container" env \
 fi
 cat "$fixture_root/q01-proxy.log"
 cat "$fixture_root/q01-wpdb-proxy.log"
+# The packet-loss experiment is explicitly observational (Issue #67).
+# Never mislabel it a passing fix for Q01.
 grep -q Q01_PROXY_DROPPED_UPDATE_OK "$fixture_root/q01-proxy.log"
 grep -q Q01_PROXY_DROPPED_UPDATE_OK "$fixture_root/q01-wpdb-proxy.log"
 assert_http() {
@@ -299,6 +314,13 @@ assert_http() {
     exit 1
   fi
 }
+# Once the existing WordPress strict-mode fixture has been explicitly enabled,
+# measure real Apache image GET/HEAD/Range and parallel delivery while making
+# byte-level privacy assertions. These measurements do not define SLOs.
+python3 tests/wordpress-media-index-real-http-perf.py | tee "$report_root/media-http-perf.log"
+docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+  php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-real-db-perf.php \
+  | tee "$report_root/media-db-perf.log"
 assert_http esp31-protected-150x150.jpg 302
 assert_http esp31-public-150x150.jpg 200
 # The new protected owner is visible as a dirty reservation BEFORE Cron runs.
@@ -335,5 +357,44 @@ docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html
 assert_http esp31-public-150x150.jpg 200
 
 assert_http esp63-unregistered.jpg 403
+
+# Issue #43: formal WordPress-owned media scope, with no unregistered-file
+# whitelist or automatic strict migration. Only the disposable CI DB changes.
+scope_fixture="/var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-scope-policy-ci.php"
+scope_phase() {
+  docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+    ESP_SCOPE_PHASE="$1" php "$scope_fixture"
+}
+scope_phase compat
+assert_http esp63-unregistered.jpg 200
+grep -q ESP63_UNREGISTERED_BUT_REAL_FILE "$fixture_root/http-probe-body"
+assert_http esp31-protected-150x150.jpg 302
+scope_phase strict
+assert_http esp63-unregistered.jpg 403
+! grep -q ESP63_UNREGISTERED_BUT_REAL_FILE "$fixture_root/http-probe-body"
+assert_http esp31-protected-150x150.jpg 302
+# #43 R01: confirm WordPress's existing upload_files privileged bypass
+# without an ESP password, contrasting a logged-in Subscriber and anonymous.
+# These disposable test users do not exist outside this temporary WordPress.
+docker exec "$container" php /opt/wp-cli.phar --allow-root --path=/var/www/html \
+  user create esp-ci-author esp-ci-author@example.test --role=author \
+  --user_pass=esp-ci-author-only --porcelain >/dev/null
+docker exec "$container" php /opt/wp-cli.phar --allow-root --path=/var/www/html \
+  user create esp-ci-subscriber esp-ci-subscriber@example.test --role=subscriber \
+  --user_pass=esp-ci-subscriber-only --porcelain >/dev/null
+python3 tests/wordpress-media-role-http.py | tee "$report_root/media-role-http.log"
+# Missing index row does not prove a WordPress derivative is public.
+scope_phase index-gap
+assert_http esp31-protected-150x150.jpg 403
+! grep -q ESP42_PROTECTED_THUMB "$fixture_root/http-probe-body"
+scope_phase restore
+assert_http esp31-protected-150x150.jpg 302
+# Confirm the independent dirty authorization path also fails closed.
+scope_phase dirty
+assert_http esp31-protected-150x150.jpg 503
+! grep -q ESP42_PROTECTED_THUMB "$fixture_root/http-probe-body"
+scope_phase restore
+assert_http esp31-protected-150x150.jpg 302
+echo 'PASS: #43 WordPress-owned scope: compatible outside-scope access, strict 403/503 and repair'
 echo 'PASS: issue 63 real WordPress/Apache strict index HTTP smoke suite'
 echo 'PASS: disposable Apache/WordPress media HTTP regression suite'
