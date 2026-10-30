@@ -10,6 +10,9 @@ fi
 # Run the EXIT-trap regression before starting disposable Docker/WordPress.
 bash tests/test-wordpress-apache-cleanup.sh
 
+# Preserve audit/performance evidence as CI artifacts after disposable cleanup.
+report_root="$RUNNER_TEMP/esp-media-index-e2e"
+mkdir -p "$report_root"
 fixture_root="$(mktemp -d "$RUNNER_TEMP/esp31-apache-http.XXXXXXXX")"
 container="esp31-http-$GITHUB_RUN_ID-$$"
 started=0
@@ -121,6 +124,16 @@ unsupported_ajax="$(docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_W
   php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-drivers-ci.php)"
 printf '%s' "$unsupported_ajax" | python3 -c 'import json,sys; x=json.load(sys.stdin); assert x["success"] is False and "Unsupported DB" in x["data"]["message"], x'
 echo "PASS: unsupported old DB rejects media-index AJAX with explicit minimum version"
+
+# Real HTTP admin workflow (actual wp-login cookie, settings form HTML, nonce,
+# capability checks, and admin-ajax endpoint), not just direct PHP callbacks.
+docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+  ESP_UI_PHASE=seed \
+  php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-ui-fixture.php
+python3 tests/wordpress-media-index-ui-http.py | tee "$report_root/admin-http.log"
+docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+  ESP_UI_PHASE=verify \
+  php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-ui-fixture.php
 
 # F02: global READY is not "all owners READY". Prepare an eligible dirty
 # attachment in a fresh worker; verify real settings-page button and repair
@@ -286,6 +299,8 @@ if ! timeout --signal=TERM 90s docker exec "$container" env \
 fi
 cat "$fixture_root/q01-proxy.log"
 cat "$fixture_root/q01-wpdb-proxy.log"
+# The packet-loss experiment is explicitly observational (Issue #67).
+# Never mislabel it a passing fix for Q01.
 grep -q Q01_PROXY_DROPPED_UPDATE_OK "$fixture_root/q01-proxy.log"
 grep -q Q01_PROXY_DROPPED_UPDATE_OK "$fixture_root/q01-wpdb-proxy.log"
 assert_http() {
@@ -299,6 +314,13 @@ assert_http() {
     exit 1
   fi
 }
+# Once the existing WordPress strict-mode fixture has been explicitly enabled,
+# measure real Apache image GET/HEAD/Range and parallel delivery while making
+# byte-level privacy assertions. These measurements do not define SLOs.
+python3 tests/wordpress-media-index-real-http-perf.py | tee "$report_root/media-http-perf.log"
+docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+  php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-real-db-perf.php \
+  | tee "$report_root/media-db-perf.log"
 assert_http esp31-protected-150x150.jpg 302
 assert_http esp31-public-150x150.jpg 200
 # The new protected owner is visible as a dirty reservation BEFORE Cron runs.
