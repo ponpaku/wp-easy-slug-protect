@@ -81,6 +81,8 @@ $id = (int)$wpdb->get_var("SELECT ID FROM {$wpdb->posts} WHERE post_type='attach
 if ($id <= 0 || !update_post_meta($id, ESP_Media_Index::PROTECTION_META, '')) {
     throw new RuntimeException('Cannot unprotect fixture via normal WP API');
 }
+ESP_Media_Index::finish_noop_writes(); // End simulated WP request before independent rebuild.
+ESP_Media_Index::finish_noop_writes();
 if (ESP_Media_Index::resolve($path)['status'] !== 'error' ||
     !ESP_Media_Index::reindex_attachment($id)) {
     throw new RuntimeException('committed WP unprotect requires independent rebuild');
@@ -113,6 +115,7 @@ copy($uploads['basedir'] . '/esp31-protected.jpg', $uploads['basedir'] . '/' . $
 $meta['sizes']['esp63_extra'] = ['file'=>$new_name, 'width'=>175,
     'height'=>175, 'mime-type'=>'image/jpeg'];
 wp_update_attachment_metadata($id, $meta);
+ESP_Media_Index::finish_noop_writes();
 if (!ESP_Media_Index::reindex_attachment($id)) {
     throw new RuntimeException('Cannot rebuild committed subsize index');
 }
@@ -131,12 +134,16 @@ if (!wp_update_attachment_metadata($id, $collision) ||
     ESP_Media_Index::resolve($public)['status'] !== 'error') {
     throw new RuntimeException('new protected competing owner was not pre-reserved');
 }
+ESP_Media_Index::finish_noop_writes();
 if (!ESP_Media_Index::reindex_attachment($id) ||
     ESP_Media_Index::resolve($public)['status'] !== 'ambiguous') {
     throw new RuntimeException('competing protected/public file must be ambiguous');
 }
-if (!wp_update_attachment_metadata($id, $meta) ||
-    !ESP_Media_Index::reindex_attachment($id) ||
+if (!wp_update_attachment_metadata($id, $meta)) {
+    throw new RuntimeException('failed to restore noncolliding WordPress metadata');
+}
+ESP_Media_Index::finish_noop_writes();
+if (!ESP_Media_Index::reindex_attachment($id) ||
     ESP_Media_Index::resolve($public)['status'] !== 'resolved') {
     throw new RuntimeException('failed to restore noncolliding metadata');
 }
@@ -168,18 +175,23 @@ foreach (['1', '0'] as $mode) {
     if (ESP_Media_Index::ready() !== true) {
         throw new RuntimeException('unique=true incorrectly reset global READY');
     }
+    ESP_Media_Index::finish_noop_writes();
     if (!ESP_Media_Index::reindex_attachment($public_id)) {
         throw new RuntimeException('unique=true committed add cannot rebuild');
     }
     if (!update_post_meta($public_id, ESP_Media_Index::PROTECTION_META, 'path_http', true)) {
         throw new RuntimeException('update_post_meta prev_value=true was rejected');
     }
+    ESP_Media_Index::finish_noop_writes();
     if (ESP_Media_Index::ready() !== true ||
         !ESP_Media_Index::reindex_attachment($public_id)) {
         throw new RuntimeException('prev_value=true corrupted global coverage');
     }
-    if (!delete_post_meta($public_id, ESP_Media_Index::PROTECTION_META) ||
-        !ESP_Media_Index::reindex_attachment($public_id)) {
+    if (!delete_post_meta($public_id, ESP_Media_Index::PROTECTION_META)) {
+        throw new RuntimeException('failed to delete public attachment protection metadata');
+    }
+    ESP_Media_Index::finish_noop_writes();
+    if (!ESP_Media_Index::reindex_attachment($public_id)) {
         throw new RuntimeException('failed to restore public attachment');
     }
 }
@@ -239,6 +251,7 @@ $wpdb->query("INSERT INTO $probe_table (id) VALUES (1)");
 if (!update_post_meta($id, ESP_Media_Index::PROTECTION_META, 'transaction_test')) {
     throw new RuntimeException('external transaction WordPress metadata update failed');
 }
+ESP_Media_Index::finish_noop_writes();
 if (!ESP_Media_Index::reindex_attachment($id)) {
     throw new RuntimeException('rebuild inside external transaction failed');
 }
@@ -254,13 +267,17 @@ if (!update_post_meta($id, ESP_Media_Index::PROTECTION_META, 'transaction_commit
     throw new RuntimeException('external transaction commit fixture failed');
 }
 $wpdb->query('COMMIT');
+ESP_Media_Index::finish_noop_writes();
 if ((int)$wpdb->get_var("SELECT COUNT(*) FROM $probe_table") !== 1 ||
     ESP_Media_Index::resolve($path)['status'] !== 'error' ||
     !ESP_Media_Index::reindex_attachment($id)) {
     throw new RuntimeException('dirty marker not persisted atomically on COMMIT');
 }
-if (!update_post_meta($id, ESP_Media_Index::PROTECTION_META, 'path_http') ||
-    !ESP_Media_Index::reindex_attachment($id)) {
+if (!update_post_meta($id, ESP_Media_Index::PROTECTION_META, 'path_http')) {
+    throw new RuntimeException('failed to restore WordPress protection metadata');
+}
+ESP_Media_Index::finish_noop_writes();
+if (!ESP_Media_Index::reindex_attachment($id)) {
     throw new RuntimeException('failed to restore HTTP protected fixture');
 }
 $wpdb->query("DROP TABLE $probe_table");
