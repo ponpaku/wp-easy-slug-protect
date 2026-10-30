@@ -4,13 +4,14 @@
  * authenticated AJAX slices, invalid requests, and Cron lock contention.
  *
  * Each invocation runs in a fresh PHP worker. Disposable esp_* DB only.
- * ESP_INDEX_DRIVER_PHASE=bootstrap|ajax-allowed|ajax-denied|ajax-bad-nonce|cron-lock|db-unsupported|ajax-unsupported
+ * ESP_INDEX_DRIVER_PHASE=bootstrap|ajax-allowed|ajax-denied|ajax-bad-nonce|cron-lock|db-unsupported|ajax-unsupported|repair-seed|repair-check|repair-verify
  */
 $phase = getenv('ESP_INDEX_DRIVER_PHASE');
 if (getenv('ESP_ALLOW_DISPOSABLE_DB') !== '1' ||
     !getenv('ESP_WP_ROOT') ||
     !in_array($phase, ['bootstrap', 'ajax-allowed', 'ajax-denied', 'ajax-bad-nonce', 'cron-lock',
-        'db-unsupported', 'ajax-unsupported'], true)) {
+        'db-unsupported', 'ajax-unsupported', 'repair-seed', 'repair-check',
+        'repair-verify'], true)) {
     exit(1);
 }
 define('WP_ADMIN', true);
@@ -79,6 +80,113 @@ if ($phase === 'db-unsupported') {
     echo "PASS: simulated legacy MySQL rejects index setup/scan/resolve and preserves strict fail-closed\n";
     exit(0);
 }
+
+if (in_array($phase, ['repair-seed', 'repair-check', 'repair-verify'], true)) {
+    global $wpdb;
+    $state = ESP_Media_Index::state_table();
+    $id = (int)$wpdb->get_var($wpdb->prepare(
+        "SELECT ID FROM {$wpdb->posts}
+         WHERE post_type='attachment' AND post_title=%s LIMIT 1",
+        'ESP31 public JPEG'));
+    esp_index_driver_assert($wpdb->last_error === '' && $id > 0,
+        'F02 missing disposable public JPEG attachment');
+    $row = $wpdb->get_row($wpdb->prepare(
+        "SELECT status,pending_count,retry_after,active_generation
+         FROM $state WHERE attachment_id=%d", $id), ARRAY_A);
+    esp_index_driver_assert(is_array($row), 'F02 missing indexed owner');
+    $ready = ESP_Media_Index::build_status(false);
+    esp_index_driver_assert($ready['ready'] && $ready['database_supported'],
+        'F02 expected global READY and supported DB');
+    if ($phase === 'repair-seed') {
+        esp_index_driver_assert($row['status'] === 'ready' &&
+            (int)$row['pending_count'] === 0, 'F02 expected healthy owner before test');
+        // Simulate a single interrupted metadata-change fence while keeping
+        // the WordPress canonical metadata unchanged. No production data.
+        $written = $wpdb->query($wpdb->prepare(
+            "UPDATE $state SET status='dirty', revision=revision+1,
+               pending_count=0,retry_after=0,changed_at=%d
+             WHERE attachment_id=%d AND status='ready'",
+            time(), $id));
+        esp_index_driver_assert($written === 1 && $wpdb->last_error === '',
+            'F02 cannot seed dirty owner');
+        delete_transient('esp_media_index_progress_counts_v1');
+        $status = ESP_Media_Index::build_status();
+        esp_index_driver_assert($status['ready'] && $status['dirty'] > 0 &&
+            $status['repairable_dirty'], 'F02 READY+eligible DIRTY not reported');
+        // Backoff prevents early repair even from manual AJAX or Cron.
+        $wpdb->query($wpdb->prepare(
+            "UPDATE $state SET retry_after=%d WHERE attachment_id=%d", time() + 3600, $id));
+        $deferred = ESP_Media_Index::build_status(false);
+        esp_index_driver_assert(!$deferred['repairable_dirty'] && $deferred['ready'],
+            'F02 future retry_after must not be considered repairable');
+        ESP_Media_Index::run_batch();
+        $postpone = $wpdb->get_row($wpdb->prepare(
+            "SELECT status,retry_after FROM $state WHERE attachment_id=%d", $id), ARRAY_A);
+        esp_index_driver_assert($postpone['status'] === 'dirty' &&
+            (int)$postpone['retry_after'] > time(),
+            'F02 backoff was improperly overridden');
+        // An in-flight mutation must likewise remain untouched.
+        $wpdb->query($wpdb->prepare(
+            "UPDATE $state SET pending_count=1,retry_after=0 WHERE attachment_id=%d", $id));
+        $pending = ESP_Media_Index::build_status(false);
+        esp_index_driver_assert(!$pending['repairable_dirty'] && $pending['ready'],
+            'F02 in-flight mutation must not be considered repairable');
+        ESP_Media_Index::run_batch();
+        $still_dirty = $wpdb->get_row($wpdb->prepare(
+            "SELECT status,pending_count FROM $state WHERE attachment_id=%d", $id), ARRAY_A);
+        esp_index_driver_assert($still_dirty['status'] === 'dirty' &&
+            (int)$still_dirty['pending_count'] === 1,
+            'F02 in-flight mutation was incorrectly completed by scan');
+        // Clear ONLY the artificial test pending and retry flags.
+        $wpdb->query($wpdb->prepare(
+            "UPDATE $state SET pending_count=0,retry_after=0 WHERE attachment_id=%d", $id));
+        esp_index_driver_assert(ESP_Media_Index::build_status(false)['repairable_dirty'],
+            'F02 due dirty attachment must become repairable');
+        delete_transient('esp_media_index_progress_counts_v1');
+        echo "PASS: F02 global READY with actionable dirty, backoff and pending guards\n";
+        exit(0);
+    }
+    if ($phase === 'repair-check') {
+        delete_transient('esp_media_index_progress_counts_v1');
+        $status = ESP_Media_Index::build_status();
+        esp_index_driver_assert($status['ready'] && $status['dirty'] > 0 &&
+            $status['repairable_dirty'] && $row['status'] === 'dirty',
+            'F02 manual repair not available after global READY');
+        // Exercise the actual admin HTML, not just a copied button predicate.
+        if (!class_exists('ESP_Admin_Menu')) {
+            throw new RuntimeException('F02 admin settings menu was not loaded');
+        }
+        ob_start();
+        try {
+            (new ESP_Admin_Menu())->render_settings_page();
+            $html = ob_get_contents();
+        } finally {
+            ob_end_clean();
+        }
+        esp_index_driver_assert(
+            preg_match('/<button\b[^>]*id="esp-media-index-build"[^>]*>/s', $html, $button) === 1 &&
+            !preg_match('/\bdisabled(?:\s|=|>)/', $button[0]),
+            'F02 settings page still disables manual repair after READY');
+        echo "PASS: F02 WordPress settings HTML enables repair button while global READY\n";
+        exit(0);
+    }
+    esp_index_driver_assert($row['status'] === 'ready' &&
+        (int)$row['pending_count'] === 0,
+        'F02 authorized AJAX did not restore dirty attachment');
+    $status = ESP_Media_Index::build_status(false);
+    esp_index_driver_assert($status['ready'] && !$status['repairable_dirty'],
+        'F02 repaired owner still appears eligible for rebuilding');
+    $generation = (int)$row['active_generation'];
+    ESP_Media_Index::run_batch();
+    $after = $wpdb->get_row($wpdb->prepare(
+        "SELECT status,active_generation FROM $state WHERE attachment_id=%d", $id), ARRAY_A);
+    esp_index_driver_assert($after['status'] === 'ready' &&
+        (int)$after['active_generation'] === $generation,
+        'F02 normal READY audit unnecessarily rewrote healthy attachment');
+    echo "PASS: F02 AJAX restored dirty owner; healthy audit remains read-only\n";
+    exit(0);
+}
+
 if ($phase === 'bootstrap') {
     $before = ESP_Media_Index::build_status(false);
     esp_index_driver_assert(!$before['installed'] && !$before['ready'] && !$before['enabled'],
