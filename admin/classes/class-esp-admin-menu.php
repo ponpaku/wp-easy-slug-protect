@@ -578,7 +578,9 @@ class ESP_Admin_Menu {
                             <th scope="row"><?php esc_html_e('メディア保護テーブル', $text_domain); ?></th>
                             <td>
                                 <p id="esp-media-index-progress" aria-live="polite">
-                                    <?php if ($esp_index_status['error']): ?>
+                                    <?php if (!$esp_index_status['database_supported']): ?>
+                                        <?php esc_html_e('このDBではメディア保護テーブルを利用できません。MySQL 5.7.5以上／MariaDB 10.0.2以上が必要です。', $text_domain); ?>
+                                    <?php elseif ($esp_index_status['error']): ?>
                                         <?php esc_html_e('状態を確認できません。DB接続・テーブルを点検してください。', $text_domain); ?>
                                     <?php elseif ($esp_index_status['ready']): ?>
                                         <?php esc_html_e('初期構築・検証は完了しています。', $text_domain); ?>
