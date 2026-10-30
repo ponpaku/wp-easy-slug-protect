@@ -1204,13 +1204,22 @@ final class ESP_Media_Index {
             if ($changed === false || $wpdb->last_error !== '') {
                 return false;
             }
-            if ($changed !== 1) { return true; }
+            if ($changed !== 1) {
+                // A pending conversion must remain fenced. But legacy orphan
+                // FILE rows can legitimately have no state row at all, and
+                // still require cleanup at the end of a full audit cycle.
+                $existing = $wpdb->get_var($wpdb->prepare(
+                    "SELECT attachment_id FROM $state WHERE attachment_id=%d", $id));
+                if ($wpdb->last_error !== '') { return false; }
+                if ($existing !== null) { return true; }
+            }
             if ($wpdb->query($wpdb->prepare(
                 "DELETE FROM $files WHERE attachment_id=%d", $id)) === false) {
                 return false;
             }
+            // If a new guard arrived during cleanup, never retire its ticket.
             return $wpdb->query($wpdb->prepare(
-                "DELETE FROM $state WHERE attachment_id=%d", $id)) !== false;
+                "DELETE FROM $state WHERE attachment_id=%d AND pending_count=0", $id)) !== false;
         } finally {
             $wpdb->get_var($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $lock_name));
         }
