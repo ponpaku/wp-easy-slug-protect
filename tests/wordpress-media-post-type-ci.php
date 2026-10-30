@@ -55,8 +55,8 @@ if ($phase === 'failure') {
     // must throw BEFORE wp_posts changes.
     $intercepted = 0;
     $fail_guard = function ($sql) use (&$intercepted) {
-        if (strpos($sql, 'audit_cursor=0 WHERE attachment_id=0') !== false &&
-            strpos($sql, 'UPDATE ') !== false) {
+        if (strpos($sql, 'esp_media_files_v1') !== false &&
+            strpos($sql, 'INSERT INTO ') !== false) {
             ++$intercepted;
             return 'R01_INTENTIONALLY_INVALID_GLOBAL_FENCE_SQL';
         }
@@ -69,19 +69,19 @@ if ($phase === 'failure') {
         wp_update_post(['ID' => $id, 'post_type' => 'attachment',
             'post_status' => 'inherit'], true);
     } catch (RuntimeException $e) {
-        $threw = strpos($e->getMessage(), 'cannot revoke coverage') !== false;
+        $threw = strpos($e->getMessage(), 'cannot reserve post type promotion') !== false;
     } finally {
         remove_filter('query', $fail_guard, 1);
         $wpdb->suppress_errors(false);
     }
     esp_type_assert($intercepted === 1 && $threw,
-        'failed pre-update global fence did not stop the Core write');
+        'failed path reservation did not stop the Core write');
     esp_type_assert(get_post_type($id) === 'post' &&
-        ESP_Media_Index::ready(), 'failed fence changed wp_posts or global READY');
+        ESP_Media_Index::ready(), 'failed path reservation changed wp_posts or global READY');
     ESP_Media_Index::finish_noop_writes();
     esp_type_assert(ESP_Media_Index::resolve($path)['status'] === 'resolved',
         'failed post-type transition unexpectedly changed public ownership');
-    echo "PASS: R01 failed global fence blocks post-type UPDATE before Core writes\n";
+    echo "PASS: R01 failed path reservation blocks post-type UPDATE before Core writes\n";
     exit;
 }
 if ($phase === 'convert') {
@@ -120,8 +120,8 @@ if ($phase === 'during') {
     $control = $wpdb->get_row("SELECT status,revision FROM $state WHERE attachment_id=0", ARRAY_A);
     $pending = (int)$wpdb->get_var($wpdb->prepare(
         "SELECT pending_count FROM $state WHERE attachment_id=%d", $id));
-    esp_type_assert($control['status'] === 'dirty' && $pending > 0,
-        'global coverage and per-post pending must fence transition');
+    esp_type_assert($control['status'] === 'ready' && $pending > 0,
+        'targeted reservation should hold pending without global revocation');
     // A concurrent Cron scan must NOT purge the temporary "orphan" pending
     // row or republish global READY before WordPress commits the conversion.
     ESP_Media_Index::run_batch();
@@ -129,11 +129,11 @@ if ($phase === 'during') {
         "SELECT status FROM $state WHERE attachment_id=0", ARRAY_A);
     $pending_after = (int)$wpdb->get_var($wpdb->prepare(
         "SELECT pending_count FROM $state WHERE attachment_id=%d", $id));
-    esp_type_assert($control_after['status'] === 'dirty' && $pending_after > 0,
-        'Cron illegally dropped pending conversion or republished READY');
+    esp_type_assert($control_after['status'] === 'ready' && $pending_after > 0,
+        'Cron illegally dropped targeted pending conversion or global READY');
     esp_type_assert(ESP_Media_Index::resolve($path)['status'] === 'error',
         'old public owner must fail closed before Core update');
-    echo "PASS: R01 Cron cannot republish READY or erase pre-update transition ticket\n";
+    echo "PASS: R01 Cron retains target reservation and global READY during conversion\n";
     exit;
 }
 esp_type_assert(get_post_type($id) === 'attachment',

@@ -516,13 +516,15 @@ fi
 type_phase during | tee "$report_root/post-type-during.log"
 assert_http esp31-public-150x150.jpg 503
 ! grep -q ESP31_PUBLIC "$fixture_root/http-probe-body"
+# The other, unshared file of public owner A must stay available.
+assert_http esp31-public.jpg 200
 docker exec "$container" touch /var/www/html/wp-content/uploads/.esp-type-transition-ci/resume
 wait "$type_pid"
 cat "$report_root/post-type-worker.log"
 type_phase after | tee "$report_root/post-type-after.log"
 assert_http esp31-public-150x150.jpg 403
 ! grep -q ESP31_PUBLIC "$fixture_root/http-probe-body"
-echo 'PASS: R01 post->attachment change fenced before Core update, during Cron and after collision repair'
+echo 'PASS: R01 scoped post->attachment reservation protects shared path without global 503'
 
 echo 'PASS: issue 63 real WordPress/Apache strict index HTTP smoke suite'
 echo 'PASS: disposable Apache/WordPress media HTTP regression suite'
