@@ -428,5 +428,41 @@ cat "$report_root/f01-worker-b.log"
 f01_phase restore | tee "$report_root/f01-recovery.log"
 assert_http esp31-protected.jpg 302
 echo 'PASS: F01 two real WordPress workers, duplicate post-hooks, pending isolation and protected HTTP recovery'
+
+# R01: a normal post already carrying protection metadata is promoted to an
+# attachment via WordPress Core. A second PHP/MySQL worker and real HTTP probe
+# check the pre-write and post-Cron ownership fences.
+type_fixture="/var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-post-type-ci.php"
+type_phase() {
+  docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+    ESP_TYPE_PHASE="$1" php "$type_fixture"
+}
+type_phase seed | tee "$report_root/post-type-seed.log"
+assert_http esp31-public-150x150.jpg 200
+type_phase convert >"$report_root/post-type-worker.log" 2>&1 &
+type_pid=$!
+type_signal="$fixture_root/wordpress/wp-content/uploads/.esp-type-transition-ci"
+type_ready=0
+for attempt in $(seq 1 120); do
+  if [[ -f "$type_signal/prehook" ]]; then type_ready=1; break; fi
+  if ! kill -0 "$type_pid" 2>/dev/null; then break; fi
+  sleep 0.2
+done
+if (( type_ready != 1 )); then
+  echo 'R01 post-type conversion failed to reach pre-write barrier' >&2
+  cat "$report_root/post-type-worker.log" >&2
+  exit 1
+fi
+type_phase during | tee "$report_root/post-type-during.log"
+assert_http esp31-public-150x150.jpg 503
+! grep -q ESP31_PUBLIC "$fixture_root/http-probe-body"
+docker exec "$container" touch /var/www/html/wp-content/uploads/.esp-type-transition-ci/resume
+wait "$type_pid"
+cat "$report_root/post-type-worker.log"
+type_phase after | tee "$report_root/post-type-after.log"
+assert_http esp31-public-150x150.jpg 403
+! grep -q ESP31_PUBLIC "$fixture_root/http-probe-body"
+echo 'PASS: R01 post->attachment change fenced before Core update, during Cron and after collision repair'
+
 echo 'PASS: issue 63 real WordPress/Apache strict index HTTP smoke suite'
 echo 'PASS: disposable Apache/WordPress media HTTP regression suite'
