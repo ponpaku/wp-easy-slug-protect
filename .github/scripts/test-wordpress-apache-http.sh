@@ -447,22 +447,43 @@ status="$(curl -sS -o /dev/null -w '%{http_code}' \
   -H 'X-ESP-Sql-Probe: public1' \
   http://127.0.0.1:8094/wp-content/uploads/esp31-public-150x150.jpg)"
 [[ "$status" == 200 ]]
+# Compare with the existing compatibility resolver under the same disposable
+# Apache+WordPress+MySQL environment, each request still a fresh PHP request.
+docker exec "$container" php /opt/wp-cli.phar --allow-root --path=/var/www/html \
+  option update esp_media_index_v1_enabled 0 >/dev/null
+for phase in legacyprotected legacypublic; do
+  filename=esp31-public-150x150.jpg
+  expected=200
+  if [[ "$phase" == legacyprotected ]]; then
+    filename=esp31-protected-150x150.jpg
+    expected=302
+  fi
+  status="$(curl -sS -o /dev/null -w '%{http_code}' \
+    -H "X-ESP-Sql-Probe: $phase" \
+    "http://127.0.0.1:8094/wp-content/uploads/$filename")"
+  [[ "$status" == "$expected" ]]
+done
+docker exec "$container" php /opt/wp-cli.phar --allow-root --path=/var/www/html \
+  option update esp_media_index_v1_enabled 1 >/dev/null
 cp "$fixture_root/wordpress/wp-content/uploads/.esp-http-sql-profile.jsonl" \
   "$report_root/media-http-sql-roundtrips.jsonl"
 python3 - "$report_root/media-http-sql-roundtrips.jsonl" <<'PY'
 import json, sys
 rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
 by_id = {x["request"]: x for x in rows}
-assert all(k in by_id for k in ("protected1", "protected2", "public1")), by_id
+samples = ("protected1", "protected2", "public1", "legacyprotected", "legacypublic")
+assert all(k in by_id for k in samples), by_id
 for k in ("protected1", "protected2", "public1"):
     v = by_id[k]
     assert v["index_lookup_sql"] == 1, v
     assert v["version_sql"] >= 1, v
     assert v["queries_total"] >= 2, v
+for k in ("legacyprotected", "legacypublic"):
+    assert by_id[k]["index_lookup_sql"] == 0, by_id[k]
 print("ESP63_HTTP_SQL_ROUNDTRIPS " + json.dumps(
-    {k: by_id[k] for k in ("protected1", "protected2", "public1")},
+    {k: by_id[k] for k in samples},
     ensure_ascii=False, separators=(",", ":")))
-print("PASS: R02 fresh Apache requests include owner lookup and DB version SQL")
+print("PASS: R02 independent Apache SQL counts cover strict and legacy resolver modes")
 PY
 docker exec "$container" rm -f /var/www/html/wp-content/mu-plugins/esp-http-sql-ci.php
 
