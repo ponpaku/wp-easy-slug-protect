@@ -188,6 +188,7 @@ final class ESP_Media_Index {
             'dirty' => 0,
             // Authoritative indexed existence probe, unlike cached display counts.
             'repairable_dirty' => false,
+            'repairable_dirty_id' => 0,
             'last_activity' => 0,
             'error' => false,
         ];
@@ -220,6 +221,10 @@ final class ESP_Media_Index {
                     return $result;
                 }
                 $result['repairable_dirty'] = $repairable !== null;
+                // CLI can observe repair progress without a COUNT(*) query
+                // or relying on the unchanged global READY audit cursor.
+                $result['repairable_dirty_id'] = $repairable !== null
+                    ? (int)$repairable : 0;
             }
         }
         if (!$include_counts) { return $result; }
@@ -1484,7 +1489,8 @@ class ESP_Media_Index_CLI {
     }
 
     /**
-     * Build until the authoritative global READY is reached or work stalls.
+     * Build until global coverage is READY and no eligible dirty owners remain.
+     * Pending metadata writers and retry-backoff rows are left to later runs.
      *
      * ## OPTIONS
      *
@@ -1508,16 +1514,41 @@ class ESP_Media_Index_CLI {
             ESP_Media_Index::run_batch();
             $status = ESP_Media_Index::build_status(false);
             if ($status['error']) { \WP_CLI::error('Could not inspect index state'); }
-            if ($status['ready']) {
-                \WP_CLI::success('Media index initial coverage is READY; strict activation still requires #43 migration review');
+            if ($status['ready'] && !$status['repairable_dirty']) {
+                // One final uncached existence probe distinguishes fully
+                // repaired coverage from pending writers / retry-backoff.
+                // Display-only dirty counts can be stale for 15 seconds.
+                global $wpdb;
+                $state = ESP_Media_Index::state_table();
+                $unfinished = $wpdb->get_var(
+                    "SELECT attachment_id FROM $state WHERE attachment_id>0
+                     AND (status<>'ready' OR pending_count<>0) LIMIT 1");
+                if ($wpdb->last_error !== '') {
+                    \WP_CLI::error('Cannot inspect outstanding media index changes');
+                }
+                if ($unfinished !== null) {
+                    \WP_CLI::warning(
+                        'Initial coverage READY; remaining attachments are pending or in retry backoff. ' .
+                        'No eligible repairs remain; run again after the writers/backoff clear.'
+                    );
+                } else {
+                    \WP_CLI::success(
+                        'Media index READY and eligible repairs complete; strict activation still requires #43 migration review'
+                    );
+                }
                 return;
             }
+            // The global cursor/changed_at can remain unchanged as batches
+            // repair local dirty owners. Sample the next eligible owner from
+            // the same indexed status probe so real repair progress resets
+            // the bounded stall counter without an expensive COUNT(*).
             $signature = $status['cursor'] . ':' . $status['last_activity'] . ':' .
-                ($status['installed'] ? '1' : '0');
+                ($status['installed'] ? '1' : '0') . ':' .
+                $status['repairable_dirty_id'];
             if ($signature === $previous) { ++$stalls; }
             else { $stalls = 0; }
             if ($stalls >= 120) {
-                \WP_CLI::error('No progress for approximately 30s; inspect pending/dirty rows, schema and worker lock');
+                \WP_CLI::error('No progress across 120 batches; inspect pending/dirty rows, schema and worker lock');
             }
             $previous = $signature;
             ++$cycles;
