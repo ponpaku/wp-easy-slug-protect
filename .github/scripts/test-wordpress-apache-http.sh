@@ -396,5 +396,37 @@ assert_http esp31-protected-150x150.jpg 503
 scope_phase restore
 assert_http esp31-protected-150x150.jpg 302
 echo 'PASS: #43 WordPress-owned scope: compatible outside-scope access, strict 403/503 and repair'
+
+# F01: two independent WordPress/PHP/MySQL workers; B waits after its pre-hook
+# while A triggers two real updated_post_meta hooks for a single Core mutation.
+f01_php="/var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-f01-ci.php"
+f01_phase() {
+  docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+    ESP_F01_PHASE="$1" php "$f01_php"
+}
+f01_phase seed
+f01_phase hold-b >"$report_root/f01-worker-b.log" 2>&1 &
+f01_b_pid=$!
+f01_signal="$fixture_root/wordpress/wp-content/uploads/.esp-f01-ci"
+f01_ready=0
+for attempt in $(seq 1 120); do
+  if [[ -f "$f01_signal/b-prehook-ready" ]]; then f01_ready=1; break; fi
+  if ! kill -0 "$f01_b_pid" 2>/dev/null; then break; fi
+  sleep 0.2
+done
+if (( f01_ready != 1 )); then
+  echo 'F01 independent PHP worker B failed to reach post-prehook barrier' >&2
+  cat "$report_root/f01-worker-b.log" >&2
+  exit 1
+fi
+f01_phase update-a | tee "$report_root/f01-worker-a.log"
+assert_http esp31-protected.jpg 503
+! grep -q ESP31_PROTECTED_JPEG "$fixture_root/http-probe-body"
+touch "$f01_signal/b-resume"
+wait "$f01_b_pid"
+cat "$report_root/f01-worker-b.log"
+f01_phase restore | tee "$report_root/f01-recovery.log"
+assert_http esp31-protected.jpg 302
+echo 'PASS: F01 two real WordPress workers, duplicate post-hooks, pending isolation and protected HTTP recovery'
 echo 'PASS: issue 63 real WordPress/Apache strict index HTTP smoke suite'
 echo 'PASS: disposable Apache/WordPress media HTTP regression suite'
