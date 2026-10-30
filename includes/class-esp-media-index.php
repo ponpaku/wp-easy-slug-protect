@@ -186,6 +186,8 @@ final class ESP_Media_Index {
             'total' => 0,
             'scanned' => 0,
             'dirty' => 0,
+            // Authoritative indexed existence probe, unlike cached display counts.
+            'repairable_dirty' => false,
             'last_activity' => 0,
             'error' => false,
         ];
@@ -204,6 +206,21 @@ final class ESP_Media_Index {
             $result['cursor'] = (int)$control['audit_cursor'];
             $result['last_activity'] = (int)$control['changed_at'];
             $result['ready'] = self::ready() && $control['status'] === 'ready';
+            if ($result['ready']) {
+                // Index-backed one-row probe. A nonzero pending_count or a
+                // future retry_after is NOT eligible for manual/Cron repair.
+                // Never use cached display counts to decide whether to loop.
+                $repairable = $wpdb->get_var($wpdb->prepare(
+                    "SELECT attachment_id FROM $state
+                     WHERE attachment_id>0 AND status='dirty'
+                       AND pending_count=0 AND retry_after<=%d
+                     LIMIT 1", time()));
+                if ($wpdb->last_error !== '') {
+                    $result['error'] = true;
+                    return $result;
+                }
+                $result['repairable_dirty'] = $repairable !== null;
+            }
         }
         if (!$include_counts) { return $result; }
         // One cached snapshot is intentionally approximate while building.
