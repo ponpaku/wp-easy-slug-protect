@@ -118,6 +118,30 @@ unsupported_ajax="$(docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_W
 printf '%s' "$unsupported_ajax" | python3 -c 'import json,sys; x=json.load(sys.stdin); assert x["success"] is False and "Unsupported DB" in x["data"]["message"], x'
 echo "PASS: unsupported old DB rejects media-index AJAX with explicit minimum version"
 
+# F02: global READY is not "all owners READY". Prepare an eligible dirty
+# attachment in a fresh worker; verify real settings-page button and repair
+# it via the same authenticated WordPress AJAX action as normal admin work.
+for phase in repair-seed repair-check; do
+  docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+    ESP_INDEX_DRIVER_PHASE="$phase" \
+    php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-drivers-ci.php
+done
+repaired="$(docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+  ESP_INDEX_DRIVER_PHASE=ajax-allowed \
+  php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-drivers-ci.php)"
+printf '%s' "$repaired" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+assert x["success"] is True, x
+assert x["data"]["ready"] is True, x
+assert x["data"]["repairable_dirty"] is False, x
+assert x["data"]["dirty"] == 0, x
+'
+docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+  ESP_INDEX_DRIVER_PHASE=repair-verify \
+  php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-drivers-ci.php
+echo "PASS: F02 admin manual repair after global READY with backoff/pending safety"
+
 # Q01: deliberately discard the MySQL OK packet after an UPDATE commits.
 # The packet relay runs on the disposable GitHub Actions host, not production.
 cat > "$fixture_root/q01-mysql-proxy.py" <<'PY'
