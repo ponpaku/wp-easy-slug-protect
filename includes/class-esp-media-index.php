@@ -32,6 +32,7 @@ final class ESP_Media_Index {
     // could consume another concurrent writer's pending ticket.
     private static $ambiguous_pending = [];
     private static $deferred_noop_finalizer_queued = false;
+    private static $database_support = null;
 
     public static function files_table() {
         global $wpdb;
@@ -55,6 +56,46 @@ final class ESP_Media_Index {
     }
     private static function installed() {
         return (string)get_option(self::SCHEMA_OPTION, '0') === '3';
+    }
+
+
+    /**
+     * The scan lock is nested with per-owner GET_LOCK() on the same wpdb
+     * connection. Older servers release the first lock when taking the next.
+     * MariaDB may report a 5.5.5- compatibility prefix before its true version.
+     * Unknown implementations fail closed rather than guessing lock semantics.
+     */
+    public static function supports_nested_named_locks($version) {
+        if (!is_string($version) || $version === '') { return false; }
+        $maria = stripos($version, 'MariaDB') !== false;
+        if ($maria) {
+            $version = preg_replace('/^5\.5\.5-/', '', $version);
+        } elseif (strpos($version, '5.5.5-') === 0 ||
+            preg_match('/TiDB|Vitess|ProxySQL/i', $version)) {
+            return false;
+        }
+        if (!preg_match('/^(\d+\.\d+\.\d+)(?:[-+]|$)/', $version, $parts)) {
+            return false;
+        }
+        return version_compare($parts[1], $maria ? '10.0.2' : '5.7.5', '>=');
+    }
+
+    /** Per-request check; no persistent cache can mask a server upgrade. */
+    public static function database_support() {
+        global $wpdb;
+        if (self::$database_support !== null) { return self::$database_support; }
+        if (!is_object($wpdb) || !method_exists($wpdb, 'get_var')) {
+            return ['supported' => false, 'version' => 'unknown'];
+        }
+        $version = $wpdb->get_var('SELECT VERSION()');
+        $supported = $wpdb->last_error === '' &&
+            self::supports_nested_named_locks($version);
+        self::$database_support = [
+            'supported' => $supported,
+            'version' => is_string($version) && $wpdb->last_error === ''
+                ? $version : 'unknown',
+        ];
+        return self::$database_support;
     }
 
     public static function register() {
@@ -114,7 +155,8 @@ final class ESP_Media_Index {
      * install the schema, so missed admin visits do not strand installation.
      */
     public static function ensure_schema_on_admin() {
-        if (self::installed() || !current_user_can('manage_options')) { return; }
+        if (self::installed() || !current_user_can('manage_options') ||
+            !self::database_support()['supported']) { return; }
         $runtime = get_option(ESP_Protection_State::RUNTIME_STATE_OPTION, null);
         if (!is_array($runtime) || ($runtime['state'] ?? '') !== 'READY' ||
             ($runtime['version'] ?? '') !== ESP_VERSION) { return; }
@@ -136,6 +178,8 @@ final class ESP_Media_Index {
         global $wpdb;
         $result = [
             'installed' => self::installed(),
+            'database_supported' => false,
+            'database_version' => 'unknown',
             'ready' => false,
             'enabled' => self::enabled(),
             'cursor' => 0,
@@ -145,7 +189,10 @@ final class ESP_Media_Index {
             'last_activity' => 0,
             'error' => false,
         ];
-        if (!is_object($wpdb)) { $result['error'] = true; return $result; }
+        $db = self::database_support();
+        $result['database_supported'] = $db['supported'];
+        $result['database_version'] = $db['version'];
+        if (!$db['supported']) { $result['error'] = true; return $result; }
         if ($result['installed']) {
             $state = self::table(self::state_table());
             $control = $wpdb->get_row("SELECT status,audit_cursor,changed_at FROM $state
@@ -195,6 +242,12 @@ final class ESP_Media_Index {
             ($runtime['version'] ?? '') !== ESP_VERSION) { return; }
         $status = self::build_status();
         $url = admin_url('admin.php?page=esp-settings');
+        if (!$status['database_supported']) {
+            echo '<div class="notice notice-error"><p>' .
+                esc_html__('メディア保護テーブルはこのDBに対応していません（MySQL 5.7.5以上／MariaDB 10.0.2以上が必要です）。索引構築は停止します。厳格モードは安全側で配信を拒否します。', 'easy-slug-protect') .
+                '</p></div>';
+            return;
+        }
         if ($status['error']) {
             echo '<div class="notice notice-error"><p>' .
                 esc_html__('メディア保護テーブルの状態を確認できません。DBとプラグイン設定を点検してください。', 'easy-slug-protect') .
@@ -257,6 +310,10 @@ final class ESP_Media_Index {
             ($runtime['version'] ?? '') !== ESP_VERSION) {
             wp_send_json_error(['message' => 'Plugin runtime is not verified'], 409);
         }
+        if (!self::database_support()['supported']) {
+            wp_send_json_error(['message' =>
+                'Unsupported DB for media index: MySQL 5.7.5+ or MariaDB 10.0.2+ required'], 503);
+        }
         self::run_batch();
         $status = self::build_status();
         if ($status['error']) {
@@ -271,7 +328,8 @@ final class ESP_Media_Index {
      */
     public static function install_schema() {
         global $wpdb;
-        if (!is_object($wpdb) || empty($wpdb->prefix)) { return false; }
+        if (!is_object($wpdb) || empty($wpdb->prefix) ||
+            !self::database_support()['supported']) { return false; }
         // Schema upgrades must never inherit READY from an older generation:
         // its audit did not check deleted owners or retry state.
         if (!self::installed()) {
@@ -430,7 +488,8 @@ final class ESP_Media_Index {
      */
     public static function resolve($file_path) {
         global $wpdb;
-        if (!self::ready() || !self::installed() || !is_object($wpdb)) {
+        if (!self::ready() || !self::installed() || !is_object($wpdb) ||
+            !self::database_support()['supported']) {
             return ['status' => 'error'];
         }
         $relative = self::relative_path($file_path);
@@ -1261,6 +1320,7 @@ final class ESP_Media_Index {
     /** Names include the actual DB and prefix: GET_LOCK is server-scoped. */
     private static function lock_namespace() {
         global $wpdb;
+        if (!self::database_support()['supported']) { return null; }
         $db_name = isset($wpdb->dbname) && is_string($wpdb->dbname)
             ? $wpdb->dbname : '';
         if ($db_name === '') {
@@ -1398,6 +1458,9 @@ final class ESP_Media_Index {
 /** Opt-in operational driver: shares the same cursor and row locks as Cron. */
 class ESP_Media_Index_CLI {
     public function status($args, $assoc_args) {
+        if (!ESP_Media_Index::database_support()['supported']) {
+            \WP_CLI::error('Media index requires MySQL 5.7.5+ or MariaDB 10.0.2+');
+        }
         $status = ESP_Media_Index::build_status();
         if ($status['error']) { \WP_CLI::error('Could not inspect index state'); }
         \WP_CLI::line(wp_json_encode($status));
@@ -1412,6 +1475,9 @@ class ESP_Media_Index_CLI {
      * : Maximum time for continuous execution (default 900).
      */
     public function build($args, $assoc_args) {
+        if (!ESP_Media_Index::database_support()['supported']) {
+            \WP_CLI::error('Media index requires MySQL 5.7.5+ or MariaDB 10.0.2+');
+        }
         $max_seconds = isset($assoc_args['max-seconds'])
             ? (int)$assoc_args['max-seconds'] : 900;
         if ($max_seconds < 1 || $max_seconds > 86400) {
