@@ -92,8 +92,11 @@ if ($mode === 'prepare') {
          WHERE post_id=%d AND meta_key='_wp_attachment_metadata' LIMIT 1", $id));
     $original = get_option('esp63_test_by_mid_original_meta', false);
     if ($mid < 1 || !is_array($original) ||
-        !update_metadata_by_mid('post', $mid, $original) ||
-        !ESP_Media_Index::reindex_attachment($id)) {
+        !update_metadata_by_mid('post', $mid, $original)) {
+        throw new RuntimeException('Could not restore original attachment metadata by-mid');
+    }
+    ESP_Media_Index::finish_noop_writes();
+    if (!ESP_Media_Index::reindex_attachment($id)) {
         throw new RuntimeException('Could not restore original attachment metadata by-mid');
     }
     delete_option('esp63_test_by_mid_original_meta');
@@ -107,8 +110,11 @@ if ($mode === 'prepare') {
          WHERE post_id=%d AND meta_key='_wp_attached_file' LIMIT 1", $id));
     $original = get_option('esp63_test_by_mid_original', '');
     if ($mid < 1 || !is_string($original) || $original === '' ||
-        !update_metadata_by_mid('post', $mid, $original) ||
-        !ESP_Media_Index::reindex_attachment($id)) {
+        !update_metadata_by_mid('post', $mid, $original)) {
+        throw new RuntimeException('Could not restore original attached-file by-mid');
+    }
+    ESP_Media_Index::finish_noop_writes();
+    if (!ESP_Media_Index::reindex_attachment($id)) {
         throw new RuntimeException('Could not restore original attached-file by-mid');
     }
     delete_option('esp63_test_by_mid_original');
@@ -118,8 +124,11 @@ if ($mode === 'prepare') {
     }
 } elseif ($mode === 'restore') {
     unset($meta['sizes']['esp63_new_owner_overlap']);
-    if (!wp_update_attachment_metadata($id, $meta) ||
-        !ESP_Media_Index::reindex_attachment($id)) {
+    if (!wp_update_attachment_metadata($id, $meta)) {
+        throw new RuntimeException('Failed to restore protected metadata');
+    }
+    ESP_Media_Index::finish_noop_writes();
+    if (!ESP_Media_Index::reindex_attachment($id)) {
         throw new RuntimeException('Failed to restore protected metadata');
     }
     $resolved = ESP_Media_Index::resolve($public);
