@@ -11,6 +11,31 @@ function esp63_assert($ok, $message) {
     if (!$ok) { fwrite(STDERR, "FAIL: $message\n"); exit(1); }
     echo "PASS: $message\n";
 }
+// R02: conservative support boundary for nested GET_LOCK() on one connection.
+// Some MariaDB servers prepend MySQL's "5.5.5-" compatibility version.
+foreach ([
+    '5.5.62' => false,
+    '5.6.51' => false,
+    '5.7.4-log' => false,
+    '5.7.5-log' => true,
+    '5.7.44' => true,
+    '8.0.46' => true,
+    '5.5.5-5.5.68-MariaDB' => false,
+    '5.5.5-10.0.1-MariaDB' => false,
+    '5.5.5-10.0.2-MariaDB' => true,
+    '5.5.5-10.4.32-MariaDB' => true,
+    '10.11.8-MariaDB-0+deb12u1' => true,
+    '5.5.5-10.11.2' => false,
+    '5.7.30-TiDB-v6.5.0' => false,
+    '8.0.29-ProxySQL' => false,
+    'unknown' => false,
+    '' => false,
+] as $version => $supported) {
+    esp63_assert(
+        ESP_Media_Index::supports_nested_named_locks($version) === $supported,
+        'R02 nested GET_LOCK DB support parser ' . ($version ?: '(empty)')
+    );
+}
 final class ESP63_DB {
     public $prefix = 'esp63_';
     public $posts = 'esp63_posts';
@@ -19,10 +44,17 @@ final class ESP63_DB {
     public $dbh;
     public $fail_state_write = false;
     public $fail_cleanup = false;
+    public $fail_cleanup_retry_write = false;
+    public $dbname;
     public $before_cleanup = null;
     public $fail_pending_decrement_once = false;
+    public $lose_pending_decrement_ack_once = false;
     private $db;
-    public function __construct($db) { $this->db = $db; $this->dbh = $db; }
+    public function __construct($db) {
+        $this->db = $db;
+        $this->dbh = $db;
+        $this->dbname = getenv('ESP_TEST_DB_NAME') ?: 'esp_test';
+    }
     public function esc_like($str) { return addcslashes($str, '_%\\'); }
     public function prepare($sql, ...$args) {
         if (count($args) === 1 && is_array($args[0])) { $args = $args[0]; }
@@ -38,6 +70,16 @@ final class ESP63_DB {
     }
     public function query($sql) {
         $this->last_error = '';
+        if ($this->lose_pending_decrement_ack_once &&
+            strpos($sql, 'SET pending_count=pending_count-1') !== false) {
+            $this->lose_pending_decrement_ack_once = false;
+            $result = $this->db->query($sql);
+            if ($result === false || $this->db->affected_rows !== 1) {
+                throw new RuntimeException('Injected ACK-loss UPDATE failed before response');
+            }
+            $this->last_error = 'injected lost ACK after successful decrement';
+            return false;
+        }
         if ($this->fail_pending_decrement_once &&
             strpos($sql, 'SET pending_count=pending_count-1') !== false) {
             $this->fail_pending_decrement_once = false;
@@ -53,6 +95,11 @@ final class ESP63_DB {
             strpos($sql, 'DELETE FROM esp63_esp_media_files_v1') !== false &&
             strpos($sql, 'generation<') !== false) {
             $this->last_error = 'injected post-publication cleanup failure';
+            return false;
+        }
+        if ($this->fail_cleanup_retry_write &&
+            strpos($sql, 'SET failure_count=1,retry_after=') !== false) {
+            $this->last_error = 'injected cleanup retry-ticket write failure';
             return false;
         }
         if ($this->before_cleanup !== null &&
@@ -82,7 +129,9 @@ final class ESP63_DB {
     }
     public function get_col($sql) {
         $rows = $this->get_results($sql);
-        return is_array($rows) ? array_map('reset', $rows) : null;
+        return is_array($rows) ? array_map(static function ($row) {
+            return reset($row);
+        }, $rows) : null;
     }
 }
 $db = new mysqli(
@@ -641,31 +690,341 @@ try {
     esp63_assert($options[ESP_Media_Index::READY_OPTION] === '1',
         'R03 fresh audit epoch eventually republishes coverage');
 
-    // R02/R03 pending completion: an injected SQL error must retain the
-    // local ticket, and retry must not consume another writer's ticket.
+    // Ordinary concurrent completions each retire exactly one count.
+    // Unacknowledged/ambiguous responses are a separate fail-closed
+    // scenario at the end of this test, not a recoverable blind retry.
     esp63_assert(ESP_Media_Index::guard_meta(null,50,
         '_esp_media_protected_path_id','') === null, 'pending writer A');
     esp63_assert(ESP_Media_Index::guard_meta(null,50,
         '_esp_media_protected_path_id','') === null, 'pending writer B');
-    $wpdb->fail_pending_decrement_once = true;
+    esp63_assert((int)$wpdb->get_var("SELECT pending_count FROM $state
+        WHERE attachment_id=50") === 2, 'two pending tickets recorded');
     ESP_Media_Index::on_meta_saved(502,50,'_esp_media_protected_path_id','');
     esp63_assert((int)$wpdb->get_var("SELECT pending_count FROM $state
-        WHERE attachment_id=50") === 2,
-        'failed decrement does not consume either pending ticket');
-    ESP_Media_Index::on_meta_saved(503,50,'_esp_media_protected_path_id','');
-    esp63_assert((int)$wpdb->get_var("SELECT pending_count FROM $state
         WHERE attachment_id=50") === 1,
-        'successful concurrent completion decrements exactly one ticket');
+        'first normal completion preserves second writer ticket');
+    ESP_Media_Index::on_meta_saved(503,50,'_esp_media_protected_path_id','');
     ESP_Media_Index::finish_noop_writes();
     esp63_assert((int)$wpdb->get_var("SELECT pending_count FROM $state
         WHERE attachment_id=50") === 0,
-        'late completion retries only the remaining local ticket');
+        'both acknowledged completions retire exactly their tickets');
     esp63_assert(ESP_Media_Index::reindex_attachment(50),
         'R03 recovered attachment returns to READY');
 
     file_put_contents($uploads . '/2026/10/unknown.jpg', 'unregistered');
     esp63_assert(ESP_Media_Index::resolve($uploads . '/2026/10/unknown.jpg')['status']
         === 'unresolved', 'unregistered is not automatically known-public');
+
+
+    // Read-only audit must NOT rewrite healthy ready generations.
+    // A missing or corrupted active row must still be repaired and verified.
+    $audit_id = 700;
+    $audit_path = '2026/10/audit-700.jpg';
+    $audit_meta = serialize([
+        'file' => $audit_path,
+        'sizes' => ['thumb'=>['file'=>'audit-700-150x150.jpg']]
+    ]);
+    esp63_sql("INSERT INTO esp63_posts(ID,post_type) VALUES ($audit_id,'attachment')");
+    esp63_sql("INSERT INTO esp63_postmeta(post_id,meta_key,meta_value) VALUES
+        ($audit_id,'_wp_attached_file','$audit_path')");
+    esp63_sql("INSERT INTO esp63_postmeta(post_id,meta_key,meta_value) VALUES
+        ($audit_id,'_wp_attachment_metadata','" .
+        $db->real_escape_string($audit_meta) . "')");
+    esp63_assert(ESP_Media_Index::reindex_attachment($audit_id),
+        'prepare separate ready attachment for read-only audit');
+    $before_revision = (int)$wpdb->get_var(
+        "SELECT revision FROM $state WHERE attachment_id=$audit_id");
+    esp63_sql("UPDATE $state SET audit_cursor=699,status='ready',
+        revision=revision+1 WHERE attachment_id=0");
+    ESP_Media_Index::run_batch();
+    $same_revision = (int)$wpdb->get_var(
+        "SELECT revision FROM $state WHERE attachment_id=$audit_id");
+    esp63_assert($same_revision === $before_revision,
+        'healthy audit preserves revision and avoids index rewrites');
+    // Simulate undetected SQL corruption bypassing WordPress hooks.
+    esp63_sql("DELETE FROM $files WHERE attachment_id=$audit_id
+        AND file_path='2026/10/audit-700-150x150.jpg'");
+    esp63_sql("UPDATE $state SET audit_cursor=699,revision=revision+1
+        WHERE attachment_id=0");
+    ESP_Media_Index::run_batch();
+    $after_revision = (int)$wpdb->get_var(
+        "SELECT revision FROM $state WHERE attachment_id=$audit_id");
+    $restored = (int)$wpdb->get_var(
+        "SELECT COUNT(*) FROM $files WHERE attachment_id=$audit_id
+         AND generation=$after_revision");
+    esp63_assert($after_revision > $same_revision && $restored === 2,
+        'audit detects missing active file row and repairs generation');
+    esp63_sql("UPDATE $files SET protected_path_id='corrupted'
+        WHERE attachment_id=$audit_id AND generation=$after_revision");
+    esp63_sql("UPDATE $state SET audit_cursor=699,revision=revision+1
+        WHERE attachment_id=0");
+    ESP_Media_Index::run_batch();
+    $repaired_revision = (int)$wpdb->get_var(
+        "SELECT revision FROM $state WHERE attachment_id=$audit_id");
+    // There must be no incorrectly published nonempty protection ID.
+    $nonempty = (int)$wpdb->get_var(
+        "SELECT COUNT(*) FROM $files WHERE attachment_id=$audit_id
+         AND generation=$repaired_revision AND protected_path_id<>''");
+    esp63_assert($repaired_revision > $after_revision && $nonempty === 0,
+        'audit detects changed protection mapping and repairs from canonical meta');
+
+
+    // Cron, wp-admin and CLI must never own the audit cursor concurrently.
+    // Hold the scan-level named lock on a SECOND MySQL connection.
+    $scan_connection = new mysqli(
+        getenv('ESP_TEST_DB_HOST') ?: '127.0.0.1',
+        getenv('ESP_TEST_DB_USER') ?: 'root',
+        getenv('ESP_TEST_DB_PASSWORD') ?: '',
+        getenv('ESP_TEST_DB_NAME') ?: 'esp_test');
+    $scan_name = 'esp63_scan_' .
+        substr(hash('sha256', $wpdb->dbname . "\0" . $wpdb->prefix), 0, 32);
+    $lock_sql = "SELECT GET_LOCK('" . $scan_connection->real_escape_string($scan_name) . "',0)";
+    $scan_lock = $scan_connection->query($lock_sql)->fetch_row()[0] ?? null;
+    esp63_assert((string)$scan_lock === '1', 'separate scan worker acquired lock');
+    esp63_sql("UPDATE $state SET audit_cursor=699,revision=revision+1
+        WHERE attachment_id=0");
+    ESP_Media_Index::run_batch();
+    esp63_assert((int)$wpdb->get_var(
+        "SELECT audit_cursor FROM $state WHERE attachment_id=0") === 699,
+        'concurrent driver cannot advance cursor while scan lock is held');
+    $scan_connection->query(
+        "SELECT RELEASE_LOCK('" . $scan_connection->real_escape_string($scan_name) . "')");
+    $scan_connection->close();
+    ESP_Media_Index::run_batch();
+    esp63_assert((int)$wpdb->get_var(
+        "SELECT audit_cursor FROM $state WHERE attachment_id=0") === 700,
+        'scan resumes after other driver releases the lock');
+
+    // GET_LOCK is MySQL server-scoped, not database-scoped. Two WordPress
+    // sites using the same prefix but different DB names must not share a
+    // scan lock or block each other's Cron/AJAX/CLI progress.
+    $other_db_name = $wpdb->dbname . '_esp63_lock_peer';
+    if (!preg_match('/^esp_[A-Za-z0-9_]+$/', $other_db_name)) {
+        throw new RuntimeException('Unsafe peer DB name for disposable lock test');
+    }
+    esp63_sql("CREATE DATABASE IF NOT EXISTS $other_db_name");
+    $other_db = new mysqli(
+        getenv('ESP_TEST_DB_HOST') ?: '127.0.0.1',
+        getenv('ESP_TEST_DB_USER') ?: 'root',
+        getenv('ESP_TEST_DB_PASSWORD') ?: '',
+        $other_db_name
+    );
+    $other_db->set_charset('utf8mb4');
+    $peer_scan_name = 'esp63_scan_' .
+        substr(hash('sha256', $other_db_name . "\0" . $wpdb->prefix), 0, 32);
+    esp63_assert($peer_scan_name !== $scan_name,
+        'different MySQL databases have distinct scan lock names');
+    $peer_locked = $other_db->query("SELECT GET_LOCK('" .
+        $other_db->real_escape_string($peer_scan_name) . "',0)")->fetch_row()[0] ?? null;
+    esp63_assert((string)$peer_locked === '1', 'second database holds own scan lock');
+    esp63_sql("UPDATE $state SET audit_cursor=699,revision=revision+1 WHERE attachment_id=0");
+    ESP_Media_Index::run_batch();
+    esp63_assert((int)$wpdb->get_var(
+        "SELECT audit_cursor FROM $state WHERE attachment_id=0") === 700,
+        'different DB scan lock does not stall this site Cron');
+    $other_db->query("SELECT RELEASE_LOCK('" .
+        $other_db->real_escape_string($peer_scan_name) . "')");
+    $other_db->close();
+    esp63_sql("DROP DATABASE $other_db_name");
+
+    // Owner-scoped locks must similarly separate same attachment ID/prefix
+    // across distinct databases on a single MySQL server.
+    $owner_a = 'esp63_' . substr(hash('sha256',
+        $wpdb->dbname . "\0" . $wpdb->prefix . "\0" . '10'), 0, 40);
+    $owner_b = 'esp63_' . substr(hash('sha256',
+        $other_db_name . "\0" . $wpdb->prefix . "\0" . '10'), 0, 40);
+    esp63_assert($owner_a !== $owner_b,
+        'owner locks include database name as well as prefix and attachment ID');
+
+
+
+    // Unsupported cross-directory migrations are the user's responsibility.
+    // We DO allow the WordPress metadata writes, but the first inconsistent
+    // step MUST revoke global READY (not guess future derivative filenames).
+    // Cron cannot publish inconsistent metadata, and resumes normal coverage
+    // once the canonical attached_file + metadata.file agree.
+    foreach ([720 => 'attached_first', 721 => 'metadata_first'] as $move_id => $order) {
+        $from = '2026/10/move-' . $move_id . '.jpg';
+        $to_dir = $move_id === 720 ? '2026/09' : '2026/11';
+        $to = $to_dir . '/move-' . $move_id . '.jpg';
+        $new_thumb = $to_dir . '/move-' . $move_id . '-150x150.jpg';
+        $old_meta = ['file'=>$from, 'sizes'=>[
+            'thumb'=>['file'=>'move-' . $move_id . '-150x150.jpg']]];
+        $new_meta = ['file'=>$to, 'sizes'=>[
+            'thumb'=>['file'=>'move-' . $move_id . '-150x150.jpg']]];
+        @mkdir($uploads . '/' . $to_dir, 0700, true);
+        file_put_contents($uploads . '/' . $from, 'old');
+        file_put_contents($uploads . '/' . $to, 'new');
+        file_put_contents($uploads . '/' . $new_thumb, 'new thumb');
+
+        // A public owner already has the NEW thumbnail URL. Dirtying B
+        // alone is not enough: without global revocation A could serve it.
+        if ($move_id === 720) {
+            esp63_sql("INSERT INTO esp63_posts(ID,post_type) VALUES (719,'attachment')");
+            esp63_sql("INSERT INTO esp63_postmeta(post_id,meta_key,meta_value) VALUES
+                (719,'_wp_attached_file','$new_thumb')");
+            esp63_assert(ESP_Media_Index::reindex_attachment(719),
+                'public owner of future moved derivative indexed');
+            $prior_owner = ESP_Media_Index::resolve($uploads . '/' . $new_thumb);
+            esp63_assert($prior_owner['status'] === 'resolved' &&
+                $prior_owner['protected_path_id'] === '',
+                'future destination thumbnail is initially public');
+        }
+
+        esp63_sql("INSERT INTO esp63_posts (ID,post_type) VALUES ($move_id,'attachment')");
+        esp63_sql("INSERT INTO esp63_postmeta(post_id,meta_key,meta_value) VALUES
+            ($move_id,'_wp_attached_file','$from'),
+            ($move_id,'_wp_attachment_metadata','" .
+            $db->real_escape_string(serialize($old_meta)) . "'),
+            ($move_id,'_esp_media_protected_path_id','secret_move')");
+        esp63_assert(ESP_Media_Index::reindex_attachment($move_id),
+            'source attachment initially indexed ' . $order);
+        $first_key = $order === 'attached_first'
+            ? '_wp_attached_file' : '_wp_attachment_metadata';
+        $second_key = $order === 'attached_first'
+            ? '_wp_attachment_metadata' : '_wp_attached_file';
+        foreach ([$first_key,$second_key] as $step => $key) {
+            $value = $key === '_wp_attached_file' ? $to : $new_meta;
+            esp63_assert(ESP_Media_Index::guard_meta(null,$move_id,$key,$value) === null,
+                "cross-directory metadata write allowed $order step $step");
+            if ($key === '_wp_attached_file') {
+                esp63_sql("UPDATE esp63_postmeta SET meta_value='" .
+                    $db->real_escape_string($to) .
+                    "' WHERE post_id=$move_id AND meta_key='$key'");
+            } else {
+                esp63_sql("UPDATE esp63_postmeta SET meta_value='" .
+                    $db->real_escape_string(serialize($new_meta)) .
+                    "' WHERE post_id=$move_id AND meta_key='$key'");
+            }
+            ESP_Media_Index::on_meta_saved(800+$step,$move_id,$key,$value);
+            esp63_assert(ESP_Media_Index::resolve($uploads . '/' . $to)['status']
+                === 'error', "source cannot authorize during move $order");
+            if ($step === 0) {
+                esp63_assert($options[ESP_Media_Index::READY_OPTION] === '0',
+                    "cross-directory transition revoked global READY $order");
+                esp63_assert(ESP_Media_Index::resolve(
+                    $uploads . '/' . $new_thumb)['status'] === 'error',
+                    "public new-directory thumbnail blocked during move $order");
+                esp63_assert(!ESP_Media_Index::reindex_attachment($move_id),
+                    "incomplete metadata cannot be published $order");
+                ESP_Media_Index::run_batch();
+                esp63_assert($options[ESP_Media_Index::READY_OPTION] === '0',
+                    "Cron cannot republish inconsistent metadata $order");
+            }
+        }
+        if ($move_id === 720) {
+            // Move public A away using an ordinary same-directory update:
+            // after the repair, B must own the derivative as protected.
+            $public_new_path = $to_dir . '/public-719.jpg';
+            esp63_assert(ESP_Media_Index::guard_meta(null,719,
+                '_wp_attached_file',$public_new_path) === null,
+                'public collision owner moved away by normal metadata update');
+            esp63_sql("UPDATE esp63_postmeta SET meta_value='$public_new_path'
+                WHERE post_id=719 AND meta_key='_wp_attached_file'");
+            ESP_Media_Index::on_meta_saved(819,719,'_wp_attached_file',$public_new_path);
+            esp63_assert(ESP_Media_Index::reindex_attachment(719),
+                'former public owner republished on distinct path');
+        }
+        // Cron should rebuild without a special migration API once BOTH
+        // WordPress canonical rows agree. The full audit may take >1 batch.
+        for ($try=0; $try<10 && !ESP_Media_Index::ready(); ++$try) {
+            ESP_Media_Index::run_batch();
+        }
+        esp63_assert(ESP_Media_Index::ready(),
+            "Cron republished complete coverage after canonical repair $order");
+        $mapped = ESP_Media_Index::resolve($uploads . '/' . $to);
+        esp63_assert($mapped['status'] === 'resolved' &&
+            $mapped['protected_path_id'] === 'secret_move',
+            "Cron repaired original after complete move $order");
+        $thumb = ESP_Media_Index::resolve($uploads . '/' . $new_thumb);
+        esp63_assert($thumb['status'] === 'resolved' &&
+            $thumb['protected_path_id'] === 'secret_move',
+            "Cron repaired protected derivative after complete move $order");
+    }
+
+
+    // Review R03: repeated obsolete-generation DELETE failure is visible,
+    // keeps published READY authorization intact, and is retried by Cron
+    // without rebuilding otherwise healthy attachments.
+    $gc_id = 730;
+    esp63_sql("INSERT INTO esp63_posts(ID,post_type) VALUES ($gc_id,'attachment')");
+    esp63_sql("INSERT INTO esp63_postmeta(post_id,meta_key,meta_value) VALUES
+        ($gc_id,'_wp_attached_file','2026/10/cleanup-730.jpg'),
+        ($gc_id,'_esp_media_protected_path_id','before')");
+    esp63_assert(ESP_Media_Index::reindex_attachment($gc_id),
+        'R03 cleanup fixture initially ready');
+    $wpdb->fail_cleanup = true;
+    foreach (['second','third'] as $step) {
+        esp63_assert(ESP_Media_Index::guard_meta(null,$gc_id,
+            '_esp_media_protected_path_id',$step) === null,
+            'R03 metadata change fenced during failed cleanup');
+        esp63_sql("UPDATE esp63_postmeta SET meta_value='$step'
+            WHERE post_id=$gc_id AND meta_key='_esp_media_protected_path_id'");
+        ESP_Media_Index::on_meta_saved(900,$gc_id,'_esp_media_protected_path_id',$step);
+        esp63_assert(ESP_Media_Index::reindex_attachment($gc_id),
+            'R03 active owner publishes even if obsolete cleanup fails');
+    }
+    $gc_rows = (int)$wpdb->get_var(
+        "SELECT COUNT(*) FROM $files WHERE attachment_id=$gc_id");
+    $gc_state = $wpdb->get_row("SELECT status,failure_count,active_generation
+        FROM $state WHERE attachment_id=$gc_id", ARRAY_A);
+    esp63_assert($gc_state['status'] === 'ready' &&
+        (int)$gc_state['failure_count'] > 0 && $gc_rows === 3,
+        'R03 cleanup failure leaves active READY and a persisted retry');
+    esp63_sql("UPDATE $state SET retry_after=1 WHERE attachment_id=$gc_id");
+    ESP_Media_Index::run_batch(); // simulated continued DELETE outage
+    esp63_assert((int)$wpdb->get_var(
+        "SELECT failure_count FROM $state WHERE attachment_id=$gc_id") > 0,
+        'R03 retry remains scheduled while DELETE is unavailable');
+    $wpdb->fail_cleanup = false;
+    esp63_sql("UPDATE $state SET retry_after=1 WHERE attachment_id=$gc_id");
+    ESP_Media_Index::run_batch();
+    $gc_rows_after = (int)$wpdb->get_var(
+        "SELECT COUNT(*) FROM $files WHERE attachment_id=$gc_id");
+    $gc_failure_after = (int)$wpdb->get_var(
+        "SELECT failure_count FROM $state WHERE attachment_id=$gc_id");
+    esp63_assert($gc_rows_after === 1 && $gc_failure_after === 0,
+        'R03 Cron maintenance removes old generations and clears retry flag');
+
+    // R03: after the active generation publishes, DELETE may fail and the
+    // retry-ticket UPDATE may fail too. A full audit must detect the orphaned
+    // old generation without a ticket and reclaim it without a new mutation.
+    $lost_gc = 731;
+    esp63_sql("INSERT INTO esp63_posts(ID,post_type) VALUES ($lost_gc,'attachment')");
+    esp63_sql("INSERT INTO esp63_postmeta(post_id,meta_key,meta_value) VALUES
+        ($lost_gc,'_wp_attached_file','2026/10/cleanup-731.jpg'),
+        ($lost_gc,'_esp_media_protected_path_id','old')");
+    esp63_assert(ESP_Media_Index::reindex_attachment($lost_gc),
+        'lost cleanup ticket initial READY');
+    esp63_assert(ESP_Media_Index::guard_meta(null,$lost_gc,
+        '_esp_media_protected_path_id','new') === null,
+        'lost cleanup ticket update is properly pre-fenced');
+    esp63_sql("UPDATE esp63_postmeta SET meta_value='new'
+        WHERE post_id=$lost_gc AND meta_key='_esp_media_protected_path_id'");
+    ESP_Media_Index::on_meta_saved(901,$lost_gc,'_esp_media_protected_path_id','new');
+    $wpdb->fail_cleanup = true;
+    $wpdb->fail_cleanup_retry_write = true;
+    esp63_assert(ESP_Media_Index::reindex_attachment($lost_gc),
+        'active generation publishes even when cleanup and retry ticket both fail');
+    $wpdb->fail_cleanup = false;
+    $wpdb->fail_cleanup_retry_write = false;
+    $pre = $wpdb->get_row("SELECT status,revision,active_generation,failure_count
+        FROM $state WHERE attachment_id=$lost_gc", ARRAY_A);
+    esp63_assert($pre['status'] === 'ready' &&
+        (int)$pre['failure_count'] === 0 &&
+        (int)$wpdb->get_var("SELECT COUNT(*) FROM $files
+            WHERE attachment_id=$lost_gc") === 2,
+        'orphaned old generation exists with no retry ticket');
+    esp63_sql("UPDATE $state SET audit_cursor=730,revision=revision+1
+        WHERE attachment_id=0");
+    ESP_Media_Index::run_batch();
+    $post = $wpdb->get_row("SELECT status,revision,active_generation,failure_count
+        FROM $state WHERE attachment_id=$lost_gc", ARRAY_A);
+    esp63_assert($post === $pre &&
+        (int)$wpdb->get_var("SELECT COUNT(*) FROM $files
+            WHERE attachment_id=$lost_gc") === 1,
+        'ordinary full audit scavenges old generation without rebuilding READY');
+
 
     // Throughput experiment, opt-in only on benchmark workflow.
     // This measures real run_batch()/reindex_attachment(), not the existing
@@ -755,6 +1114,105 @@ try {
         $final_seconds = microtime(true) - $final_start;
         $coverage = $wpdb->get_var("SELECT status FROM $state WHERE attachment_id=0");
         esp63_assert($coverage === 'ready', 'bootstrap full coverage becomes READY');
+        // Measure a complete second pass over the same READY data. This is
+        // the steady-state audit, where no SQL writes should occur for healthy
+        // owners. Count both file rows and owner revisions before/after.
+        $sum_before = (int)$wpdb->get_var(
+            "SELECT COALESCE(SUM(revision),0) FROM $state
+             WHERE attachment_id>=$base_id AND attachment_id<($base_id+$size)");
+        $rows_before = (int)$wpdb->get_var(
+            "SELECT COUNT(*) FROM $files
+             WHERE attachment_id>=$base_id AND attachment_id<($base_id+$size)");
+        esp63_sql("UPDATE $state SET status='ready',revision=revision+1,
+            audit_cursor=99999 WHERE attachment_id=0");
+        $audit_start = microtime(true);
+        for ($batch = 1; $batch <= (int)($size / 200); ++$batch) {
+            ESP_Media_Index::run_batch();
+            $expected_cursor = 99999 + $batch * 200;
+            $observed_cursor = (int)$wpdb->get_var(
+                "SELECT audit_cursor FROM $state WHERE attachment_id=0");
+            if ($observed_cursor !== $expected_cursor) {
+                throw new RuntimeException('Read-only audit cursor stalled at batch ' . $batch);
+            }
+        }
+        ESP_Media_Index::run_batch();
+        $audit_seconds = microtime(true) - $audit_start;
+        $sum_after = (int)$wpdb->get_var(
+            "SELECT COALESCE(SUM(revision),0) FROM $state
+             WHERE attachment_id>=$base_id AND attachment_id<($base_id+$size)");
+        $rows_after = (int)$wpdb->get_var(
+            "SELECT COUNT(*) FROM $files
+             WHERE attachment_id>=$base_id AND attachment_id<($base_id+$size)");
+        $audit_ready = $wpdb->get_var(
+            "SELECT status FROM $state WHERE attachment_id=0");
+        esp63_assert($sum_before === $sum_after && $rows_before === $rows_after
+            && $audit_ready === 'ready', 'full healthy audit writes no new owner generations');
+        echo 'ESP63_AUDIT_SAMPLE ' . json_encode([
+            'attachments' => $size,
+            'read_only_audit_seconds' => round($audit_seconds, 3),
+            'attachments_per_second' => round($size / max($audit_seconds, .000001), 3)
+        ], JSON_UNESCAPED_SLASHES) . "\n";
+
+        // Review performance R02: 100K healthy READY control rows (no
+        // scheduled cleanup) make retry_after<=NOW() nonselective. Compare
+        // actual MySQL 8.0 EXPLAIN ANALYZE before/after the >0 predicate,
+        // then measure the new query with three scheduled cleanup owners.
+        // These are synthetic state rows, not real WordPress attachments.
+        $dummy_base = 2000000;
+        for ($offset=0; $offset<100000; $offset+=500) {
+            $values = [];
+            for ($k=0; $k<500; ++$k) {
+                $dummy_id = $dummy_base + $offset + $k;
+                $values[] = "($dummy_id,'ready',1,1,0,0,0,0)";
+            }
+            esp63_sql("INSERT INTO $state
+                (attachment_id,status,revision,active_generation,
+                 pending_count,changed_at,retry_after,failure_count) VALUES " .
+                implode(',', $values));
+        }
+        $cleanup_common = "SELECT attachment_id,active_generation FROM $state
+            WHERE attachment_id>0 AND status='ready' AND pending_count=0
+              AND failure_count>0";
+        $cleanup_tail = " AND retry_after<=" . time() .
+            " ORDER BY changed_at ASC LIMIT 200";
+        $plans = [
+            'old_no_waiters' => $cleanup_common . $cleanup_tail,
+            'new_no_waiters' => $cleanup_common .
+                " AND retry_after>0" . $cleanup_tail
+        ];
+        esp63_sql("UPDATE $state SET failure_count=1,retry_after=1
+            WHERE attachment_id IN ($dummy_base," . ($dummy_base+1) .
+            "," . ($dummy_base+2) . ")");
+        $plans['new_three_waiters'] = $cleanup_common .
+            " AND retry_after>0" . $cleanup_tail;
+        foreach ($plans as $scenario => $query) {
+            // The old/no-waiters scenario must not observe the scheduled
+            // fixtures: it is meant to demonstrate the zero-waiter case.
+            if ($scenario === 'old_no_waiters' || $scenario === 'new_no_waiters') {
+                esp63_sql("UPDATE $state SET failure_count=0,retry_after=0
+                    WHERE attachment_id BETWEEN $dummy_base AND " .
+                    ($dummy_base+2));
+            } else {
+                esp63_sql("UPDATE $state SET failure_count=1,retry_after=1
+                    WHERE attachment_id BETWEEN $dummy_base AND " .
+                    ($dummy_base+2));
+            }
+            $plan_result = $db->query("EXPLAIN ANALYZE " . $query);
+            if ($plan_result === false) {
+                throw new RuntimeException('Cleanup EXPLAIN ANALYZE failed: ' . $db->error);
+            }
+            $explain_rows = [];
+            while ($explain = $plan_result->fetch_row()) {
+                $explain_rows[] = (string)$explain[0];
+            }
+            echo 'ESP63_CLEANUP_PLAN ' . json_encode([
+                'scenario'=>$scenario,
+                'healthy_ready_synthetic'=>100000,
+                'plan'=>implode("\n", $explain_rows)
+            ], JSON_UNESCAPED_SLASHES) . "\n";
+            $plan_result->free();
+        }
+
         sort($batches, SORT_NUMERIC);
         $p95 = $batches[(int)ceil(count($batches) * .95) - 1];
         $report = [
@@ -768,6 +1226,10 @@ try {
             'seed_seconds_excluded' => round($seed_seconds, 3),
             'batch_p95_seconds' => round($p95, 3),
             'final_coverage_seconds' => round($final_seconds, 3),
+            'read_only_audit_seconds' => round($audit_seconds, 3),
+            'audit_attachments_per_second' => round($size / max($audit_seconds, .000001), 3),
+            'audit_revisions_unchanged' => $sum_before === $sum_after,
+            'audit_file_rows_unchanged' => $rows_before === $rows_after,
             'samples' => $samples
         ];
         $report_file = getenv('ESP63_BUILD_REPORT') ?: '';
@@ -778,9 +1240,49 @@ try {
         echo 'ESP63_BUILD_REPORT ' . json_encode($report, JSON_UNESCAPED_SLASHES) . "\n";
     }
 
+    // Q01 containment: the server applied A's decrement but PHP received
+    // an error. Never execute it again in shutdown or it could consume B's
+    // outstanding ticket. Recovering the stuck owner requires an independent
+    // durable per-mutation record, not a blind counter reset.
+    $ambiguous_id = 740;
+    esp63_sql("INSERT INTO esp63_posts(ID,post_type) VALUES ($ambiguous_id,'attachment')");
+    esp63_sql("INSERT INTO esp63_postmeta(post_id,meta_key,meta_value) VALUES
+        ($ambiguous_id,'_wp_attached_file','2026/10/uncertain-740.jpg'),
+        ($ambiguous_id,'_esp_media_protected_path_id','secret_pending')");
+    esp63_assert(ESP_Media_Index::reindex_attachment($ambiguous_id),
+        'Q01 ACK-loss fixture initially ready');
+    esp63_assert(ESP_Media_Index::guard_meta(null, $ambiguous_id,
+        '_esp_media_protected_path_id','secret_pending') === null &&
+        ESP_Media_Index::guard_meta(null, $ambiguous_id,
+        '_esp_media_protected_path_id','secret_pending') === null,
+        'Q01 two independent pending writers fenced');
+    $wpdb->lose_pending_decrement_ack_once = true;
+    ESP_Media_Index::on_meta_saved(741,$ambiguous_id,
+        '_esp_media_protected_path_id','secret_pending');
+    $remaining_before_shutdown = (int)$wpdb->get_var(
+        "SELECT pending_count FROM $state WHERE attachment_id=$ambiguous_id");
+    esp63_assert($remaining_before_shutdown === 1,
+        'Q01 A decremented in MySQL but acknowledgment was lost');
+    ESP_Media_Index::finish_noop_writes();
+    $remaining_after_shutdown = (int)$wpdb->get_var(
+        "SELECT pending_count FROM $state WHERE attachment_id=$ambiguous_id");
+    esp63_assert($remaining_after_shutdown === 1 &&
+        !ESP_Media_Index::reindex_attachment($ambiguous_id),
+        'Q01 shutdown cannot steal concurrent B pending ticket or publish READY');
+    // This disposable fixture is intentionally not made READY; real
+    // recovery remains an unresolved P0 requiring durable ticket identities.
+    esp63_sql("DELETE FROM $files WHERE attachment_id=$ambiguous_id");
+    esp63_sql("DELETE FROM $state WHERE attachment_id=$ambiguous_id");
+    esp63_sql("DELETE FROM esp63_postmeta WHERE post_id=$ambiguous_id");
+    esp63_sql("DELETE FROM esp63_posts WHERE ID=$ambiguous_id");
+
     echo "Issue 63 production index MySQL tests passed.\n";
 } finally {
     foreach (glob($uploads . '/2026/10/*') as $file) { @unlink($file); }
+    foreach (['09','11'] as $month) {
+        foreach (glob($uploads . '/2026/' . $month . '/*') ?: [] as $file) { @unlink($file); }
+        @rmdir($uploads . '/2026/' . $month);
+    }
     @rmdir($uploads . '/2026/10'); @rmdir($uploads . '/2026'); @rmdir($uploads);
     foreach ([$files,$state,'esp63_postmeta','esp63_posts','esp63_external_txn'] as $table) {
         $db->query("DROP TABLE IF EXISTS $table");

@@ -7,11 +7,25 @@ if [[ "$ESP_ALLOW_DISPOSABLE_DB" != 1 || "$CI" != true ]]; then
   exit 1
 fi
 
+# Run the EXIT-trap regression before starting disposable Docker/WordPress.
+bash tests/test-wordpress-apache-cleanup.sh
+
 fixture_root="$(mktemp -d "$RUNNER_TEMP/esp31-apache-http.XXXXXXXX")"
 container="esp31-http-$GITHUB_RUN_ID-$$"
 started=0
+q01_proxy_pid=0
+q01_wpdb_proxy_pid=0
 cleanup() {
+  # Capture the failing command's status BEFORE any proxy teardown changes $?.
   local result=$?
+  if [[ $q01_wpdb_proxy_pid -gt 0 ]]; then
+    kill "$q01_wpdb_proxy_pid" >/dev/null 2>&1 || true
+    wait "$q01_wpdb_proxy_pid" >/dev/null 2>&1 || true
+  fi
+  if [[ $q01_proxy_pid -gt 0 ]]; then
+    kill "$q01_proxy_pid" >/dev/null 2>&1 || true
+    wait "$q01_proxy_pid" >/dev/null 2>&1 || true
+  fi
   if [[ $result -ne 0 && $started -eq 1 ]]; then
     docker logs "$container" >&2 || true
   fi
@@ -67,9 +81,213 @@ docker exec "$container" grep -q '# BEGIN ESP Media Protection' \
 ESP42_PDF_MANIFEST="$fixture_root/wordpress/wp-content/uploads/.esp42-pdf-fixture.json" \
   python3 tests/wordpress-http-check.py
 
-# #63: exercise actual WordPress dbDelta/backfill and opt-in strict PHP delivery.
+# Test index bootstrap, lock contention, AJAX capabilities/nonce, and WP-CLI.
+for phase in bootstrap cron-lock; do
+  docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+    ESP_INDEX_DRIVER_PHASE="$phase" \
+    php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-drivers-ci.php
+done
+denied="$(docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+    ESP_INDEX_DRIVER_PHASE=ajax-denied \
+    php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-drivers-ci.php)"
+printf '%s' "$denied" | grep -q '"success":false'
+printf '%s' "$denied" | grep -q '"Forbidden"'
+bad_nonce="$(docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+    ESP_INDEX_DRIVER_PHASE=ajax-bad-nonce \
+    php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-drivers-ci.php)"
+[[ "$bad_nonce" == "-1" ]]
+allowed="$(docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+    ESP_INDEX_DRIVER_PHASE=ajax-allowed \
+    php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-drivers-ci.php)"
+printf '%s' "$allowed" | python3 -c 'import json,sys; a=json.load(sys.stdin); assert a["success"] is True and a["data"]["installed"] is True and a["data"]["enabled"] is False, a'
+echo "PASS: real registered admin AJAX callback, capability, nonce and bounded slice"
+
+# Restart via a different PHP/WordPress entrypoint: CLI sees persisted progress.
+docker exec "$container" php /opt/wp-cli.phar --allow-root --path=/var/www/html \
+    esp media-index status | python3 -c 'import json,sys; x=json.load(sys.stdin); assert x["installed"] is True and x["enabled"] is False, x'
+docker exec "$container" php /opt/wp-cli.phar --allow-root --path=/var/www/html \
+    esp media-index build --max-seconds=15
+docker exec "$container" php /opt/wp-cli.phar --allow-root --path=/var/www/html \
+    esp media-index status | python3 -c 'import json,sys; x=json.load(sys.stdin); assert x["installed"] is True and x["ready"] is True and x["enabled"] is False, x'
+echo "PASS: real WP-CLI status/build resumes AJAX work and preserves strict OFF"
+
+# Simulate an unsupported legacy server version while executing against the
+# real disposable MySQL service. No old, unsupported daemon runs in CI.
 docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
-  php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-ci.php
+  ESP_INDEX_DRIVER_PHASE=db-unsupported \
+  php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-drivers-ci.php
+unsupported_ajax="$(docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+  ESP_INDEX_DRIVER_PHASE=ajax-unsupported \
+  php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-drivers-ci.php)"
+printf '%s' "$unsupported_ajax" | python3 -c 'import json,sys; x=json.load(sys.stdin); assert x["success"] is False and "Unsupported DB" in x["data"]["message"], x'
+echo "PASS: unsupported old DB rejects media-index AJAX with explicit minimum version"
+
+# F02: global READY is not "all owners READY". Prepare an eligible dirty
+# attachment in a fresh worker; verify real settings-page button and repair
+# it via the same authenticated WordPress AJAX action as normal admin work.
+for phase in repair-seed repair-check; do
+  docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+    ESP_INDEX_DRIVER_PHASE="$phase" \
+    php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-drivers-ci.php
+done
+repaired="$(docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+  ESP_INDEX_DRIVER_PHASE=ajax-allowed \
+  php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-drivers-ci.php)"
+printf '%s' "$repaired" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+assert x["success"] is True, x
+assert x["data"]["ready"] is True, x
+assert x["data"]["repairable_dirty"] is False, x
+# Display-only dirty counts are cached for 15s. The authoritative repairable
+# flag must already be false even when the approximate count is stale.
+'
+docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+  ESP_INDEX_DRIVER_PHASE=repair-verify \
+  php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-drivers-ci.php
+echo "PASS: F02 admin manual repair after global READY with backoff/pending safety"
+
+# F01: real WP-CLI must repair >200 eligible owners across multiple
+# run_batch() slices, then stop with a warning for pending/backoff rows.
+cli_fixture="/var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-cli-ci.php"
+for phase in seed; do
+  docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+    ESP_INDEX_CLI_PHASE="$phase" php "$cli_fixture"
+done
+cli_repair_output="$(timeout --signal=TERM 120s docker exec "$container" \
+  php /opt/wp-cli.phar --allow-root --path=/var/www/html \
+  esp media-index build --max-seconds=100 2>&1)"
+printf '%s\n' "$cli_repair_output"
+printf '%s\n' "$cli_repair_output" | grep -q 'remaining attachments are pending or in retry backoff'
+docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+  ESP_INDEX_CLI_PHASE=verify-deferred php "$cli_fixture"
+# Running again with only deferred rows must not spin until --max-seconds.
+cli_deferred_output="$(timeout --signal=TERM 45s docker exec "$container" \
+  php /opt/wp-cli.phar --allow-root --path=/var/www/html \
+  esp media-index build --max-seconds=30 2>&1)"
+printf '%s\n' "$cli_deferred_output" | grep -q 'remaining attachments are pending or in retry backoff'
+docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+  ESP_INDEX_CLI_PHASE=unblock php "$cli_fixture"
+cli_complete_output="$(timeout --signal=TERM 45s docker exec "$container" \
+  php /opt/wp-cli.phar --allow-root --path=/var/www/html \
+  esp media-index build --max-seconds=30 2>&1)"
+printf '%s\n' "$cli_complete_output"
+printf '%s\n' "$cli_complete_output" | grep -q 'Media index READY and eligible repairs complete'
+docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+  ESP_INDEX_CLI_PHASE=verify-complete php "$cli_fixture"
+echo 'PASS: F01 real WP-CLI repairs 201 owners across batches and reports deferred rows'
+
+# Q01: deliberately discard the MySQL OK packet after an UPDATE commits.
+# The packet relay runs on the disposable GitHub Actions host, not production.
+cat > "$fixture_root/q01-mysql-proxy.py" <<'PY'
+#!/usr/bin/env python3
+import socket
+import socketserver
+import struct
+import sys
+import threading
+
+TARGET = b'ESP_Q01_DROP_ACK'
+lock = threading.Lock()
+dropped = False
+
+def read_exact(sock, count):
+    data = b''
+    while len(data) < count:
+        chunk = sock.recv(count - len(data))
+        if not chunk:
+            raise EOFError('peer closed')
+        data += chunk
+    return data
+
+def read_packet(sock):
+    h = read_exact(sock, 4)
+    return h + read_exact(sock, int.from_bytes(h[:3], 'little'))
+
+class Handler(socketserver.BaseRequestHandler):
+    def handle(self):
+        global dropped
+        server = socket.create_connection(('127.0.0.1', 3306), timeout=10)
+        client = self.request
+        target = threading.Event()
+        finished = threading.Event()
+        def client_to_server():
+            try:
+                while not finished.is_set():
+                    p = read_packet(client)
+                    if len(p) > 5 and p[4] == 3 and TARGET in p:
+                        target.set()
+                        print('Q01_PROXY_TARGET_QUERY_SEEN', flush=True)
+                    server.sendall(p)
+            except (EOFError, OSError):
+                pass
+            finally:
+                finished.set()
+        thread = threading.Thread(target=client_to_server, daemon=True)
+        thread.start()
+        try:
+            while not finished.is_set():
+                p = read_packet(server)
+                if target.is_set() and len(p) > 4 and p[4] == 0:
+                    with lock:
+                        drop = not dropped
+                        if drop:
+                            dropped = True
+                    if drop:
+                        print('Q01_PROXY_DROPPED_UPDATE_OK', flush=True)
+                        client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
+                        break
+                client.sendall(p)
+        except (EOFError, OSError):
+            pass
+        finally:
+            finished.set()
+            for s in (client, server):
+                try:
+                    s.close()
+                except OSError:
+                    pass
+            thread.join(timeout=1)
+
+class Server(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+with Server(('0.0.0.0', int(sys.argv[1])), Handler) as srv:
+    print('Q01_PROXY_LISTENING', flush=True)
+    srv.serve_forever()
+PY
+python3 -u "$fixture_root/q01-mysql-proxy.py" 33307 > "$fixture_root/q01-proxy.log" 2>&1 &
+q01_proxy_pid=$!
+python3 -u "$fixture_root/q01-mysql-proxy.py" 33308 > "$fixture_root/q01-wpdb-proxy.log" 2>&1 &
+q01_wpdb_proxy_pid=$!
+for _ in $(seq 1 50); do
+  if grep -q Q01_PROXY_LISTENING "$fixture_root/q01-proxy.log" &&
+     grep -q Q01_PROXY_LISTENING "$fixture_root/q01-wpdb-proxy.log"; then break; fi
+  sleep 0.1
+done
+if ! grep -q Q01_PROXY_LISTENING "$fixture_root/q01-proxy.log" ||
+   ! grep -q Q01_PROXY_LISTENING "$fixture_root/q01-wpdb-proxy.log"; then
+  cat "$fixture_root/q01-proxy.log" >&2
+  cat "$fixture_root/q01-wpdb-proxy.log" >&2
+  exit 1
+fi
+
+# #63: exercise actual WordPress dbDelta/backfill and opt-in strict PHP delivery.
+if ! timeout --signal=TERM 90s docker exec "$container" env \
+  ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+  ESP_Q01_PROXY_HOST=host.docker.internal:33307 \
+  ESP_Q01_WPDB_PROXY_HOST=host.docker.internal:33308 \
+  php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-ci.php; then
+  echo 'Q01 WordPress/packet-proxy probe failed or timed out' >&2
+  cat "$fixture_root/q01-proxy.log" >&2
+  cat "$fixture_root/q01-wpdb-proxy.log" >&2
+  exit 1
+fi
+cat "$fixture_root/q01-proxy.log"
+cat "$fixture_root/q01-wpdb-proxy.log"
+grep -q Q01_PROXY_DROPPED_UPDATE_OK "$fixture_root/q01-proxy.log"
+grep -q Q01_PROXY_DROPPED_UPDATE_OK "$fixture_root/q01-wpdb-proxy.log"
 assert_http() {
   local path="$1" expected="$2"
   local status
@@ -93,6 +311,29 @@ docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html
   ESP_COLLISION_PHASE=restore \
   php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-collision-ci.php
 assert_http esp31-public-150x150.jpg 200
+
+# by-mid metadata update: sanitize_post_meta_* changes the stored file
+# AFTER the pre-hook. Verify the actual sanitized protected owner blocks
+# anonymous HTTP before any media-index rebuild.
+docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+  ESP_COLLISION_PHASE=by_mid_prepare \
+  php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-collision-ci.php
+assert_http esp31-public-150x150.jpg 503
+docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+  ESP_COLLISION_PHASE=by_mid_restore \
+  php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-collision-ci.php
+assert_http esp31-public-150x150.jpg 200
+
+# Same by-mid hazard via serialized _wp_attachment_metadata after sanitize.
+docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+  ESP_COLLISION_PHASE=by_mid_metadata_prepare \
+  php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-collision-ci.php
+assert_http esp31-public-150x150.jpg 503
+docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+  ESP_COLLISION_PHASE=by_mid_metadata_restore \
+  php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-collision-ci.php
+assert_http esp31-public-150x150.jpg 200
+
 assert_http esp63-unregistered.jpg 403
 echo 'PASS: issue 63 real WordPress/Apache strict index HTTP smoke suite'
 echo 'PASS: disposable Apache/WordPress media HTTP regression suite'
