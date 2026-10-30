@@ -373,6 +373,16 @@ scope_phase strict
 assert_http esp63-unregistered.jpg 403
 ! grep -q ESP63_UNREGISTERED_BUT_REAL_FILE "$fixture_root/http-probe-body"
 assert_http esp31-protected-150x150.jpg 302
+# #43 R01: confirm WordPress's existing upload_files privileged bypass
+# without an ESP password, contrasting a logged-in Subscriber and anonymous.
+# These disposable test users do not exist outside this temporary WordPress.
+docker exec "$container" php /opt/wp-cli.phar --allow-root --path=/var/www/html \
+  user create esp-ci-author esp-ci-author@example.test --role=author \
+  --user_pass=esp-ci-author-only --porcelain >/dev/null
+docker exec "$container" php /opt/wp-cli.phar --allow-root --path=/var/www/html \
+  user create esp-ci-subscriber esp-ci-subscriber@example.test --role=subscriber \
+  --user_pass=esp-ci-subscriber-only --porcelain >/dev/null
+python3 tests/wordpress-media-role-http.py | tee "$report_root/media-role-http.log"
 # Missing index row does not prove a WordPress derivative is public.
 scope_phase index-gap
 assert_http esp31-protected-150x150.jpg 403
