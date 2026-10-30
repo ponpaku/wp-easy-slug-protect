@@ -583,7 +583,13 @@ class ESP_Admin_Menu {
                                     <?php elseif ($esp_index_status['error']): ?>
                                         <?php esc_html_e('状態を確認できません。DB接続・テーブルを点検してください。', $text_domain); ?>
                                     <?php elseif ($esp_index_status['ready']): ?>
-                                        <?php esc_html_e('初期構築・検証は完了しています。', $text_domain); ?>
+                                        <?php if ($esp_index_status['repairable_dirty']): ?>
+                                            <?php esc_html_e('初期構築・検証は完了しています。再構築可能な添付があります。', $text_domain); ?>
+                                        <?php elseif ($esp_index_status['dirty'] > 0): ?>
+                                            <?php esc_html_e('初期構築・検証は完了しています。添付の更新中または再試行待ちです。', $text_domain); ?>
+                                        <?php else: ?>
+                                            <?php esc_html_e('初期構築・検証は完了しています。', $text_domain); ?>
+                                        <?php endif; ?>
                                     <?php else: ?>
                                         <?php echo esc_html(sprintf(
                                             __('初期構築中：%1$s / %2$s 添付を走査済み（目安）', $text_domain),
@@ -610,8 +616,9 @@ class ESP_Admin_Menu {
                                 </div>
                                 <p>
                                     <button type="button" class="button button-secondary" id="esp-media-index-build"
-                                        <?php disabled($esp_index_status['ready'] || $esp_index_status['error']); ?>>
-                                        <?php esc_html_e('メディア保護テーブルを構築・再開する', $text_domain); ?>
+                                        <?php disabled($esp_index_status['error'] ||
+                                            ($esp_index_status['ready'] && !$esp_index_status['repairable_dirty'])); ?>>
+                                        <?php esc_html_e('メディア保護テーブルを構築・再開・修復する', $text_domain); ?>
                                     </button>
                                     <button type="button" class="button" id="esp-media-index-stop" disabled>
                                         <?php esc_html_e('手動処理を停止（Cronは継続）', $text_domain); ?>
