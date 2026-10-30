@@ -35,8 +35,9 @@ def session(jar=None):
     )
 
 
-def req(opener, path, method="GET", fields=None, headers=None):
+def req(opener, path, method=None, fields=None, headers=None):
     data = None if fields is None else urllib.parse.urlencode(fields).encode()
+    # None lets urllib choose POST for form data; explicit GET/HEAD only for media probes.
     request = urllib.request.Request(BASE + path, data=data, method=method, headers=headers or {})
     before = time.perf_counter()
     try:
