@@ -12,6 +12,9 @@ require rtrim(getenv('ESP_WP_ROOT'), '/') . '/wp-load.php';
 if (strpos(DB_NAME, 'esp_') !== 0 || !class_exists('ESP_Media_Index')) {
     throw new RuntimeException('F01 only runs against disposable WordPress');
 }
+// The actual disposable HTTP test server is Apache. CLI PHP otherwise has
+// no SERVER_SOFTWARE and the independent rewrite-safety guard rejects writes.
+$_SERVER['SERVER_SOFTWARE'] = 'Apache/2.4';
 global $wpdb;
 $id = (int)$wpdb->get_var($wpdb->prepare(
     "SELECT ID FROM {$wpdb->posts} WHERE post_type='attachment'
