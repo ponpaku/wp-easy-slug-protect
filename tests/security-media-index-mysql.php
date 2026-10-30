@@ -248,6 +248,7 @@ try {
     esp63_sql("UPDATE esp63_postmeta SET meta_value='secret_B'
         WHERE post_id=10 AND meta_key='_esp_media_protected_path_id'");
     ESP_Media_Index::on_meta_saved(20,10,'_esp_media_protected_path_id','secret_B');
+    ESP_Media_Index::finish_noop_writes();
     esp63_assert(ESP_Media_Index::resolve($uploads . '/2026/10/cat.jpg')['status']
         === 'error', 'post-hook leaves index dirty until independent worker');
     $wpdb->fail_cleanup = true; // Old-generation rows will remain.
@@ -283,11 +284,13 @@ try {
     esp63_sql("UPDATE esp63_postmeta SET meta_value='writer_A'
         WHERE post_id=10 AND meta_key='_esp_media_protected_path_id'");
     ESP_Media_Index::on_meta_saved(30, 10, '_esp_media_protected_path_id', 'writer_A');
+    ESP_Media_Index::finish_noop_writes();
     esp63_assert(ESP_Media_Index::resolve($uploads . '/2026/10/cat.jpg')['status']
         === 'error', 'first completion cannot publish with second pending');
     esp63_sql("UPDATE esp63_postmeta SET meta_value='writer_B'
         WHERE post_id=10 AND meta_key='_esp_media_protected_path_id'");
     ESP_Media_Index::on_meta_saved(31, 10, '_esp_media_protected_path_id', 'writer_B');
+    ESP_Media_Index::finish_noop_writes();
     esp63_assert(ESP_Media_Index::resolve($uploads . '/2026/10/cat.jpg')['status']
         === 'error', 'second post-hook still does not publish');
     esp63_assert(ESP_Media_Index::reindex_attachment(10),
@@ -320,6 +323,7 @@ try {
         === 'error', 'staged new generation cannot hide dirty owner');
     esp63_sql("DELETE FROM $files WHERE attachment_id=11 AND generation=$stage_generation");
     ESP_Media_Index::on_meta_saved(33,11,'_wp_attached_file','2026/10/cat-150x150.jpg');
+    ESP_Media_Index::finish_noop_writes();
     esp63_assert(ESP_Media_Index::reindex_attachment(11),
         'publish competing owner only after full rebuild');
     esp63_assert(ESP_Media_Index::resolve($uploads . '/2026/10/cat-150x150.jpg')['status']
@@ -343,6 +347,7 @@ try {
     esp63_sql("UPDATE esp63_postmeta SET meta_value='../outside.jpg'
         WHERE post_id=10 AND meta_key='_wp_attached_file'");
     ESP_Media_Index::on_meta_saved(21,10,'_wp_attached_file','../outside.jpg');
+    ESP_Media_Index::finish_noop_writes();
     esp63_assert(ESP_Media_Index::resolve($uploads . '/2026/10/cat.jpg')['status']
         === 'error', 'failed rebuild leaves old index invalid');
     // Explicit restoration followed by a fresh, guarded reindex.
@@ -370,6 +375,7 @@ try {
     esp63_sql("UPDATE esp63_postmeta SET meta_value='txn_rollback'
         WHERE post_id=10 AND meta_key='_esp_media_protected_path_id'");
     ESP_Media_Index::on_meta_saved(101,10,'_esp_media_protected_path_id','txn_rollback');
+    ESP_Media_Index::finish_noop_writes();
     $peer_state = $peer->query("SELECT status FROM $state WHERE attachment_id=10")->fetch_assoc();
     $peer_protection = $peer->query("SELECT meta_value FROM esp63_postmeta
         WHERE post_id=10 AND meta_key='_esp_media_protected_path_id'")->fetch_assoc();
@@ -393,6 +399,7 @@ try {
     esp63_sql("UPDATE esp63_postmeta SET meta_value='txn_committed'
         WHERE post_id=10 AND meta_key='_esp_media_protected_path_id'");
     ESP_Media_Index::on_meta_saved(102,10,'_esp_media_protected_path_id','txn_committed');
+    ESP_Media_Index::finish_noop_writes();
     esp63_sql('COMMIT');
     $peer_committed = $peer->query("SELECT status FROM $state
         WHERE attachment_id=10")->fetch_assoc();
@@ -510,6 +517,7 @@ try {
     esp63_assert(ESP_Media_Index::guard_meta(null,41,'_wp_attached_file',
         '2026/10/healthy.jpg') === null, 'F02 healthy attachment enqueued');
     ESP_Media_Index::on_meta_saved(411,41,'_wp_attached_file','2026/10/healthy.jpg');
+    ESP_Media_Index::finish_noop_writes();
     ESP_Media_Index::run_batch();
     $failed = $wpdb->get_row("SELECT status,failure_count,retry_after
         FROM $state WHERE attachment_id=40");
@@ -548,6 +556,7 @@ try {
         WHERE post_id=40 AND meta_key='_wp_attached_file'");
     file_put_contents($uploads . '/2026/10/fixed.jpg', 'fixed-file');
     ESP_Media_Index::on_meta_saved(402,40,'_wp_attached_file','2026/10/fixed.jpg');
+    ESP_Media_Index::finish_noop_writes();
     ESP_Media_Index::run_batch();
     ESP_Media_Index::run_batch();
     esp63_assert($options[ESP_Media_Index::READY_OPTION] === '1' &&
@@ -588,6 +597,7 @@ try {
     esp63_sql("INSERT INTO esp63_postmeta(post_id,meta_key,meta_value) VALUES
         (51,'_wp_attachment_metadata','$escaped_new')");
     ESP_Media_Index::on_meta_saved(501,51,'_wp_attachment_metadata',$new_metadata);
+    ESP_Media_Index::finish_noop_writes();
     esp63_assert(ESP_Media_Index::resolve($uploads . '/2026/10/shared.jpg')['status']
         === 'error', 'R01 new owner remains a blocker before worker runs');
     esp63_assert(ESP_Media_Index::reindex_attachment(51), 'R01 worker publishes new owner');
@@ -654,6 +664,7 @@ try {
     try {
         ESP_Media_Index::on_meta_saved(611,61,
             '_wp_attachment_metadata',$race_metadata);
+    ESP_Media_Index::finish_noop_writes();
     } finally {
         $GLOBALS['wpdb'] = $original_wpdb;
     }
@@ -690,7 +701,7 @@ try {
     esp63_assert($options[ESP_Media_Index::READY_OPTION] === '1',
         'R03 fresh audit epoch eventually republishes coverage');
 
-    // Ordinary concurrent completions each retire exactly one count.
+    // Per-row hooks do not retire tickets: request finalization drains local writes.
     // Unacknowledged/ambiguous responses are a separate fail-closed
     // scenario at the end of this test, not a recoverable blind retry.
     esp63_assert(ESP_Media_Index::guard_meta(null,50,
@@ -700,10 +711,10 @@ try {
     esp63_assert((int)$wpdb->get_var("SELECT pending_count FROM $state
         WHERE attachment_id=50") === 2, 'two pending tickets recorded');
     ESP_Media_Index::on_meta_saved(502,50,'_esp_media_protected_path_id','');
-    esp63_assert((int)$wpdb->get_var("SELECT pending_count FROM $state
-        WHERE attachment_id=50") === 1,
-        'first normal completion preserves second writer ticket');
     ESP_Media_Index::on_meta_saved(503,50,'_esp_media_protected_path_id','');
+    esp63_assert((int)$wpdb->get_var("SELECT pending_count FROM $state
+        WHERE attachment_id=50") === 2,
+        'per-row callbacks cannot consume tickets before request finalization');
     ESP_Media_Index::finish_noop_writes();
     esp63_assert((int)$wpdb->get_var("SELECT pending_count FROM $state
         WHERE attachment_id=50") === 0,
@@ -897,6 +908,7 @@ try {
                     "' WHERE post_id=$move_id AND meta_key='$key'");
             }
             ESP_Media_Index::on_meta_saved(800+$step,$move_id,$key,$value);
+    ESP_Media_Index::finish_noop_writes();
             esp63_assert(ESP_Media_Index::resolve($uploads . '/' . $to)['status']
                 === 'error', "source cannot authorize during move $order");
             if ($step === 0) {
@@ -922,6 +934,7 @@ try {
             esp63_sql("UPDATE esp63_postmeta SET meta_value='$public_new_path'
                 WHERE post_id=719 AND meta_key='_wp_attached_file'");
             ESP_Media_Index::on_meta_saved(819,719,'_wp_attached_file',$public_new_path);
+    ESP_Media_Index::finish_noop_writes();
             esp63_assert(ESP_Media_Index::reindex_attachment(719),
                 'former public owner republished on distinct path');
         }
@@ -961,6 +974,7 @@ try {
         esp63_sql("UPDATE esp63_postmeta SET meta_value='$step'
             WHERE post_id=$gc_id AND meta_key='_esp_media_protected_path_id'");
         ESP_Media_Index::on_meta_saved(900,$gc_id,'_esp_media_protected_path_id',$step);
+    ESP_Media_Index::finish_noop_writes();
         esp63_assert(ESP_Media_Index::reindex_attachment($gc_id),
             'R03 active owner publishes even if obsolete cleanup fails');
     }
@@ -1002,6 +1016,7 @@ try {
     esp63_sql("UPDATE esp63_postmeta SET meta_value='new'
         WHERE post_id=$lost_gc AND meta_key='_esp_media_protected_path_id'");
     ESP_Media_Index::on_meta_saved(901,$lost_gc,'_esp_media_protected_path_id','new');
+    ESP_Media_Index::finish_noop_writes();
     $wpdb->fail_cleanup = true;
     $wpdb->fail_cleanup_retry_write = true;
     esp63_assert(ESP_Media_Index::reindex_attachment($lost_gc),
@@ -1259,6 +1274,11 @@ try {
     $wpdb->lose_pending_decrement_ack_once = true;
     ESP_Media_Index::on_meta_saved(741,$ambiguous_id,
         '_esp_media_protected_path_id','secret_pending');
+    $before_finalization = (int)$wpdb->get_var(
+        "SELECT pending_count FROM $state WHERE attachment_id=$ambiguous_id");
+    esp63_assert($before_finalization === 2,
+        'post-hook must not decrement before request shutdown');
+    ESP_Media_Index::finish_noop_writes();
     $remaining_before_shutdown = (int)$wpdb->get_var(
         "SELECT pending_count FROM $state WHERE attachment_id=$ambiguous_id");
     esp63_assert($remaining_before_shutdown === 1,

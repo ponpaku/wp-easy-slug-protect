@@ -790,10 +790,19 @@ final class ESP_Media_Index {
         unset(self::$by_mid[$mid]);
         if (!self::relevant($meta_key) && $was_by_mid === null) { return; }
         if (get_post_type((int)$post_id) !== 'attachment') { return; }
-        // Only retire our local ticket AFTER its DB decrement succeeds.
-        // A nonzero pending_count belonging to another writer is not failure.
-        if (self::complete_mutation((int)$post_id)) {
-            self::finish_local((int)$post_id);
+        // One Core write may fire multiple row hooks; retire our local
+        // tickets only at request shutdown, not once per metadata row.
+        $id = (int)$post_id;
+        if (empty(self::$local_pending[$id])) {
+            // A post-hook without our pre-hook must still invalidate old
+            // indexed authorization without consuming another worker's ticket.
+            if (!self::mark_dirty($id)) {
+                if (!self::invalidate_global()) {
+                    throw new RuntimeException('ESP media index: untracked metadata write cannot be fenced');
+                }
+            } else {
+                self::track_local($id);
+            }
         }
     }
     public static function on_attachment_created($id) {
@@ -864,6 +873,7 @@ final class ESP_Media_Index {
      * remains independently tracked in the DB.
      */
     public static function finish_noop_writes() {
+        // #67: SQL retry/ACK-loss is not fixed by request-local hook deduplication.
         // This snapshot is intentionally not cleared first. An SQL failure
         // retains the ticket for the later PHP shutdown pass.
         foreach (self::$local_pending as $id => $count) {
