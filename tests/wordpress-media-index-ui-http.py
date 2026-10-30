@@ -7,7 +7,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-BASE = "http://127.0.0.1:8094"
+BASE = "http://localhost:8094"
 ADMIN = "/wp-admin/admin.php?page=esp-settings"
 AJAX = "/wp-admin/admin-ajax.php"
 
@@ -58,8 +58,13 @@ code, body, _ = request(session, "/wp-login.php", {
     "redirect_to": BASE + ADMIN,
     "testcookie": "1",
 })
-require(code == 200 and b'id="esp-media-index-build"' in body,
-        "real WP admin login did not reach media-index settings page")
+if not (code == 200 and b'id="esp-media-index-build"' in body):
+    # Never print credentials or cookies; only final response metadata/error.
+    error = re.search(rb'<div id="login_error"[^>]*>(.*?)</div>', body, re.S)
+    print("DEBUG admin login: status=%s, body_bytes=%s, login_error=%s" %
+          (code, len(body), re.sub(rb"<[^>]+>", b"", error.group(1)).decode("utf-8", "replace")
+           if error else "none"))
+    raise AssertionError("real WP admin login did not reach media-index settings page")
 
 code, page, _ = request(session, ADMIN)
 require(code == 200 and button_enabled(page),
