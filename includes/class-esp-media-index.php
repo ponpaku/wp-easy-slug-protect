@@ -112,6 +112,8 @@ final class ESP_Media_Index {
             add_action($hook, [self::class, 'on_meta_saved'], 20, 4);
         }
         add_action('add_attachment', [self::class, 'on_attachment_created'], 20, 1);
+        // Existing posts can become attachments without add_attachment or a meta hook.
+        add_action('pre_post_update', [self::class, 'guard_post_type_transition'], 5, 2);
         add_action('delete_attachment', [self::class, 'on_attachment_deleting'], 1, 1);
         add_action('deleted_post', [self::class, 'on_post_deleted'], 20, 1);
         add_filter('cron_schedules', [self::class, 'cron_intervals']);
@@ -805,6 +807,38 @@ final class ESP_Media_Index {
             }
         }
     }
+    /**
+     * wp_update_post() can promote a post with pre-existing media metadata
+     * into an attachment. Fence BEFORE Core changes post_type; add_attachment
+     * does not fire for this update. The per-post pending ticket also prevents
+     * an orphan collector from clearing the fence during Core's write.
+     */
+    public static function guard_post_type_transition($id, $data) {
+        if (!self::installed() || !is_array($data) ||
+            !isset($data['post_type']) || !is_string($data['post_type'])) {
+            return;
+        }
+        $old_type = get_post_type((int)$id);
+        $new_type = $data['post_type'];
+        if ($old_type === $new_type ||
+            ($old_type !== 'attachment' && $new_type !== 'attachment')) {
+            return;
+        }
+        // There is no cancellable pre_post_update return value. If the
+        // durable guard fails, throwing prevents Core's wp_posts UPDATE.
+        if (!self::mark_dirty((int)$id)) {
+            throw new RuntimeException('ESP media index: cannot fence post type transition');
+        }
+        self::track_local((int)$id);
+        // A post becoming an attachment can introduce paths that have no
+        // indexed owner yet. Revoke ALL coverage, not just this post's row.
+        // No audit can republish coverage while this pending post is either
+        // an orphan or a not-yet-rebuilt attachment.
+        if (!self::invalidate_global()) {
+            throw new RuntimeException('ESP media index: cannot revoke coverage for post type transition');
+        }
+    }
+
     public static function on_attachment_created($id) {
         if (self::installed() && self::mark_dirty((int)$id)) {
             self::track_local((int)$id);
@@ -1160,11 +1194,17 @@ final class ESP_Media_Index {
                 "SELECT post_type FROM {$wpdb->posts} WHERE ID=%d", $id));
             if ($wpdb->last_error !== '') { return false; }
             if ($type === 'attachment') { return true; } // was restored; let normal scan handle it
-            if ($wpdb->query($wpdb->prepare(
+            // A non-attachment may be converting into an attachment right now.
+            // Do not erase its transition ticket while pre_post_update is
+            // waiting for Core's wp_posts update. The UPDATE predicate is
+            // checked after any concurrent mark_dirty row lock is released.
+            $changed = $wpdb->query($wpdb->prepare(
                 "UPDATE $state SET status='dirty',revision=revision+1,
-                 retry_after=0 WHERE attachment_id=%d", $id)) === false) {
+                 retry_after=0 WHERE attachment_id=%d AND pending_count=0", $id));
+            if ($changed === false || $wpdb->last_error !== '') {
                 return false;
             }
+            if ($changed !== 1) { return true; }
             if ($wpdb->query($wpdb->prepare(
                 "DELETE FROM $files WHERE attachment_id=%d", $id)) === false) {
                 return false;
