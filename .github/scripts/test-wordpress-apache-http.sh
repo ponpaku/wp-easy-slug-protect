@@ -13,6 +13,8 @@ started=0
 q01_proxy_pid=0
 q01_wpdb_proxy_pid=0
 cleanup() {
+  # Capture the failing command's status BEFORE any proxy teardown changes $?.
+  local result=$?
   if [[ $q01_wpdb_proxy_pid -gt 0 ]]; then
     kill "$q01_wpdb_proxy_pid" >/dev/null 2>&1 || true
     wait "$q01_wpdb_proxy_pid" >/dev/null 2>&1 || true
@@ -21,7 +23,6 @@ cleanup() {
     kill "$q01_proxy_pid" >/dev/null 2>&1 || true
     wait "$q01_proxy_pid" >/dev/null 2>&1 || true
   fi
-  local result=$?
   if [[ $result -ne 0 && $started -eq 1 ]]; then
     docker logs "$container" >&2 || true
   fi
