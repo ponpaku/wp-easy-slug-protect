@@ -158,6 +158,10 @@ if (in_array($phase, ['repair-seed', 'repair-check', 'repair-verify'], true)) {
         if (!class_exists('ESP_Admin_Menu')) {
             throw new RuntimeException('F02 admin settings menu was not loaded');
         }
+        // admin-ajax bootstrap does not include admin page template helpers.
+        // Rendering a settings page in this disposable CLI entrypoint must
+        // explicitly load those core admin functions first.
+        require_once ABSPATH . 'wp-admin/includes/template.php';
         ob_start();
         try {
             (new ESP_Admin_Menu())->render_settings_page();
