@@ -107,6 +107,17 @@ docker exec "$container" php /opt/wp-cli.phar --allow-root --path=/var/www/html 
     esp media-index status | python3 -c 'import json,sys; x=json.load(sys.stdin); assert x["installed"] is True and x["ready"] is True and x["enabled"] is False, x'
 echo "PASS: real WP-CLI status/build resumes AJAX work and preserves strict OFF"
 
+# Simulate an unsupported legacy server version while executing against the
+# real disposable MySQL service. No old, unsupported daemon runs in CI.
+docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+  ESP_INDEX_DRIVER_PHASE=db-unsupported \
+  php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-drivers-ci.php
+unsupported_ajax="$(docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+  ESP_INDEX_DRIVER_PHASE=ajax-unsupported \
+  php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-drivers-ci.php)"
+printf '%s' "$unsupported_ajax" | python3 -c 'import json,sys; x=json.load(sys.stdin); assert x["success"] is False and "Unsupported DB" in x["data"]["message"], x'
+echo "PASS: unsupported old DB rejects media-index AJAX with explicit minimum version"
+
 # Q01: deliberately discard the MySQL OK packet after an UPDATE commits.
 # The packet relay runs on the disposable GitHub Actions host, not production.
 cat > "$fixture_root/q01-mysql-proxy.py" <<'PY'
