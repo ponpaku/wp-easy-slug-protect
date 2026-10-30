@@ -428,5 +428,101 @@ cat "$report_root/f01-worker-b.log"
 f01_phase restore | tee "$report_root/f01-recovery.log"
 assert_http esp31-protected.jpg 302
 echo 'PASS: F01 two real WordPress workers, duplicate post-hooks, pending isolation and protected HTTP recovery'
+
+# R02: measure fresh independent Apache media requests, including the Core
+# SELECT VERSION() and optional get_option SQL outside the 1-query owner lookup.
+docker exec "$container" mkdir -p /var/www/html/wp-content/mu-plugins
+# Apache's www-data must be able to append to this disposable measurement log.
+docker exec "$container" sh -c 'touch /var/www/html/wp-content/uploads/.esp-http-sql-profile.jsonl && chmod 666 /var/www/html/wp-content/uploads/.esp-http-sql-profile.jsonl'
+docker exec "$container" cp \
+  /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-http-sql-probe.php \
+  /var/www/html/wp-content/mu-plugins/esp-http-sql-ci.php
+for phase in protected1 protected2; do
+  status="$(curl -sS -o /dev/null -w '%{http_code}' \
+    -H "X-ESP-Sql-Probe: $phase" \
+    http://127.0.0.1:8094/wp-content/uploads/esp31-protected-150x150.jpg)"
+  [[ "$status" == 302 ]]
+done
+status="$(curl -sS -o /dev/null -w '%{http_code}' \
+  -H 'X-ESP-Sql-Probe: public1' \
+  http://127.0.0.1:8094/wp-content/uploads/esp31-public-150x150.jpg)"
+[[ "$status" == 200 ]]
+# Compare with the existing compatibility resolver under the same disposable
+# Apache+WordPress+MySQL environment, each request still a fresh PHP request.
+docker exec "$container" php /opt/wp-cli.phar --allow-root --path=/var/www/html \
+  option update esp_media_index_v1_enabled 0 >/dev/null
+for phase in legacyprotected legacypublic; do
+  filename=esp31-public-150x150.jpg
+  expected=200
+  if [[ "$phase" == legacyprotected ]]; then
+    filename=esp31-protected-150x150.jpg
+    expected=302
+  fi
+  status="$(curl -sS -o /dev/null -w '%{http_code}' \
+    -H "X-ESP-Sql-Probe: $phase" \
+    "http://127.0.0.1:8094/wp-content/uploads/$filename")"
+  [[ "$status" == "$expected" ]]
+done
+docker exec "$container" php /opt/wp-cli.phar --allow-root --path=/var/www/html \
+  option update esp_media_index_v1_enabled 1 >/dev/null
+cp "$fixture_root/wordpress/wp-content/uploads/.esp-http-sql-profile.jsonl" \
+  "$report_root/media-http-sql-roundtrips.jsonl"
+python3 - "$report_root/media-http-sql-roundtrips.jsonl" <<'PY'
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+by_id = {x["request"]: x for x in rows}
+samples = ("protected1", "protected2", "public1", "legacyprotected", "legacypublic")
+assert all(k in by_id for k in samples), by_id
+for k in ("protected1", "protected2", "public1"):
+    v = by_id[k]
+    assert v["index_lookup_sql"] == 1, v
+    assert v["version_sql"] >= 1, v
+    assert v["queries_total"] >= 2, v
+for k in ("legacyprotected", "legacypublic"):
+    assert by_id[k]["index_lookup_sql"] == 0, by_id[k]
+print("ESP63_HTTP_SQL_ROUNDTRIPS " + json.dumps(
+    {k: by_id[k] for k in samples},
+    ensure_ascii=False, separators=(",", ":")))
+print("PASS: R02 independent Apache SQL counts cover strict and legacy resolver modes")
+PY
+docker exec "$container" rm -f /var/www/html/wp-content/mu-plugins/esp-http-sql-ci.php
+
+# R01: a normal post already carrying protection metadata is promoted to an
+# attachment via WordPress Core. A second PHP/MySQL worker and real HTTP probe
+# check the pre-write and post-Cron ownership fences.
+type_fixture="/var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-post-type-ci.php"
+type_phase() {
+  docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+    ESP_TYPE_PHASE="$1" php "$type_fixture"
+}
+type_phase seed | tee "$report_root/post-type-seed.log"
+assert_http esp31-public-150x150.jpg 200
+type_phase failure | tee "$report_root/post-type-failed-fence.log"
+assert_http esp31-public-150x150.jpg 200
+type_phase convert >"$report_root/post-type-worker.log" 2>&1 &
+type_pid=$!
+type_signal="$fixture_root/wordpress/wp-content/uploads/.esp-type-transition-ci"
+type_ready=0
+for attempt in $(seq 1 120); do
+  if [[ -f "$type_signal/prehook" ]]; then type_ready=1; break; fi
+  if ! kill -0 "$type_pid" 2>/dev/null; then break; fi
+  sleep 0.2
+done
+if (( type_ready != 1 )); then
+  echo 'R01 post-type conversion failed to reach pre-write barrier' >&2
+  cat "$report_root/post-type-worker.log" >&2
+  exit 1
+fi
+type_phase during | tee "$report_root/post-type-during.log"
+assert_http esp31-public-150x150.jpg 503
+! grep -q ESP31_PUBLIC "$fixture_root/http-probe-body"
+docker exec "$container" touch /var/www/html/wp-content/uploads/.esp-type-transition-ci/resume
+wait "$type_pid"
+cat "$report_root/post-type-worker.log"
+type_phase after | tee "$report_root/post-type-after.log"
+assert_http esp31-public-150x150.jpg 403
+! grep -q ESP31_PUBLIC "$fixture_root/http-probe-body"
+echo 'PASS: R01 post->attachment change fenced before Core update, during Cron and after collision repair'
+
 echo 'PASS: issue 63 real WordPress/Apache strict index HTTP smoke suite'
 echo 'PASS: disposable Apache/WordPress media HTTP regression suite'
