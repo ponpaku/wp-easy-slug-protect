@@ -851,19 +851,32 @@ final class ESP_Media_Index {
             ($old_type !== 'attachment' && $new_type !== 'attachment')) {
             return;
         }
-        if (!self::mark_dirty((int)$id)) {
-            throw new RuntimeException('ESP media index: cannot fence post type transition');
+        // Serialize the transition's pending ticket and path reservation with
+        // orphan purge/reindex. Never hold the named lock across Core's UPDATE.
+        $namespace = self::lock_namespace();
+        if ($namespace === null) {
+            throw new RuntimeException('ESP media index: no transition lock namespace');
         }
-        self::track_local((int)$id);
-        if ($new_type !== 'attachment') { return; }
-        // Scope the fence to the *new paths* instead of taking all strict
-        // media offline for a full 200-attachments-per-batch global audit.
-        if (self::reserve_promoted_post_paths((int)$id)) { return; }
-        // In strict mode, Core must not change post_type when we cannot prove
-        // a complete reservation. Compatibility mode can revoke full coverage
-        // for later rebuilding; the derived index is not authoritative there.
-        if (self::enabled() || !self::invalidate_global()) {
-            throw new RuntimeException('ESP media index: cannot reserve post type promotion');
+        $lock_name = 'esp63_' .
+            substr(hash('sha256', $namespace . "\0" . (int)$id), 0, 40);
+        global $wpdb;
+        $locked = $wpdb->get_var($wpdb->prepare('SELECT GET_LOCK(%s, 2)', $lock_name));
+        if ($wpdb->last_error !== '' || (string)$locked !== '1') {
+            throw new RuntimeException('ESP media index: cannot lock post type transition');
+        }
+        try {
+            if (!self::mark_dirty((int)$id)) {
+                throw new RuntimeException('ESP media index: cannot fence post type transition');
+            }
+            self::track_local((int)$id);
+            if ($new_type !== 'attachment') { return; }
+            // Scope the fence to its paths instead of forcing an all-site audit.
+            if (self::reserve_promoted_post_paths((int)$id)) { return; }
+            if (self::enabled() || !self::invalidate_global()) {
+                throw new RuntimeException('ESP media index: cannot reserve post type promotion');
+            }
+        } finally {
+            $wpdb->get_var($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $lock_name));
         }
     }
 
@@ -1222,30 +1235,25 @@ final class ESP_Media_Index {
                 "SELECT post_type FROM {$wpdb->posts} WHERE ID=%d", $id));
             if ($wpdb->last_error !== '') { return false; }
             if ($type === 'attachment') { return true; } // was restored; let normal scan handle it
-            // A non-attachment may be converting into an attachment right now.
-            // Do not erase its transition ticket while pre_post_update is
-            // waiting for Core's wp_posts update. The UPDATE predicate is
-            // checked after any concurrent mark_dirty row lock is released.
+            // Even legacy file-only orphans need a state row to serialize
+            // against a concurrent transaction inserting a promotion ticket.
+            // INSERT IGNORE waits for an uncommitted row with this primary key.
+            $created = $wpdb->query($wpdb->prepare(
+                "INSERT IGNORE INTO $state
+                 (attachment_id,status,revision,pending_count,changed_at)
+                 VALUES (%d,'dirty',0,0,%d)", $id, time()));
+            if ($created === false || $wpdb->last_error !== '') { return false; }
+            // Pending writes retain their reservation; an UPDATE blocked by
+            // an external transaction rechecks this predicate after COMMIT.
             $changed = $wpdb->query($wpdb->prepare(
                 "UPDATE $state SET status='dirty',revision=revision+1,
                  retry_after=0 WHERE attachment_id=%d AND pending_count=0", $id));
-            if ($changed === false || $wpdb->last_error !== '') {
-                return false;
-            }
-            if ($changed !== 1) {
-                // A pending conversion must remain fenced. But legacy orphan
-                // FILE rows can legitimately have no state row at all, and
-                // still require cleanup at the end of a full audit cycle.
-                $existing = $wpdb->get_var($wpdb->prepare(
-                    "SELECT attachment_id FROM $state WHERE attachment_id=%d", $id));
-                if ($wpdb->last_error !== '') { return false; }
-                if ($existing !== null) { return true; }
-            }
+            if ($changed === false || $wpdb->last_error !== '') { return false; }
+            if ($changed !== 1) { return true; }
             if ($wpdb->query($wpdb->prepare(
                 "DELETE FROM $files WHERE attachment_id=%d", $id)) === false) {
                 return false;
             }
-            // If a new guard arrived during cleanup, never retire its ticket.
             return $wpdb->query($wpdb->prepare(
                 "DELETE FROM $state WHERE attachment_id=%d AND pending_count=0", $id)) !== false;
         } finally {
