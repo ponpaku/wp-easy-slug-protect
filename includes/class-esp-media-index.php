@@ -808,10 +808,37 @@ final class ESP_Media_Index {
         }
     }
     /**
-     * wp_update_post() can promote a post with pre-existing media metadata
-     * into an attachment. Fence BEFORE Core changes post_type; add_attachment
-     * does not fire for this update. The per-post pending ticket also prevents
-     * an orphan collector from clearing the fence during Core's write.
+     * Reserve existing WordPress media paths before an ordinary post becomes
+     * an attachment. Indexing cannot infer a new owner from the old owner's
+     * row, so every candidate path must be staged while the post is pending.
+     * Duplicate/missing/unsafe metadata must not be treated as an empty owner.
+     */
+    private static function reserve_promoted_post_paths($id) {
+        global $wpdb;
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT meta_key,meta_value FROM {$wpdb->postmeta}
+             WHERE post_id=%d AND meta_key IN (%s,%s,%s)
+             ORDER BY meta_id ASC", $id, '_wp_attached_file',
+            '_wp_attachment_metadata', self::PROTECTION_META), ARRAY_A);
+        if (!is_array($rows) || $wpdb->last_error !== '') { return false; }
+        $seen = []; $attached = null;
+        foreach ($rows as $row) {
+            if (isset($seen[$row['meta_key']])) { return false; }
+            $seen[$row['meta_key']] = true;
+            if ($row['meta_key'] === '_wp_attached_file') {
+                $attached = $row['meta_value'];
+            }
+        }
+        if (!is_string($attached) || !self::valid_path($attached)) { return false; }
+        // reserve_new_paths() reads the canonical metadata directly again and
+        // stages its candidates at the current dirty revision (not READY).
+        return self::reserve_new_paths($id, '_wp_attached_file', $attached);
+    }
+
+    /**
+     * wp_update_post() can change a post's attachment ownership without a
+     * metadata hook or add_attachment. Its pre_post_update hook is before Core
+     * writes wp_posts. A local pending ticket holds the fence until shutdown.
      */
     public static function guard_post_type_transition($id, $data) {
         if (!self::installed() || !is_array($data) ||
@@ -824,18 +851,19 @@ final class ESP_Media_Index {
             ($old_type !== 'attachment' && $new_type !== 'attachment')) {
             return;
         }
-        // There is no cancellable pre_post_update return value. If the
-        // durable guard fails, throwing prevents Core's wp_posts UPDATE.
         if (!self::mark_dirty((int)$id)) {
             throw new RuntimeException('ESP media index: cannot fence post type transition');
         }
         self::track_local((int)$id);
-        // A post becoming an attachment can introduce paths that have no
-        // indexed owner yet. Revoke ALL coverage, not just this post's row.
-        // No audit can republish coverage while this pending post is either
-        // an orphan or a not-yet-rebuilt attachment.
-        if (!self::invalidate_global()) {
-            throw new RuntimeException('ESP media index: cannot revoke coverage for post type transition');
+        if ($new_type !== 'attachment') { return; }
+        // Scope the fence to the *new paths* instead of taking all strict
+        // media offline for a full 200-attachments-per-batch global audit.
+        if (self::reserve_promoted_post_paths((int)$id)) { return; }
+        // In strict mode, Core must not change post_type when we cannot prove
+        // a complete reservation. Compatibility mode can revoke full coverage
+        // for later rebuilding; the derived index is not authoritative there.
+        if (self::enabled() || !self::invalidate_global()) {
+            throw new RuntimeException('ESP media index: cannot reserve post type promotion');
         }
     }
 
@@ -1288,7 +1316,8 @@ final class ESP_Media_Index {
             "SELECT s.attachment_id FROM $state s
              LEFT JOIN {$wpdb->posts} p ON p.ID=s.attachment_id
                AND p.post_type='attachment'
-             WHERE p.ID IS NULL AND s.attachment_id>0 LIMIT 1",
+             WHERE p.ID IS NULL AND s.attachment_id>0" .
+             ($require_all_ready ? '' : ' AND s.pending_count=0') . " LIMIT 1",
             "SELECT f.attachment_id FROM $files f
              LEFT JOIN $state s ON s.attachment_id=f.attachment_id
              WHERE s.attachment_id IS NULL LIMIT 1",
