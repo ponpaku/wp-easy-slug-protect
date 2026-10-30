@@ -7,6 +7,9 @@ if [[ "$ESP_ALLOW_DISPOSABLE_DB" != 1 || "$CI" != true ]]; then
   exit 1
 fi
 
+# Run the EXIT-trap regression before starting disposable Docker/WordPress.
+bash tests/test-wordpress-apache-cleanup.sh
+
 fixture_root="$(mktemp -d "$RUNNER_TEMP/esp31-apache-http.XXXXXXXX")"
 container="esp31-http-$GITHUB_RUN_ID-$$"
 started=0
@@ -143,6 +146,36 @@ docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html
   ESP_INDEX_DRIVER_PHASE=repair-verify \
   php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-drivers-ci.php
 echo "PASS: F02 admin manual repair after global READY with backoff/pending safety"
+
+# F01: real WP-CLI must repair >200 eligible owners across multiple
+# run_batch() slices, then stop with a warning for pending/backoff rows.
+cli_fixture="/var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-cli-ci.php"
+for phase in seed; do
+  docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+    ESP_INDEX_CLI_PHASE="$phase" php "$cli_fixture"
+done
+cli_repair_output="$(timeout --signal=TERM 120s docker exec "$container" \
+  php /opt/wp-cli.phar --allow-root --path=/var/www/html \
+  esp media-index build --max-seconds=100 2>&1)"
+printf '%s\n' "$cli_repair_output"
+printf '%s\n' "$cli_repair_output" | grep -q 'remaining attachments are pending or in retry backoff'
+docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+  ESP_INDEX_CLI_PHASE=verify-deferred php "$cli_fixture"
+# Running again with only deferred rows must not spin until --max-seconds.
+cli_deferred_output="$(timeout --signal=TERM 45s docker exec "$container" \
+  php /opt/wp-cli.phar --allow-root --path=/var/www/html \
+  esp media-index build --max-seconds=30 2>&1)"
+printf '%s\n' "$cli_deferred_output" | grep -q 'remaining attachments are pending or in retry backoff'
+docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+  ESP_INDEX_CLI_PHASE=unblock php "$cli_fixture"
+cli_complete_output="$(timeout --signal=TERM 45s docker exec "$container" \
+  php /opt/wp-cli.phar --allow-root --path=/var/www/html \
+  esp media-index build --max-seconds=30 2>&1)"
+printf '%s\n' "$cli_complete_output"
+printf '%s\n' "$cli_complete_output" | grep -q 'Media index READY and eligible repairs complete'
+docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+  ESP_INDEX_CLI_PHASE=verify-complete php "$cli_fixture"
+echo 'PASS: F01 real WP-CLI repairs 201 owners across batches and reports deferred rows'
 
 # Q01: deliberately discard the MySQL OK packet after an UPDATE commits.
 # The packet relay runs on the disposable GitHub Actions host, not production.
