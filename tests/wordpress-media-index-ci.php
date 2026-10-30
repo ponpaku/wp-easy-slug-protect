@@ -82,7 +82,6 @@ if ($id <= 0 || !update_post_meta($id, ESP_Media_Index::PROTECTION_META, '')) {
     throw new RuntimeException('Cannot unprotect fixture via normal WP API');
 }
 ESP_Media_Index::finish_noop_writes(); // End simulated WP request before independent rebuild.
-ESP_Media_Index::finish_noop_writes();
 if (ESP_Media_Index::resolve($path)['status'] !== 'error' ||
     !ESP_Media_Index::reindex_attachment($id)) {
     throw new RuntimeException('committed WP unprotect requires independent rebuild');
@@ -94,6 +93,7 @@ if ($unprotected['status'] !== 'resolved' || $unprotected['protected_path_id'] !
 if (!update_post_meta($id, ESP_Media_Index::PROTECTION_META, 'path_http')) {
     throw new RuntimeException('Cannot reprotect fixture via WP API');
 }
+ESP_Media_Index::finish_noop_writes();
 if (ESP_Media_Index::resolve($path)['status'] !== 'error' ||
     !ESP_Media_Index::reindex_attachment($id)) {
     throw new RuntimeException('committed WP reprotect requires independent rebuild');
