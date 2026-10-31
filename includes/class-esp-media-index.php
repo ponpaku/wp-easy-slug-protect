@@ -1274,7 +1274,9 @@ final class ESP_Media_Index {
             "SELECT s.attachment_id FROM $state s
              LEFT JOIN {$wpdb->posts} p ON p.ID=s.attachment_id
                AND p.post_type='attachment'
-             WHERE p.ID IS NULL AND s.attachment_id>0 LIMIT %d", self::BATCH_SIZE));
+             WHERE p.ID IS NULL AND s.attachment_id>0
+               AND s.pending_count=0
+             ORDER BY s.attachment_id ASC LIMIT %d", self::BATCH_SIZE));
         if (!is_array($orphans) || $wpdb->last_error !== '') { return false; }
         foreach ($orphans as $id) {
             if (!self::purge_orphan((int)$id)) { return false; }
