@@ -26,10 +26,13 @@ $id = wp_insert_post([
 ], true);
 esp_type_lock_assert(!is_wp_error($id) && $id > 0, 'cannot seed normal post');
 $id = (int)$id;
+// A new public owner of an existing protected image is unsafe unless the
+// transition remains globally fenced until the index is rebuilt.
+$protected_path = wp_upload_dir()['basedir'] . '/esp31-protected-150x150.jpg';
+esp_type_lock_assert(ESP_Media_Index::resolve($protected_path)['status'] === 'resolved',
+    'original protected owner must be indexed');
 esp_type_lock_assert(add_post_meta($id, '_wp_attached_file',
-    'esp31-public-150x150.jpg', true) !== false, 'cannot seed attached path');
-esp_type_lock_assert(add_post_meta($id, ESP_Media_Index::PROTECTION_META,
-    'path_http', true) !== false, 'cannot seed protected owner');
+    'esp31-protected-150x150.jpg', true) !== false, 'cannot seed attached path');
 
 function esp_type_lock_transition($id, $to_type, $strict, $failure = '') {
     global $wpdb, $state;
@@ -154,9 +157,15 @@ try {
     esp_type_lock_transition($id, 'attachment', true);
     esp_type_lock_transition($id, 'attachment', false);
     esp_type_lock_recover();
+    esp_type_lock_assert(ESP_Media_Index::resolve($protected_path)['status'] === 'ambiguous',
+        'new public owner of protected path is never authorized as public');
     esp_type_lock_transition($id, 'post', true);
     esp_type_lock_transition($id, 'post', false);
     esp_type_lock_recover();
+    $restored = ESP_Media_Index::resolve($protected_path);
+    esp_type_lock_assert($restored['status'] === 'resolved' &&
+        $restored['protected_path_id'] !== '',
+        'demotion restores original protected owner without public exposure');
     esp_type_lock_transition($id, 'attachment', false, 'global');
     esp_type_lock_transition($id, 'attachment', false, 'pending');
     // A failed pre-hook may leave a dirty orphan after its local ticket ends.
