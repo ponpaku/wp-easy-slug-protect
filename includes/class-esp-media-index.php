@@ -836,6 +836,19 @@ final class ESP_Media_Index {
     }
 
     /**
+     * Preserve WordPress post-type updates in compatibility mode when the
+     * per-owner lock is unavailable. Without that lock, path reservations
+     * cannot be trusted: invalidate global coverage before Core writes.
+     * Keep a pending ticket so Cron cannot republish READY in the pre-write
+     * gap. If either durable fence fails, the uncancellable hook must throw.
+     */
+    private static function compat_unlocked_post_type_transition($id) {
+        if (self::enabled() || !self::mark_dirty($id)) { return false; }
+        self::track_local($id);
+        return self::invalidate_global();
+    }
+
+    /**
      * wp_update_post() can change a post's attachment ownership without a
      * metadata hook or add_attachment. Its pre_post_update hook is before Core
      * writes wp_posts. A local pending ticket holds the fence until shutdown.
@@ -855,6 +868,7 @@ final class ESP_Media_Index {
         // orphan purge/reindex. Never hold the named lock across Core's UPDATE.
         $namespace = self::lock_namespace();
         if ($namespace === null) {
+            if (self::compat_unlocked_post_type_transition((int)$id)) { return; }
             throw new RuntimeException('ESP media index: no transition lock namespace');
         }
         $lock_name = 'esp63_' .
@@ -862,6 +876,7 @@ final class ESP_Media_Index {
         global $wpdb;
         $locked = $wpdb->get_var($wpdb->prepare('SELECT GET_LOCK(%s, 2)', $lock_name));
         if ($wpdb->last_error !== '' || (string)$locked !== '1') {
+            if (self::compat_unlocked_post_type_transition((int)$id)) { return; }
             throw new RuntimeException('ESP media index: cannot lock post type transition');
         }
         try {
