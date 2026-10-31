@@ -488,6 +488,34 @@ try {
         (int)$wpdb->get_var("SELECT COUNT(*) FROM $files WHERE attachment_id=77") === 0,
         'F01 orphan file rows without state are purged before READY');
 
+    // R02 orphan starvation regression: a full batch of abandoned pending
+    // states must not hide a later orphan with no active mutation.
+    $blocked_orphan_start = 900000;
+    $blocked_orphan_count = ESP_Media_Index::BATCH_SIZE + 1;
+    $recoverable_orphan = $blocked_orphan_start + $blocked_orphan_count;
+    $orphan_values = [];
+    for ($i = 0; $i < $blocked_orphan_count; ++$i) {
+        $orphan_values[] = '(' . ($blocked_orphan_start + $i) . ",'dirty',1,1)";
+    }
+    $orphan_values[] = "($recoverable_orphan,'dirty',1,0)";
+    esp63_sql("INSERT INTO $state (attachment_id,status,revision,pending_count)
+        VALUES " . implode(',', $orphan_values));
+    ESP_Media_Index::run_batch();
+    esp63_assert((int)$wpdb->get_var("SELECT COUNT(*) FROM $state
+        WHERE attachment_id >= $blocked_orphan_start
+          AND attachment_id < $recoverable_orphan AND pending_count=1")
+          === $blocked_orphan_count,
+        'R02 pending orphan states are never purged');
+    esp63_assert((int)$wpdb->get_var("SELECT COUNT(*) FROM $state
+        WHERE attachment_id=$recoverable_orphan") === 0,
+        'R02 a recoverable orphan is not starved by 201 pending states');
+    esp63_assert($options[ESP_Media_Index::READY_OPTION] === '1',
+        'R02 unfinished orphan tickets do not revoke established READY');
+    // These are deliberately artificial abandoned tickets. Clean up only
+    // the disposable fixture; production must never expire them on a timer.
+    esp63_sql("DELETE FROM $state WHERE attachment_id >= $blocked_orphan_start
+        AND attachment_id <= $recoverable_orphan");
+
     esp63_sql("INSERT INTO esp63_posts (ID,post_type) VALUES (31,'attachment')");
     esp63_sql("INSERT INTO esp63_postmeta(post_id,meta_key,meta_value) VALUES
         (31,'_wp_attached_file','2026/10/reused.jpg'),
