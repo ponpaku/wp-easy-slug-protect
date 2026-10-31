@@ -526,5 +526,11 @@ assert_http esp31-public-150x150.jpg 403
 ! grep -q ESP31_PUBLIC "$fixture_root/http-probe-body"
 echo 'PASS: R01 scoped post->attachment reservation protects shared path without global 503'
 
+# R02: a second real MySQL connection holds the per-owner lock. Compatibility
+# must fence and continue; strict and failed durable fences must reject Core.
+docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+  php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-post-type-lock-ci.php \
+  | tee "$report_root/post-type-lock-fallback.log"
+
 echo 'PASS: issue 63 real WordPress/Apache strict index HTTP smoke suite'
 echo 'PASS: disposable Apache/WordPress media HTTP regression suite'
