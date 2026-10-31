@@ -114,6 +114,46 @@ docker exec "$container" php /opt/wp-cli.phar --allow-root --path=/var/www/html 
     esp media-index status | python3 -c 'import json,sys; x=json.load(sys.stdin); assert x["installed"] is True and x["ready"] is True and x["enabled"] is False, x'
 echo "PASS: real WP-CLI status/build resumes AJAX work and preserves strict OFF"
 
+# R02: real WordPress + MySQL, with a disposable MU plugin that marks the
+# schema uninstalled for this worker and makes verification fail after dbDelta.
+# An acquired scan lock is not a schema failure and must remain retryable.
+docker exec "$container" mkdir -p /var/www/html/wp-content/mu-plugins
+docker exec "$container" cp \
+  /var/www/html/wp-content/plugins/esp44-custom/tests/fixtures/esp63-schema-failure-mu.php \
+  /var/www/html/wp-content/mu-plugins/esp63-schema-failure-mu.php
+schema_failed="$(docker exec "$container" env \
+  ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+  ESP_INDEX_SCHEMA_FAULT=fail ESP_INDEX_DRIVER_PHASE=ajax-allowed \
+  php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-drivers-ci.php)"
+printf '%s' "$schema_failed" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+assert x["success"] is False and "schema preparation failed" in x["data"]["message"], x
+'
+schema_busy="$(docker exec "$container" env \
+  ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+  ESP_INDEX_SCHEMA_FAULT=busy ESP_INDEX_DRIVER_PHASE=ajax-allowed \
+  php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-media-index-drivers-ci.php)"
+printf '%s' "$schema_busy" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+assert x["success"] is True and x["data"]["installed"] is False, x
+'
+if cli_schema_error="$(docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 \
+    ESP_INDEX_SCHEMA_FAULT=fail php /opt/wp-cli.phar --allow-root \
+    --path=/var/www/html esp media-index build --max-seconds=5 2>&1)"; then
+  echo 'R02 WP-CLI accepted failed schema preparation' >&2
+  exit 1
+fi
+printf '%s\n' "$cli_schema_error" | grep -q 'schema preparation failed'
+[[ "$(docker exec "$container" php /opt/wp-cli.phar --allow-root --path=/var/www/html \
+  option get esp_media_index_v1_schema)" == "3" ]]
+[[ "$(docker exec "$container" php /opt/wp-cli.phar --allow-root --path=/var/www/html \
+  option get esp_media_index_v1_ready)" == "1" ]]
+docker exec "$container" rm -f /var/www/html/wp-content/mu-plugins/esp63-schema-failure-mu.php
+echo "PASS: R02 schema preparation failure surfaces in AJAX and CLI; scan-lock busy remains retryable"
+
+
 # Simulate an unsupported legacy server version while executing against the
 # real disposable MySQL service. No old, unsupported daemon runs in CI.
 docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \

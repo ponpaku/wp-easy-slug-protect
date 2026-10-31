@@ -21,6 +21,9 @@ final class ESP_Media_Index {
     const RETRY_MAX_SECONDS = 3600;
     const MAX_METADATA_SIZES = 128;
     const MAX_PATHS = 160;
+    // Single indexed anonymous lookup must not materialize unbounded owner,
+    // obsolete-generation or duplicate protection-meta JOIN rows.
+    private const MAX_RESOLVE_ROWS = 128;
     const PROTECTION_META = '_esp_media_protected_path_id';
     private const KEYS = ['_wp_attached_file', '_wp_attachment_metadata', self::PROTECTION_META];
     private static $scheduled = false;
@@ -338,7 +341,10 @@ final class ESP_Media_Index {
             wp_send_json_error(['message' =>
                 'Unsupported DB for media index: MySQL 5.7.5+ or MariaDB 10.0.2+ required'], 503);
         }
-        self::run_batch();
+        if (self::run_batch() === 'schema_failed') {
+            wp_send_json_error(['message' =>
+                'Media index schema preparation failed; check database permissions and logs'], 503);
+        }
         $status = self::build_status();
         if ($status['error']) {
             wp_send_json_error(['message' => 'Cannot read media index state'], 503);
@@ -534,10 +540,11 @@ final class ESP_Media_Index {
             LEFT JOIN {$wpdb->posts} p ON p.ID=f.attachment_id
             LEFT JOIN {$wpdb->postmeta} pm ON pm.post_id=f.attachment_id
                 AND pm.meta_key=%s
-            WHERE f.path_hash=%s",
-            self::PROTECTION_META, hash('sha256', $relative));
+            WHERE f.path_hash=%s LIMIT %d",
+            self::PROTECTION_META, hash('sha256', $relative), self::MAX_RESOLVE_ROWS + 1);
         $rows = $wpdb->get_results($sql, ARRAY_A);
-        if (!is_array($rows) || $wpdb->last_error !== '') { return ['status' => 'error']; }
+        if (!is_array($rows) || $wpdb->last_error !== '' ||
+            count($rows) > self::MAX_RESOLVE_ROWS) { return ['status' => 'error']; }
         $owners = [];
         foreach ($rows as $row) {
             if (!is_array($row) ||
@@ -1486,7 +1493,7 @@ final class ESP_Media_Index {
         try {
         if (!self::installed() && !self::install_schema()) {
             error_log('ESP: Media index schema install failed');
-            return;
+            return 'schema_failed';
         }
         // First remove orphans. Individual corrupt attachments can be retried
         // later, but a DB outage or failed orphan purge must halt the cycle.
@@ -1624,7 +1631,9 @@ class ESP_Media_Index_CLI {
         $previous = null;
         $cycles = 0;
         while (microtime(true) - $start < $max_seconds) {
-            ESP_Media_Index::run_batch();
+            if (ESP_Media_Index::run_batch() === 'schema_failed') {
+                \WP_CLI::error('Media index schema preparation failed; check database permissions and logs');
+            }
             $status = ESP_Media_Index::build_status(false);
             if ($status['error']) { \WP_CLI::error('Could not inspect index state'); }
             if ($status['ready'] && !$status['repairable_dirty']) {
