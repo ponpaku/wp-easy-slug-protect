@@ -20,6 +20,8 @@ jobs:
           coverage: none
       - name: Lint PHP source files
         run: find . -name '*.php' -print0 | xargs -0 -n1 php -l
+      - name: Lint admin JavaScript
+        run: node --check admin/esp-admin.js
       - name: Test login attempt reservation behavior
         run: php tests/security-rate-limit-test.php
       - name: Test InnoDB and rate limit schema validation
@@ -85,6 +87,13 @@ jobs:
           ESP_TEST_DB_PASSWORD: test-password
           ESP_TEST_DB_NAME: esp_test
         run: php tests/security-mysql-integration.php
+      - name: Exercise dedicated media index and safety states in MySQL
+        env:
+          ESP_TEST_DB_HOST: 127.0.0.1
+          ESP_TEST_DB_USER: root
+          ESP_TEST_DB_PASSWORD: test-password
+          ESP_TEST_DB_NAME: esp_test
+        run: php tests/security-media-index-mysql.php
       - name: Verify migration lock ownership across MySQL sessions
         env:
           ESP_TEST_DB_HOST: 127.0.0.1
@@ -129,10 +138,18 @@ jobs:
           --health-interval=5s --health-timeout=5s --health-retries=20
     steps:
       - uses: actions/checkout@v4
-      - name: End-to-end Apache/WordPress media access and caching
+      - name: End-to-end Apache/WordPress media access, UI and performance
         env:
           ESP_ALLOW_DISPOSABLE_DB: "1"
         run: bash .github/scripts/test-wordpress-apache-http.sh
+      - name: Upload real WordPress media-index E2E measurements
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp63-real-wordpress-ui-media-db-e2e
+          path: ${{ runner.temp }}/esp-media-index-e2e/*.log
+          if-no-files-found: warn
+          retention-days: 14
   package-plugin:
     runs-on: ubuntu-latest
     steps:
