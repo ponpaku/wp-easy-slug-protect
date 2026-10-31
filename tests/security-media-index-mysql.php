@@ -49,6 +49,8 @@ final class ESP63_DB {
     public $before_cleanup = null;
     public $fail_pending_decrement_once = false;
     public $lose_pending_decrement_ack_once = false;
+    public $last_resolve_sql = '';
+    public $last_resolve_row_count = -1;
     private $db;
     public function __construct($db) {
         $this->db = $db;
@@ -117,7 +119,12 @@ final class ESP63_DB {
     }
     public function get_results($sql, $mode = ARRAY_A) {
         $res = $this->query($sql);
-        return $res instanceof mysqli_result ? $res->fetch_all(MYSQLI_ASSOC) : null;
+        $rows = $res instanceof mysqli_result ? $res->fetch_all(MYSQLI_ASSOC) : null;
+        if (strpos($sql, 'WHERE f.path_hash=') !== false) {
+            $this->last_resolve_sql = $sql;
+            $this->last_resolve_row_count = is_array($rows) ? count($rows) : -1;
+        }
+        return $rows;
     }
     public function get_row($sql, $mode = ARRAY_A) {
         $rows = $this->get_results($sql, $mode);
@@ -233,6 +240,80 @@ try {
         'one lookup returns attachment and protection');
     esp63_assert(ESP_Media_Index::resolve($uploads . '/2026/10/cat-original.jpg')['status']
         === 'resolved', 'original_image belongs to attachment');
+    // R01: one anonymous indexed SQL roundtrip has a hard result-row cap.
+    // Many inactive generations must not be fetched into PHP without limit;
+    // below the cap, the active owner still resolves normally.
+    $heavy_id = 190001;
+    $heavy_path = '2026/10/esp63-bounded-owner.jpg';
+    $heavy_hash = hash('sha256', $heavy_path);
+    file_put_contents($uploads . '/' . $heavy_path, 'bounded fixture');
+    esp63_sql("INSERT INTO esp63_posts (ID,post_type) VALUES ($heavy_id,'attachment')");
+    esp63_sql("INSERT INTO $state
+        (attachment_id,status,revision,active_generation,pending_count)
+        VALUES ($heavy_id,'ready',300,300,0)");
+    esp63_sql("INSERT INTO $files
+        (path_hash,file_path,attachment_id,generation,protected_path_id)
+        VALUES ('$heavy_hash','$heavy_path',$heavy_id,300,'')");
+    $heavy_absolute = $uploads . '/' . $heavy_path;
+    esp63_assert(ESP_Media_Index::resolve($heavy_absolute)['status'] === 'resolved' &&
+        $wpdb->last_resolve_row_count === 1,
+        'R01 bounded lookup baseline resolves one public owner');
+    $old_generations = [];
+    for ($gen = 1; $gen <= 127; ++$gen) {
+        $old_generations[] = "('$heavy_hash','$heavy_path',$heavy_id,$gen,'')";
+    }
+    esp63_sql("INSERT INTO $files
+        (path_hash,file_path,attachment_id,generation,protected_path_id) VALUES " .
+        implode(',', $old_generations));
+    esp63_assert(ESP_Media_Index::resolve($heavy_absolute)['status'] === 'resolved' &&
+        $wpdb->last_resolve_row_count === 128 &&
+        preg_match('/LIMIT\\s+129\\s*$/i', $wpdb->last_resolve_sql) === 1,
+        'R01 exactly 128 joined rows remain valid with bounded single SQL');
+    esp63_sql("INSERT INTO $files
+        (path_hash,file_path,attachment_id,generation,protected_path_id)
+        VALUES ('$heavy_hash','$heavy_path',$heavy_id,128,'')");
+    esp63_assert(ESP_Media_Index::resolve($heavy_absolute)['status'] === 'error' &&
+        $wpdb->last_resolve_row_count === 129,
+        'R01 129 generations are capped and fail closed');
+    esp63_sql("DELETE FROM $files WHERE attachment_id=$heavy_id AND generation<300");
+
+    // Protection postmeta JOIN multiplication is bounded too, even if every
+    // duplicate meta row has the SAME (public) value.
+    $duplicate_meta = [];
+    for ($i = 0; $i < 129; ++$i) {
+        $duplicate_meta[] = "($heavy_id,'_esp_media_protected_path_id','')";
+    }
+    esp63_sql("INSERT INTO esp63_postmeta(post_id,meta_key,meta_value) VALUES " .
+        implode(',', $duplicate_meta));
+    esp63_assert(ESP_Media_Index::resolve($heavy_absolute)['status'] === 'error' &&
+        $wpdb->last_resolve_row_count === 129,
+        'R01 129 duplicate protection metadata JOIN rows are capped');
+    esp63_sql("DELETE FROM esp63_postmeta WHERE post_id=$heavy_id");
+
+    // Numerous separate attachment owners with the same file are rejected,
+    // not truncated to a fictitiously unique public owner.
+    $owner_posts = []; $owner_states = []; $owner_files = [];
+    for ($i = 0; $i < 130; ++$i) {
+        $owner_id = 190010 + $i;
+        $owner_posts[] = "($owner_id,'attachment')";
+        $owner_states[] = "($owner_id,'ready',1,1,0)";
+        $owner_files[] = "('$heavy_hash','$heavy_path',$owner_id,1,'')";
+    }
+    esp63_sql("INSERT INTO esp63_posts(ID,post_type) VALUES " . implode(',', $owner_posts));
+    esp63_sql("INSERT INTO $state
+        (attachment_id,status,revision,active_generation,pending_count) VALUES " .
+        implode(',', $owner_states));
+    esp63_sql("INSERT INTO $files
+        (path_hash,file_path,attachment_id,generation,protected_path_id) VALUES " .
+        implode(',', $owner_files));
+    esp63_assert(ESP_Media_Index::resolve($heavy_absolute)['status'] === 'error' &&
+        $wpdb->last_resolve_row_count === 129,
+        'R01 131 overlapping owners cannot authorize a public file');
+    esp63_sql("DELETE FROM $files WHERE attachment_id BETWEEN 190001 AND 190139");
+    esp63_sql("DELETE FROM $state WHERE attachment_id BETWEEN 190001 AND 190139");
+    esp63_sql("DELETE FROM esp63_posts WHERE ID BETWEEN 190001 AND 190139");
+    unlink($heavy_absolute);
+
     $meta = ESP_Media_Index::enumerate('2026/10/document.pdf',
         ['sizes' => ['full' => ['file' => 'document-pdf.jpg']]]);
     esp63_assert($meta === ['2026/10/document.pdf','2026/10/document-pdf.jpg'],
