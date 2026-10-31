@@ -11,7 +11,6 @@ if (strpos(DB_NAME, 'esp_') !== 0 || !class_exists('ESP_Media_Index')) {
 }
 global $wpdb;
 $state = ESP_Media_Index::state_table();
-$files = ESP_Media_Index::files_table();
 function esp_type_lock_assert($ok, $reason) {
     if (!$ok) { throw new RuntimeException('R02 post-type lock: ' . $reason); }
 }
@@ -118,8 +117,9 @@ function esp_type_lock_transition($id, $to_type, $strict, $failure = '') {
             'compatible fallback did not persist global invalidation');
     } else {
         esp_type_lock_assert($exception instanceof RuntimeException &&
+            strpos($exception->getMessage(), 'cannot lock post type transition') !== false &&
             !$saw_prewrite_fence && get_post_type($id) === $from_type,
-            'strict or failed fallback must stop before Core UPDATE');
+            'strict or failed fallback must stop at the lock guard before Core UPDATE');
         if ($failure !== '') {
             esp_type_lock_assert($blocked_writes === 1,
                 'fault injection did not hit the intended fence');
