@@ -1,0 +1,178 @@
+<?php
+/**
+ * #67 one-column feasibility probe. DISPOSABLE MYSQL ONLY; NOT production code.
+ *
+ * Existing state row + one active_mutations TEXT column. Exercise actual
+ * MySQL conditional UPDATE replay, independent connections, READY publication,
+ * crash residue, and a caller-owned transaction connection-loss counterexample.
+ *
+ * This test deliberately does not assert that the design is production-safe.
+ */
+declare(strict_types=1);
+
+if (getenv('ESP_TEST_DB_NAME') !== 'esp_test') {
+    fwrite(STDERR, "Refusing non-disposable database\n");
+    exit(1);
+}
+mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
+function db67(): mysqli {
+    $db = new mysqli(
+        getenv('ESP_TEST_DB_HOST') ?: '127.0.0.1',
+        getenv('ESP_TEST_DB_USER') ?: 'root',
+        getenv('ESP_TEST_DB_PASSWORD') ?: '',
+        'esp_test'
+    );
+    $db->set_charset('utf8mb4');
+    return $db;
+}
+function check67(bool $ok, string $message): void {
+    if (!$ok) { throw new RuntimeException('FAIL #67: ' . $message); }
+    echo 'PASS #67: ' . $message . "\n";
+}
+function row67(mysqli $db): array {
+    $r = $db->query('SELECT status,revision,pending_count,active_mutations FROM esp67_state_probe WHERE attachment_id=123')->fetch_assoc();
+    if (!$r) { throw new RuntimeException('missing state row'); }
+    $ids = json_decode($r['active_mutations'], true, 512, JSON_THROW_ON_ERROR);
+    if (!is_array($ids) || !array_is_list($ids) || count($ids) !== count(array_unique($ids)) ||
+        count(array_filter($ids, 'is_string')) !== count($ids) ||
+        count($ids) !== (int)$r['pending_count']) {
+        throw new RuntimeException('corrupt or inconsistent mutation set');
+    }
+    return $r;
+}
+/** Apply a transition with a frozen expected snapshot: exactly the same SQL
+ * and parameters can be executed twice after the first ACK is lost.
+ */
+function write67(mysqli $db, array $before, array $ids): int {
+    $ids = array_values(array_unique($ids));
+    sort($ids, SORT_STRING);
+    $encoded = json_encode($ids, JSON_THROW_ON_ERROR);
+    $count = count($ids);
+    $old = $before['active_mutations'];
+    $rev = (int)$before['revision'];
+    $oldCount = (int)$before['pending_count'];
+    $stmt = $db->prepare(
+        "UPDATE esp67_state_probe
+         SET active_mutations=?, pending_count=?, status='dirty', revision=revision+1
+         WHERE attachment_id=123 AND revision=?
+           AND BINARY active_mutations=BINARY ? AND pending_count=?"
+    );
+    $stmt->bind_param('siisi', $encoded, $count, $rev, $old, $oldCount);
+    $stmt->execute();
+    $changed = $stmt->affected_rows;
+    $stmt->close();
+    return $changed;
+}
+function change67(mysqli $db, string $id, bool $start): void {
+    for ($attempt = 0; $attempt < 20; ++$attempt) {
+        $before = row67($db);
+        $ids = json_decode($before['active_mutations'], true, 512, JSON_THROW_ON_ERROR);
+        $has = in_array($id, $ids, true);
+        if ($has === $start) { return; }
+        if ($start) { $ids[] = $id; }
+        else { $ids = array_values(array_diff($ids, [$id])); }
+        if (write67($db, $before, $ids) === 1) { return; }
+    }
+    throw new RuntimeException('CAS could not converge');
+}
+function publish67(mysqli $db): int {
+    $before = row67($db);
+    $rev = (int)$before['revision'];
+    $stmt = $db->prepare(
+        "UPDATE esp67_state_probe SET status='ready'
+         WHERE attachment_id=123 AND status='dirty'
+           AND revision=? AND pending_count=0 AND active_mutations='[]'"
+    );
+    $stmt->bind_param('i', $rev);
+    $stmt->execute();
+    $changed = $stmt->affected_rows;
+    $stmt->close();
+    return $changed;
+}
+
+$a = db67();
+$b = db67();
+try {
+    foreach (['esp67_state_probe', 'esp67_meta_probe'] as $table) {
+        $a->query('DROP TABLE IF EXISTS ' . $table);
+    }
+    $a->query("CREATE TABLE esp67_state_probe (
+        attachment_id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
+        status VARCHAR(16) NOT NULL,
+        revision BIGINT UNSIGNED NOT NULL,
+        pending_count INT UNSIGNED NOT NULL,
+        active_mutations LONGTEXT NOT NULL
+    ) ENGINE=InnoDB");
+    $a->query("CREATE TABLE esp67_meta_probe (
+        attachment_id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
+        canonical_value VARCHAR(50) NOT NULL
+    ) ENGINE=InnoDB");
+    $a->query("INSERT INTO esp67_state_probe VALUES(123,'ready',1,0,'[]')");
+    $a->query("INSERT INTO esp67_meta_probe VALUES(123,'public')");
+
+    // SQL replay after a successful but unacknowledged start.
+    $r = row67($a);
+    check67(write67($a, $r, ['A']) === 1, 'first start applies');
+    check67(write67($a, $r, ['A']) === 0, 'same start SQL replay cannot double-add');
+    check67((int)row67($b)['pending_count'] === 1, 'second connection observes one A');
+
+    // Two independent connections, plus a stale snapshot CAS.
+    $stale = row67($a);
+    change67($b, 'B', true);
+    check67(write67($a, $stale, ['A','C']) === 0, 'stale writer cannot overwrite B');
+    change67($a, 'C', true);
+    check67((int)row67($b)['pending_count'] === 3, 'CAS retry retains A B C');
+
+    $beforeA = row67($a);
+    check67(write67($a, $beforeA, ['B','C']) === 1, 'A completes');
+    check67(write67($a, $beforeA, ['B','C']) === 0, 'same completion SQL replay cannot consume B or C');
+    $r = row67($b);
+    check67((int)$r['pending_count'] === 2 &&
+        $r['active_mutations'] === '["B","C"]', 'other workers stay active after replay');
+    check67(publish67($a) === 0, 'READY publication is blocked with other writers');
+
+    change67($b, 'B', false);
+    change67($a, 'C', false);
+    check67(publish67($b) === 1, 'READY only after last active ID removed');
+    check67(row67($a)['status'] === 'ready', 'published state is visible');
+
+    // A new mutation after READY must revoke it in a single CAS update.
+    change67($a, 'AFTER_READY', true);
+    check67(row67($b)['status'] === 'dirty' && publish67($b) === 0,
+        'new pre-write mutation revokes READY');
+    // Simulated request disappearance: the ID is deliberately retained.
+    $a->close();
+    $a = db67();
+    check67(row67($a)['active_mutations'] === '["AFTER_READY"]' &&
+        publish67($b) === 0, 'connection loss leaves durable ID and blocks rebuild');
+    echo "EXPECTED LIMITATION #67: a dead process leaves a durable ID; no automatic safe reclaim\n";
+
+    // Independent transaction-loss case: caller-owned transaction holds
+    // state fencing and WordPress canonical write together, then disconnects.
+    // A Core-style retry of only the canonical SQL can commit without the fence.
+    change67($a, 'AFTER_READY', false);
+    check67(publish67($b) === 1, 'reset to READY before transaction probe');
+    $a->begin_transaction();
+    change67($a, 'TX_A', true);
+    $a->query("UPDATE esp67_meta_probe SET canonical_value='private' WHERE attachment_id=123");
+    // Both changes are uncommitted. Closing this connection rolls both back.
+    $a->close();
+    $a = db67();
+    check67(row67($a)['status'] === 'ready' &&
+        row67($a)['active_mutations'] === '[]', 'uncommitted state fence rolled back');
+    // This SQL is a modeled post-reconnection replay, not actual wpdb.
+    $b->query("UPDATE esp67_meta_probe SET canonical_value='private' WHERE attachment_id=123");
+    $value = $b->query('SELECT canonical_value FROM esp67_meta_probe WHERE attachment_id=123')->fetch_assoc();
+    check67($value['canonical_value'] === 'private' && row67($a)['status'] === 'ready',
+        'COUNTEREXAMPLE: replay of canonical write alone leaves READY without fence');
+    echo "EXPECTED LIMITATION #67: one-column set does NOT solve caller transaction lost on reconnect\n";
+    echo "RESULT #67: SQL idempotence YES; overlap YES; crash recovery NO; external transaction retry NO\n";
+} finally {
+    $clean = db67();
+    foreach (['esp67_meta_probe', 'esp67_state_probe'] as $table) {
+        $clean->query('DROP TABLE IF EXISTS ' . $table);
+    }
+    $clean->close();
+    $a->close();
+    $b->close();
+}
