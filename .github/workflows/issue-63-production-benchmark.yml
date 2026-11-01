@@ -1,0 +1,90 @@
+name: Issue 63 production media index benchmark
+on:
+  pull_request:
+    paths:
+      - 'includes/class-esp-media-index.php'
+      - 'tests/issue-63-production-benchmark.php'
+      - 'tests/security-media-index-mysql.php'
+      - '.github/workflows/issue-63-production-benchmark.yml'
+  workflow_dispatch:
+    inputs:
+      build_total:
+        description: 'Attachment count for real-batch MySQL bootstrap benchmark'
+        type: choice
+        default: '10000'
+        options:
+          - '10000'
+          - '100000'
+jobs:
+  prototype-and-mysql-benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: test-password
+          MYSQL_DATABASE: esp_test
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -ptest-password"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Access the pinned main implementation via git show.
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mysqli
+          coverage: none
+      - name: Extract exact main implementation (pinned SHA)
+        run: |
+          git show a5c0e3f518e8204d085bdaf492fcc203bf8bca87:includes/class-esp-media-protection.php > "$RUNNER_TEMP/esp63-main-media-protection.php"
+          test -s "$RUNNER_TEMP/esp63-main-media-protection.php"
+      - name: Lint experimental PHP
+        run: |
+          php -l includes/class-esp-media-index.php
+          php -l tests/issue-63-production-benchmark.php
+      - name: Compare main, PR62, prototype and production index (synthetic MySQL)
+        env:
+          ESP_TEST_DB_HOST: 127.0.0.1
+          ESP_TEST_DB_USER: root
+          ESP_TEST_DB_PASSWORD: test-password
+          ESP_TEST_DB_NAME: esp_test
+          ESP63_BENCH_REPORT: issue-63-production-benchmark.json
+          ESP63_MAIN_CLASS_SOURCE: ${{ runner.temp }}/esp63-main-media-protection.php
+        run: |
+          php tests/issue-63-production-benchmark.php | tee issue-63-production-benchmark.log
+          echo '## Issue #63 production indexed MySQL comparison' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Main vs PR62 vs prototype vs production live-postmeta JOIN. Synthetic metadata; no WordPress HTTP. Main JPEG thumbnail=unresolved.' >> "$GITHUB_STEP_SUMMARY"
+          echo '\`\`\`json' >> "$GITHUB_STEP_SUMMARY"
+          cat issue-63-production-benchmark.json >> "$GITHUB_STEP_SUMMARY"
+          echo '\`\`\`' >> "$GITHUB_STEP_SUMMARY"
+      - name: Measure real run_batch initial build (10K PR / optional 100K manual)
+        env:
+          ESP_TEST_DB_HOST: 127.0.0.1
+          ESP_TEST_DB_USER: root
+          ESP_TEST_DB_PASSWORD: test-password
+          ESP_TEST_DB_NAME: esp_test
+          ESP63_BUILD_BENCH: '1'
+          ESP63_BUILD_TOTAL: ${{ inputs.build_total || '10000' }}
+          ESP63_BUILD_REPORT: issue-63-build-benchmark.json
+        run: |
+          php tests/security-media-index-mysql.php | tee issue-63-build-benchmark.log
+          echo '## Issue #63 initial build with real run_batch()' >> "$GITHUB_STEP_SUMMARY"
+          echo "Target: $ESP63_BUILD_TOTAL attachments (5 paths each). Real PHP class and MySQL; synthetic metadata, NOT full WordPress/HTTP or production load." >> "$GITHUB_STEP_SUMMARY"
+          echo '~~~json' >> "$GITHUB_STEP_SUMMARY"
+          cat issue-63-build-benchmark.json >> "$GITHUB_STEP_SUMMARY"
+          echo '~~~' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: issue-63-production-benchmark
+          path: |
+            issue-63-production-benchmark.json
+            issue-63-production-benchmark.log
+            issue-63-build-benchmark.json
+            issue-63-build-benchmark.log
+          if-no-files-found: warn
+          retention-days: 30

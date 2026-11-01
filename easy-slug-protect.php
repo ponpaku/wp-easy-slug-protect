@@ -67,6 +67,7 @@ class Easy_Slug_Protect {
         require_once ESP_PATH . 'includes/class-esp-path-matcher.php';
         require_once ESP_PATH . 'includes/class-esp-media-deriver.php';
         require_once ESP_PATH . 'includes/class-esp-media-file-resolver.php';
+        require_once ESP_PATH . 'includes/class-esp-media-index.php';
         require_once ESP_PATH . 'includes/class-esp-media-protection.php';
 
         // 管理画面クラスの読み込み
@@ -79,6 +80,9 @@ class Easy_Slug_Protect {
      * プラグインの初期化
      */
     private function init() {
+        // #63 is an independent, opt-in derived index. Its writes are guarded
+        // before WordPress metadata mutations, even in wp-admin and REST.
+        ESP_Media_Index::register();
         // WordPressの通常のメタデータ更新は、まず失効できるか確認する。
         // 失効できないときに更新してしまうと次リクエストに旧認可が残り得る。
         foreach (['add_post_metadata', 'update_post_metadata'] as $hook) {
