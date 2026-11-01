@@ -496,7 +496,11 @@ esp67_phase update-a | tee "$report_root/esp67-wp-worker-a.log"
 assert_http esp31-protected.jpg 503
 ! grep -q ESP31_PROTECTED_JPEG "$fixture_root/http-probe-body"
 docker exec "$container" touch /var/www/html/wp-content/uploads/.esp67-hook-probe/b-resume
-wait "$esp67_worker_b"
+if ! wait "$esp67_worker_b"; then
+  cat "$report_root/esp67-wp-worker-b.log" >&2
+  echo 'ESP67 WordPress B worker failed after resume' >&2
+  exit 1
+fi
 cat "$report_root/esp67-wp-worker-b.log"
 esp67_phase restore | tee "$report_root/esp67-wp-restore.log"
 assert_http esp31-protected.jpg 302
