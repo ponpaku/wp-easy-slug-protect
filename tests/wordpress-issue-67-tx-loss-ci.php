@@ -81,9 +81,20 @@ try {
     $current = $wpdb->get_row($wpdb->prepare(
         "SELECT status,revision,pending_count,active_generation FROM $state WHERE attachment_id=%d",
         $id), ARRAY_A);
-    $actual_meta = $wpdb->get_var($wpdb->prepare(
+    // wpdb::get_var() intentionally returns null for SQL empty-string values:
+    // use get_row() and an independent MySQL session so '' is not mistaken for
+    // a missing row or an unchanged canonical protection value.
+    $canonical = $wpdb->get_row($wpdb->prepare(
         "SELECT meta_value FROM {$wpdb->postmeta} WHERE post_id=%d AND meta_key=%s
-         ORDER BY meta_id ASC LIMIT 1", $id, $key));
+         ORDER BY meta_id ASC LIMIT 1", $id, $key), ARRAY_A);
+    $actual_meta = is_array($canonical) ? $canonical['meta_value'] : null;
+    $direct = new mysqli(DB_HOST, DB_USER, DB_PASSWORD, DB_NAME);
+    $direct_sql = $wpdb->prepare(
+        "SELECT meta_value FROM {$wpdb->postmeta} WHERE post_id=%d AND meta_key=%s
+         ORDER BY meta_id ASC LIMIT 1", $id, $key);
+    $direct_row = $direct->query($direct_sql)->fetch_assoc();
+    $direct->close();
+    $direct_meta = is_array($direct_row) ? $direct_row['meta_value'] : null;
     if (!$observed_dirty || $killed_connection <= 0 ||
         $connection_after <= 0 || $connection_after === $killed_connection ||
         !is_array($current)) {
@@ -92,13 +103,15 @@ try {
     $same_ready = $current['status'] === 'ready' &&
         (int)$current['pending_count'] === 0 &&
         (int)$current['revision'] === (int)$before['revision'];
-    $canonical_changed = $actual_meta === '';
+    $canonical_changed = $actual_meta === '' && $direct_meta === '';
     $outcome = [
         'hook_fenced_before_kill' => $observed_dirty,
         'connection_replaced' => true,
         'update_post_meta_return' => $updated,
         'exception' => $exception,
         'canonical_changed' => $canonical_changed,
+        'wpdb_meta_value' => $actual_meta,
+        'independent_mysql_meta_value' => $direct_meta,
         'state_ready_without_fence' => $same_ready,
         'canonical_changed_with_missing_fence' => $canonical_changed && $same_ready,
         'strict_resolve_status' => ESP_Media_Index::resolve(
