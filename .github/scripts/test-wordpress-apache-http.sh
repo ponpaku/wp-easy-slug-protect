@@ -469,6 +469,12 @@ f01_phase restore | tee "$report_root/f01-recovery.log"
 assert_http esp31-protected.jpg 302
 echo 'PASS: F01 two real WordPress workers, duplicate post-hooks, pending isolation and protected HTTP recovery'
 
+# Q01: real WordPress update_post_meta() + real wpdb reconnect at a caller-owned
+# transaction boundary. The test cleans up through the canonical WP API.
+docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+  php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-issue-67-tx-loss-ci.php \
+  | tee "$report_root/q01-wpdb-transaction-reconnect.log"
+
 # R02: measure fresh independent Apache media requests, including the Core
 # SELECT VERSION() and optional get_option SQL outside the 1-query owner lookup.
 docker exec "$container" mkdir -p /var/www/html/wp-content/mu-plugins
