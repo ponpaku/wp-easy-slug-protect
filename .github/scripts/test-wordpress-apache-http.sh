@@ -18,9 +18,14 @@ container="esp31-http-$GITHUB_RUN_ID-$$"
 started=0
 q01_proxy_pid=0
 q01_wpdb_proxy_pid=0
+esp67_wpdb_proxy_pid=0
 cleanup() {
   # Capture the failing command's status BEFORE any proxy teardown changes $?.
   local result=$?
+  if [[ $esp67_wpdb_proxy_pid -gt 0 ]]; then
+    kill "$esp67_wpdb_proxy_pid" >/dev/null 2>&1 || true
+    wait "$esp67_wpdb_proxy_pid" >/dev/null 2>&1 || true
+  fi
   if [[ $q01_wpdb_proxy_pid -gt 0 ]]; then
     kill "$q01_wpdb_proxy_pid" >/dev/null 2>&1 || true
     wait "$q01_wpdb_proxy_pid" >/dev/null 2>&1 || true
@@ -314,15 +319,20 @@ python3 -u "$fixture_root/q01-mysql-proxy.py" 33307 > "$fixture_root/q01-proxy.l
 q01_proxy_pid=$!
 python3 -u "$fixture_root/q01-mysql-proxy.py" 33308 > "$fixture_root/q01-wpdb-proxy.log" 2>&1 &
 q01_wpdb_proxy_pid=$!
+python3 -u "$fixture_root/q01-mysql-proxy.py" 33309 > "$fixture_root/esp67-wpdb-proxy.log" 2>&1 &
+esp67_wpdb_proxy_pid=$!
 for _ in $(seq 1 50); do
   if grep -q Q01_PROXY_LISTENING "$fixture_root/q01-proxy.log" &&
-     grep -q Q01_PROXY_LISTENING "$fixture_root/q01-wpdb-proxy.log"; then break; fi
+     grep -q Q01_PROXY_LISTENING "$fixture_root/q01-wpdb-proxy.log" &&
+     grep -q Q01_PROXY_LISTENING "$fixture_root/esp67-wpdb-proxy.log"; then break; fi
   sleep 0.1
 done
 if ! grep -q Q01_PROXY_LISTENING "$fixture_root/q01-proxy.log" ||
-   ! grep -q Q01_PROXY_LISTENING "$fixture_root/q01-wpdb-proxy.log"; then
+   ! grep -q Q01_PROXY_LISTENING "$fixture_root/q01-wpdb-proxy.log" ||
+   ! grep -q Q01_PROXY_LISTENING "$fixture_root/esp67-wpdb-proxy.log"; then
   cat "$fixture_root/q01-proxy.log" >&2
   cat "$fixture_root/q01-wpdb-proxy.log" >&2
+  cat "$fixture_root/esp67-wpdb-proxy.log" >&2
   exit 1
 fi
 
@@ -343,6 +353,15 @@ cat "$fixture_root/q01-wpdb-proxy.log"
 # Never mislabel it a passing fix for Q01.
 grep -q Q01_PROXY_DROPPED_UPDATE_OK "$fixture_root/q01-proxy.log"
 grep -q Q01_PROXY_DROPPED_UPDATE_OK "$fixture_root/q01-wpdb-proxy.log"
+# Issue #67: second independent packet relay tests the proposed mutation-ID
+# CAS through the real WordPress wpdb reconnect/re-execute path.
+docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+  ESP67_WPDB_PROXY_HOST=host.docker.internal:33309 \
+  php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-issue-67-ackloss-ci.php \
+  | tee "$report_root/esp67-real-wpdb-ackloss.log"
+cat "$fixture_root/esp67-wpdb-proxy.log"
+grep -q Q01_PROXY_DROPPED_UPDATE_OK "$fixture_root/esp67-wpdb-proxy.log"
+[[ "$(grep -c Q01_PROXY_TARGET_QUERY_SEEN "$fixture_root/esp67-wpdb-proxy.log")" -ge 2 ]]
 assert_http() {
   local path="$1" expected="$2"
   local status
