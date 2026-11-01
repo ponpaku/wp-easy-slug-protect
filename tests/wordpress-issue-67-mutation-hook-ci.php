@@ -135,6 +135,11 @@ $pre = static function($check,$post_id,$meta_key) use($ticket,$id,$key,$table,$p
         $until = microtime(true)+40;
         while (!file_exists($resume) && microtime(true)<$until) { usleep(100000); }
         esp67_assert_wp(file_exists($resume), 'B barrier released');
+        // Another independent WP process may have changed the canonical
+        // metadata while B was suspended. Our long-running PHP worker cached
+        // the original meta on bootstrap; invalidate it before Core's no-op
+        // comparison so the resumed write really reaches MySQL.
+        wp_cache_delete($id, 'post_meta');
     }
     return $check;
 };
