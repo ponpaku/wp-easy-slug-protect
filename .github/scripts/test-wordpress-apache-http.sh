@@ -539,7 +539,7 @@ esp67_collision_phase() {
   docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
     ESP67_COLLISION_PHASE="$1" php "$esp67_collision_php"
 }
-for esp67_collision_mode in vulnerable fenced; do
+for esp67_collision_mode in vulnerable fenced global; do
   # Each mode must wait for its OWN writer. A stale marker from the prior
   # successful phase would cause the HTTP witness to race ahead of the fence.
   docker exec "$container" rm -f \
@@ -572,6 +572,12 @@ for esp67_collision_mode in vulnerable fenced; do
     [[ "$esp67_collision_http" == 503 ]]
     ! cmp -s "$fixture_root/http-probe-body" "$fixture_root/wordpress/wp-content/uploads/esp31-public-150x150.jpg"
     echo 'ESP67_OUT_OF_BAND_FENCE: anonymous HTTP blocked during lost caller transaction'
+    if [[ "$esp67_collision_mode" == global ]]; then
+      # A global dirty epoch deliberately disrupts unrelated protected HTTP
+      # as well: correctness is possible but availability is much worse.
+      assert_http esp31-protected.jpg 503
+      echo 'ESP67_GLOBAL_FALLBACK: unrelated protected HTTP also denied'
+    fi
   fi
   docker exec "$container" touch /var/www/html/wp-content/uploads/.esp67-collision/resume
   if ! wait "$esp67_collision_worker"; then
