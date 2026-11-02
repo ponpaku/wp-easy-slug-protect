@@ -267,7 +267,7 @@ if($phase==='recover'){
     fl67_check(ESP_Media_Index::reindex_attachment($id),
         'rebuild under exclusive filesystem lock from canonical WordPress meta');
     $r=ESP_Media_Index::resolve($path);
-    if(in_array($scenario,['crash','network-unsafe','network-gated','network-killed','network-trigger','trigger-normal'],true)){
+    if(in_array($scenario,['crash','network-unsafe','network-gated','network-killed','network-trigger'],true)){
         fl67_check($r['status']==='resolved'&&
             ($r['protected_path_id']??null)==='',
             'crashed pre-write worker restored old public path');
@@ -335,7 +335,7 @@ $pre=static function($check,$post_id,$meta_key)use(
     return $check;
 };
 add_filter('update_post_metadata',$pre,3,5);
-if(in_array($scenario,['network-unsafe','network-gated','network-killed','network-trigger','trigger-normal'],true)){
+if(in_array($scenario,['network-unsafe','network-gated','network-killed','network-trigger'],true)){
     $endpoint=getenv('ESP67_FLOCK_PROXY_HOST');
     if(!is_string($endpoint)||!str_contains($endpoint,':'))
         throw new RuntimeException('missing disposable network relay');
