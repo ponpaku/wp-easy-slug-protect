@@ -108,6 +108,35 @@ jobs:
           ESP_TEST_DB_PASSWORD: test-password
           ESP_TEST_DB_NAME: esp_test
         run: php tests/security-verification-mysql-lock-test.php
+  mariadb-issue67:
+    runs-on: ubuntu-latest
+    services:
+      mariadb:
+        image: mariadb:10.11
+        env:
+          MARIADB_ROOT_PASSWORD: test-password
+          MARIADB_DATABASE: esp_test
+        ports:
+          - 3307:3306
+        options: >-
+          --health-cmd="mariadb-admin ping -h 127.0.0.1 -ptest-password"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mysqli
+          coverage: none
+      - name: Issue 67 candidate set-CAS and lock/transaction counterexample on MariaDB 10.11
+        env:
+          ESP_TEST_DB_HOST: 127.0.0.1:3307
+          ESP_TEST_DB_USER: root
+          ESP_TEST_DB_PASSWORD: test-password
+          ESP_TEST_DB_NAME: esp_test
+        run: php tests/issue-67-one-column-mysql.php
   wordpress-integration:
     runs-on: ubuntu-latest
     services:
