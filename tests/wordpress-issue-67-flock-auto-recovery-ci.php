@@ -132,6 +132,10 @@ if($phase==='recover'){
     // any late writer after this point. Future writers must acquire SH first.
     $db=fl67_db();$db->query('SET SESSION innodb_lock_wait_timeout=2');$db->begin_transaction();
     try {
+        // Same lock ordering as the guarded writer: state -> post -> meta.
+        // State is locked first to avoid an inverse-lock-order deadlock.
+        $r=$db->query("SELECT revision,pending_count,esp67_flock_ids
+            FROM $state WHERE attachment_id=$id FOR UPDATE")->fetch_assoc();
         // PHP death releases flock, but an already-dispatched Core SQL may
         // still be running on the MySQL server. Wait on canonical InnoDB
         // locks BEFORE clearing the ticket; the separate in-flight test
@@ -145,8 +149,6 @@ if($phase==='recover'){
             FOR UPDATE");
         if($meta_lock===false)throw new RuntimeException('canonical postmeta row lock failed');
         fl67_check(true,'recovery acquired canonical post and metadata locks');
-        $r=$db->query("SELECT revision,pending_count,esp67_flock_ids
-            FROM $state WHERE attachment_id=$id FOR UPDATE")->fetch_assoc();
         fl67_check($r['esp67_flock_ids']==='["FLOCK"]' &&
             (int)$r['pending_count']===1,'unowned ticket exists after all PHP locks released');
         $db->query("UPDATE $state SET status='dirty',revision=revision+1,
