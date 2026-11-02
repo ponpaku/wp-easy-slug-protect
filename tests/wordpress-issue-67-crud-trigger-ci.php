@@ -26,7 +26,7 @@ try {
  delete_post_meta($id,$key);
  $db->query("CREATE TABLE $gate(
     owner_id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
-    actor VARCHAR(80) NOT NULL) ENGINE=InnoDB");
+    actor VARBINARY(80) NOT NULL) ENGINE=InnoDB");
  $db->query("INSERT INTO $gate VALUES($id,'ACTOR_A')");
  foreach(['INSERT','UPDATE','DELETE'] as $event){
     $tr=$wpdb->prefix.'esp67_crud_'.strtolower($event);
@@ -37,7 +37,7 @@ try {
       DECLARE n INT DEFAULT 0;
       IF $target.post_id=$id AND $target.meta_key='$key' THEN
         SELECT COUNT(*) INTO n FROM $gate
-          WHERE owner_id=$id AND actor=@esp67_actor_id FOR UPDATE;
+          WHERE owner_id=$id AND actor=CAST(@esp67_actor_id AS BINARY) FOR UPDATE;
         IF n<>1 THEN
           SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='ESP67 actor denied';
         END IF;
