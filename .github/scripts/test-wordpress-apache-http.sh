@@ -887,8 +887,6 @@ for esp67_delayed_case in network-unsafe network-gated network-killed network-tr
   rm -f "$esp67_hold_marks/packet-received" \
     "$esp67_hold_marks/packet-release" "$esp67_hold_marks/packet-done"
   esp67_flock_phase setup "$esp67_delayed_case" | tee "$report_root/esp67-delayed-${esp67_delayed_case}-setup.log"
-  # This run pauses only the MySQL relay, not the pre-SQL PHP hook.
-  docker exec "$container" touch /var/www/html/wp-content/uploads/.esp67-flock/resume
   docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
     ESP67_FLOCK_PHASE=writer ESP67_FLOCK_SCENARIO="$esp67_delayed_case" \
     ESP67_FLOCK_PROXY_HOST=host.docker.internal:33310 \
