@@ -20,6 +20,7 @@ container="disposable-fixture-only"
 started=1
 q01_proxy_pid=0
 q01_wpdb_proxy_pid=0
+esp67_wpdb_proxy_pid=0
 docker() {
   if [[ "$1" == "logs" ]]; then
     printf 'DOCKER_LOGS_ON_FAILURE\n' > "$scratch/docker-logs"
