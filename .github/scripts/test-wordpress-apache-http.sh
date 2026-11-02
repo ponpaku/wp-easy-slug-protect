@@ -850,6 +850,19 @@ for esp67_delayed_case in network-unsafe network-gated; do
     ESP67_FLOCK_PROXY_HOST=host.docker.internal:33310 \
     php "$esp67_flock_php" >"$report_root/esp67-delayed-\${esp67_delayed_case}-writer.log" 2>&1 &
   esp67_delayed_worker=$!
+  esp67_delayed_prewrite_ready="$fixture_root/wordpress/wp-content/uploads/.esp67-flock/ready"
+  esp67_delayed_prewrite=0
+  for attempt in $(seq 1 120); do
+    if [[ -f "$esp67_delayed_prewrite_ready" ]]; then esp67_delayed_prewrite=1; break; fi
+    if ! kill -0 "$esp67_delayed_worker" 2>/dev/null; then break; fi
+    sleep 0.1
+  done
+  if (( esp67_delayed_prewrite != 1 )); then
+    cat "$report_root/esp67-delayed-\${esp67_delayed_case}-writer.log" >&2
+    echo "ESP67 $esp67_delayed_case did not reach prewrite guard" >&2
+    exit 1
+  fi
+  docker exec "$container" touch /var/www/html/wp-content/uploads/.esp67-flock/resume
   esp67_delayed_received=0
   for attempt in $(seq 1 150); do
     if [[ -f "$esp67_hold_marks/packet-received" ]]; then esp67_delayed_received=1; break; fi
