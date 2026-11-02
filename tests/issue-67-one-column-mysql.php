@@ -316,6 +316,62 @@ try {
         'real DB trigger refuses stale post-recovery UPDATE at execution time');
     $a->query("DROP TRIGGER IF EXISTS esp67_trigger_probe");
     echo "PASS #67 TRIGGER SQL: actual InnoDB write fence on MySQL/MariaDB\n";
+    // A predicate saying only "SOME owner token exists" is unsafe: A can be
+    // revoked while B is still live. A delayed A statement must not borrow
+    // B's remaining authorization. Per-writer identity must cross PHP -> DB
+    // and be checked atomically at the server execution boundary.
+    change67($a,'SID_A',true);
+    change67($b,'SID_B',true);
+    $a->query("CREATE TRIGGER esp67_trigger_probe
+        BEFORE UPDATE ON esp67_meta_probe FOR EACH ROW BEGIN
+          DECLARE n INT DEFAULT 0;
+          IF NEW.attachment_id=123 THEN
+            SELECT COUNT(*) INTO n FROM esp67_state_probe
+              WHERE attachment_id=123 AND status='dirty'
+                AND pending_count>0 AND
+                IFNULL(JSON_CONTAINS(active_mutations,
+                  JSON_QUOTE(@esp67_actor_id)),0)=1
+              FOR UPDATE;
+            IF n<>1 THEN
+              SIGNAL SQLSTATE '45000'
+                SET MESSAGE_TEXT='per-writer token missing or revoked';
+            END IF;
+          END IF;
+        END");
+    $a->query("SET @esp67_actor_id='SID_A'");
+    $a->query("UPDATE esp67_meta_probe SET canonical_value='writer_A'
+        WHERE attachment_id=123");
+    check67($a->affected_rows===1,
+        'trigger authorizes writer A by its actual session token');
+    change67($b,'SID_A',false); // SID_B stays active
+    $deniedA=false;
+    try {
+       $a->query("UPDATE esp67_meta_probe SET canonical_value='stale_A'
+           WHERE attachment_id=123");
+    }catch(mysqli_sql_exception $e){
+       $deniedA=$e->getSqlState()==='45000';
+    }
+    check67($deniedA,
+        'revoked writer A cannot borrow still-live B ticket via trigger');
+    $a->query("SET @esp67_actor_id='SID_B'");
+    $a->query("UPDATE esp67_meta_probe SET canonical_value='writer_B'
+        WHERE attachment_id=123");
+    check67($a->affected_rows===1,
+        'still-live B ticket authorizes its own SQL');
+    $a->query("SET @esp67_actor_id=NULL");
+    $deniedUnknown=false;
+    try {
+        $a->query("UPDATE esp67_meta_probe SET canonical_value='missing_session'
+            WHERE attachment_id=123");
+    }catch(mysqli_sql_exception $e){
+        $deniedUnknown=$e->getSqlState()==='45000';
+    }
+    check67($deniedUnknown,
+        'new/uninitialized DB session fails closed without matching writer token');
+    $a->query("DROP TRIGGER IF EXISTS esp67_trigger_probe");
+    change67($a,'SID_B',false);
+    echo "PASS #67 TRIGGER IDENTITY: per-writer revocation and reconnect fail-closed\n";
+
 
     echo "RESULT #67: SQL idempotence YES; overlap YES; crash recovery NO; external transaction retry NO\n";
 } finally {
