@@ -30,7 +30,7 @@ $public='esp31-public-150x150.jpg';
 $path=wp_upload_dir()['basedir'].'/'.$public;
 $state=ESP_Media_Index::state_table();
 $files=ESP_Media_Index::files_table();
-function p67_check(bool $result,string $message):void {
+function p67_check($result,string $message):void {
     if(!$result)throw new RuntimeException("ESP67 PROMOTION: $message");
     echo "PASS ESP67 PROMOTION: $message\n";
 }
