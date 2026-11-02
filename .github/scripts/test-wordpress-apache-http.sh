@@ -604,6 +604,11 @@ assert_http esp31-public-150x150.jpg 403
 esp67_integrated_phase restore | tee "$report_root/esp67-integrated-bymid-restored.log"
 assert_http esp31-public-150x150.jpg 200
 esp67_integrated_phase setup | tee "$report_root/esp67-integrated-after-bymid-setup.log"
+esp67_integrated_phase bymid_disconnect | tee "$report_root/esp67-integrated-bymid-disconnect.log"
+assert_http esp31-public-150x150.jpg 403
+esp67_integrated_phase restore | tee "$report_root/esp67-integrated-bymid-disconnect-restored.log"
+assert_http esp31-public-150x150.jpg 200
+esp67_integrated_phase setup | tee "$report_root/esp67-integrated-after-bymid-disconnect-setup.log"
 esp67_integrated_phase noop | tee "$report_root/esp67-integrated-noop.log"
 esp67_integrated_phase autocommit | tee "$report_root/esp67-integrated-autocommit.log"
 assert_http esp31-public-150x150.jpg 403
