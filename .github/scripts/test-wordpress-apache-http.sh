@@ -899,6 +899,48 @@ for esp67_flock_case in crash db-loss; do
   esp67_flock_phase restore "$esp67_flock_case" | tee "$report_root/esp67-flock-${esp67_flock_case}-restored.log"
   assert_http esp31-public-150x150.jpg 200
 done
+# Same mechanism, but KILL PHP while Core's genuine wp_postmeta UPDATE
+# is still executing on MySQL. Safe reaper must wait or retry until the
+# postmeta row is no longer owned by the server-side SQL.
+esp67_flock_phase setup inflight | tee "$report_root/esp67-flock-inflight-setup.log"
+esp67_flock_phase writer inflight >"$report_root/esp67-flock-inflight-writer.log" 2>&1 &
+esp67_flock_inflight_worker=$!
+esp67_flock_inflight_ready="$fixture_root/wordpress/wp-content/uploads/.esp67-flock/ready"
+for attempt in $(seq 1 120); do
+  if [[ -f "$esp67_flock_inflight_ready" ]]; then break; fi
+  if ! kill -0 "$esp67_flock_inflight_worker" 2>/dev/null; then break; fi
+  sleep 0.2
+done
+[[ -f "$esp67_flock_inflight_ready" ]] || {
+  cat "$report_root/esp67-flock-inflight-writer.log" >&2
+  exit 1
+}
+docker exec "$container" touch /var/www/html/wp-content/uploads/.esp67-flock/resume
+esp67_flock_phase sql_observe inflight | tee "$report_root/esp67-flock-inflight-sql-live.log"
+esp67_flock_inflight_pid="$(cat "$fixture_root/wordpress/wp-content/uploads/.esp67-flock/pid")"
+docker exec "$container" kill -KILL "$esp67_flock_inflight_pid"
+if wait "$esp67_flock_inflight_worker"; then
+  echo 'ESP67 in-flight PHP worker unexpectedly survived SIGKILL' >&2
+  exit 1
+fi
+esp67_flock_inflight_recovered=0
+for attempt in $(seq 1 8); do
+  esp67_flock_phase recover inflight | tee "$report_root/esp67-flock-inflight-recover-${attempt}.log"
+  if grep -q ESP67_FLOCK_DBLOSS_AUTO_RECOVERED "$report_root/esp67-flock-inflight-recover-${attempt}.log"; then
+    esp67_flock_inflight_recovered=1
+    break
+  fi
+  sleep 1
+done
+(( esp67_flock_inflight_recovered == 1 )) || {
+  echo 'ESP67 in-flight WordPress SQL was not safely recovered' >&2
+  exit 1
+}
+assert_http esp31-public-150x150.jpg 403
+esp67_flock_phase restore inflight | tee "$report_root/esp67-flock-inflight-restored.log"
+assert_http esp31-public-150x150.jpg 200
+echo 'PASS: ESP67 flock GC waits/retries until in-flight WordPress Core SQL committed'
+
 echo 'PASS: ESP67 single-host PHP-lifetime flock auto-GC handles crash and DB-only disconnect'
 
 # #67: a lost MySQL named lock or expired timer does not prove that
