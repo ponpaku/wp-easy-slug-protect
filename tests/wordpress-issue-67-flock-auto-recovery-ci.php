@@ -13,8 +13,8 @@ declare(strict_types=1);
 $phase=getenv('ESP67_FLOCK_PHASE');
 $scenario=getenv('ESP67_FLOCK_SCENARIO');
 if(getenv('ESP_ALLOW_DISPOSABLE_DB')!=='1'||!getenv('ESP_WP_ROOT')||
-    !in_array($phase,['inode','setup','writer','recover','verify','kill_db','sql_observe','http_verify','network_verify','restore'],true)||
-    !in_array($scenario,['crash','db-loss','inflight','network-unsafe','network-gated'],true))exit(1);
+    !in_array($phase,['inode','setup','writer','recover','verify','kill_db','sql_observe','http_verify','network_verify','kill_backend','restore'],true)||
+    !in_array($scenario,['crash','db-loss','inflight','network-unsafe','network-gated','network-killed'],true))exit(1);
 define('WP_DISABLE_FATAL_ERROR_HANDLER',true);
 require rtrim(getenv('ESP_WP_ROOT'),'/').'/wp-load.php';
 $_SERVER['SERVER_SOFTWARE']='Apache/2.4';
@@ -71,7 +71,7 @@ if($phase==='inode'){
     flock($older,LOCK_UN);fclose($older);@unlink($a);exit(0);
 }
 if($phase==='setup'){
-    foreach([$ready,$resume,$pidfile,$sessionfile,$written] as $f)@unlink($f);
+    foreach([$ready,$resume,$pidfile,$sessionfile,$written,"$root/backend-session"] as $f)@unlink($f);
     fl67_check(ESP_Media_Index::resolve($path)['status']==='resolved',
         'baseline public path resolves without protected collision');
     $m=wp_get_attachment_metadata($id,true);
@@ -104,6 +104,17 @@ if($phase==='restore'){
     fl67_check(ESP_Media_Index::resolve($path)['status']==='resolved',
         'public path restored after recovery');
     echo "ESP67_FLOCK_RESTORED\n";exit(0);
+}
+if($phase==='kill_backend'){
+    $sidfile="$root/backend-session";
+    fl67_check(is_file($sidfile),'writer persisted MySQL backend session');
+    $session=(int)file_get_contents($sidfile);
+    fl67_check($session>0,'backend session ID is valid');
+    $db=fl67_db();
+    fl67_check($db->query('KILL CONNECTION '.$session)!==false,
+        'recovery terminates backend session before ticket GC');
+    $db->close();
+    echo "ESP67_NETWORK_BACKEND_SESSION_KILLED\n";exit(0);
 }
 if($phase==='network_verify'){
     $db=fl67_db();
@@ -223,7 +234,7 @@ if($phase==='recover'){
     fl67_check(ESP_Media_Index::reindex_attachment($id),
         'rebuild under exclusive filesystem lock from canonical WordPress meta');
     $r=ESP_Media_Index::resolve($path);
-    if(in_array($scenario,['crash','network-unsafe','network-gated'],true)){
+    if(in_array($scenario,['crash','network-unsafe','network-gated','network-killed'],true)){
         fl67_check($r['status']==='resolved'&&
             ($r['protected_path_id']??null)==='',
             'crashed pre-write worker restored old public path');
@@ -291,7 +302,7 @@ $pre=static function($check,$post_id,$meta_key)use(
     return $check;
 };
 add_filter('update_post_metadata',$pre,3,5);
-if(in_array($scenario,['network-unsafe','network-gated'],true)){
+if(in_array($scenario,['network-unsafe','network-gated','network-killed'],true)){
     $endpoint=getenv('ESP67_FLOCK_PROXY_HOST');
     if(!is_string($endpoint)||!str_contains($endpoint,':'))
         throw new RuntimeException('missing disposable network relay');
@@ -303,6 +314,11 @@ if(in_array($scenario,['network-unsafe','network-gated'],true)){
     if(!$transport->real_connect($host,DB_USER,DB_PASSWORD,DB_NAME,(int)$port))
         throw new RuntimeException('cannot connect to disposable MySQL relay');
     $wpdb->dbh=$transport;
+    if($scenario==='network-killed') {
+        $backend=(int)$wpdb->get_var('SELECT CONNECTION_ID()');
+        if($backend<=0)throw new RuntimeException('missing MySQL backend id');
+        file_put_contents("$root/backend-session",(string)$backend);
+    }
     $gate=static function($sql)use($wpdb,$state,$id,$scenario){
         if(!str_starts_with(ltrim($sql),'UPDATE ')||
             stripos($sql,$wpdb->postmeta)===false)return $sql;
@@ -345,7 +361,7 @@ try{$ok=wp_update_attachment_metadata($id,$m);}
 finally{
     remove_filter('update_post_metadata',$pre,3);
     if($scenario==='inflight')remove_filter('query',$slow,PHP_INT_MAX);
-    if(in_array($scenario,['network-unsafe','network-gated'],true))
+    if(in_array($scenario,['network-unsafe','network-gated','network-killed'],true))
         remove_filter('query',$gate,PHP_INT_MAX);
     @$liveness->close();
 }
