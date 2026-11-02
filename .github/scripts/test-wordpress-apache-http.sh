@@ -844,11 +844,11 @@ grep -q ESP67_PROXY_READY "$report_root/esp67-delayed-packet-proxy.log"
 for esp67_delayed_case in network-unsafe network-gated; do
   rm -f "$esp67_hold_marks/packet-received" \
     "$esp67_hold_marks/packet-release" "$esp67_hold_marks/packet-done"
-  esp67_flock_phase setup "$esp67_delayed_case" | tee "$report_root/esp67-delayed-\${esp67_delayed_case}-setup.log"
+  esp67_flock_phase setup "$esp67_delayed_case" | tee "$report_root/esp67-delayed-${esp67_delayed_case}-setup.log"
   docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
     ESP67_FLOCK_PHASE=writer ESP67_FLOCK_SCENARIO="$esp67_delayed_case" \
     ESP67_FLOCK_PROXY_HOST=host.docker.internal:33310 \
-    php "$esp67_flock_php" >"$report_root/esp67-delayed-\${esp67_delayed_case}-writer.log" 2>&1 &
+    php "$esp67_flock_php" >"$report_root/esp67-delayed-${esp67_delayed_case}-writer.log" 2>&1 &
   esp67_delayed_worker=$!
   esp67_delayed_prewrite_ready="$fixture_root/wordpress/wp-content/uploads/.esp67-flock/ready"
   esp67_delayed_prewrite=0
@@ -858,7 +858,7 @@ for esp67_delayed_case in network-unsafe network-gated; do
     sleep 0.1
   done
   if (( esp67_delayed_prewrite != 1 )); then
-    cat "$report_root/esp67-delayed-\${esp67_delayed_case}-writer.log" >&2
+    cat "$report_root/esp67-delayed-${esp67_delayed_case}-writer.log" >&2
     echo "ESP67 $esp67_delayed_case did not reach prewrite guard" >&2
     exit 1
   fi
@@ -870,7 +870,7 @@ for esp67_delayed_case in network-unsafe network-gated; do
     sleep 0.1
   done
   if (( esp67_delayed_received != 1 )); then
-    cat "$report_root/esp67-delayed-\${esp67_delayed_case}-writer.log" >&2
+    cat "$report_root/esp67-delayed-${esp67_delayed_case}-writer.log" >&2
     cat "$report_root/esp67-delayed-packet-proxy.log" >&2
     echo "ESP67 $esp67_delayed_case SQL packet was not held in network" >&2
     exit 1
@@ -881,7 +881,7 @@ for esp67_delayed_case in network-unsafe network-gated; do
     echo 'ESP67 expected killed network-packet PHP worker' >&2
     exit 1
   fi
-  esp67_flock_phase recover "$esp67_delayed_case" | tee "$report_root/esp67-delayed-\${esp67_delayed_case}-reaped.log"
+  esp67_flock_phase recover "$esp67_delayed_case" | tee "$report_root/esp67-delayed-${esp67_delayed_case}-reaped.log"
   assert_http esp31-public-150x150.jpg 200
   touch "$esp67_hold_marks/packet-release"
   esp67_packet_replied=0
@@ -894,9 +894,9 @@ for esp67_delayed_case in network-unsafe network-gated; do
     echo "ESP67 $esp67_delayed_case delayed MySQL response not observed" >&2
     exit 1
   fi
-  esp67_flock_phase network_verify "$esp67_delayed_case" | tee "$report_root/esp67-delayed-\${esp67_delayed_case}-verified.log"
+  esp67_flock_phase network_verify "$esp67_delayed_case" | tee "$report_root/esp67-delayed-${esp67_delayed_case}-verified.log"
   assert_http esp31-public-150x150.jpg 200
-  esp67_flock_phase restore "$esp67_delayed_case" | tee "$report_root/esp67-delayed-\${esp67_delayed_case}-restored.log"
+  esp67_flock_phase restore "$esp67_delayed_case" | tee "$report_root/esp67-delayed-${esp67_delayed_case}-restored.log"
   assert_http esp31-public-150x150.jpg 200
 done
 cat "$report_root/esp67-delayed-packet-proxy.log"
