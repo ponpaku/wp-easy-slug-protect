@@ -583,6 +583,46 @@ for esp67_collision_mode in vulnerable fenced; do
   assert_http esp31-public-150x150.jpg 200
 done
 
+# #67: integrated design candidate: one TEMPORARY column in the real state
+# table, independent committed mutation IDs + file-path reservation, and a
+# caller-connection row lock preventing premature retirement in external TX.
+esp67_integrated_php="/var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-issue-67-integrated-fence-ci.php"
+esp67_integrated_phase() {
+  docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+    ESP67_INTEGRATED_PHASE="$1" php "$esp67_integrated_php"
+}
+esp67_integrated_phase setup | tee "$report_root/esp67-integrated-setup.log"
+esp67_integrated_phase txhold | tee "$report_root/esp67-integrated-txhold.log"
+docker exec "$container" rm -f \
+  /var/www/html/wp-content/uploads/.esp67-integrated/ready \
+  /var/www/html/wp-content/uploads/.esp67-integrated/resume
+esp67_integrated_phase disconnect >"$report_root/esp67-integrated-disconnect.log" 2>&1 &
+esp67_integrated_worker=$!
+esp67_integrated_signal="$fixture_root/wordpress/wp-content/uploads/.esp67-integrated"
+esp67_integrated_ready=0
+for attempt in $(seq 1 120); do
+  if [[ -f "$esp67_integrated_signal/ready" ]]; then esp67_integrated_ready=1; break; fi
+  if ! kill -0 "$esp67_integrated_worker" 2>/dev/null; then break; fi
+  sleep 0.2
+done
+if (( esp67_integrated_ready != 1 )); then
+  cat "$report_root/esp67-integrated-disconnect.log" >&2
+  echo 'ESP67 integrated worker failed before HTTP witness' >&2
+  exit 1
+fi
+assert_http esp31-public-150x150.jpg 503
+! cmp -s "$fixture_root/http-probe-body" "$fixture_root/wordpress/wp-content/uploads/esp31-public-150x150.jpg"
+docker exec "$container" touch /var/www/html/wp-content/uploads/.esp67-integrated/resume
+if ! wait "$esp67_integrated_worker"; then
+  cat "$report_root/esp67-integrated-disconnect.log" >&2
+  exit 1
+fi
+cat "$report_root/esp67-integrated-disconnect.log"
+assert_http esp31-public-150x150.jpg 403
+esp67_integrated_phase restore | tee "$report_root/esp67-integrated-restored.log"
+assert_http esp31-public-150x150.jpg 200
+echo 'PASS: ESP67 integrated state one-column, external TX lock, Core reconnect and HTTP denial'
+
 # R02: measure fresh independent Apache media requests, including the Core
 # SELECT VERSION() and optional get_option SQL outside the 1-query owner lookup.
 docker exec "$container" mkdir -p /var/www/html/wp-content/mu-plugins
