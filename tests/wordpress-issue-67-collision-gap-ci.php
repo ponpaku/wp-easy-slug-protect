@@ -26,7 +26,8 @@ define('WP_DISABLE_FATAL_ERROR_HANDLER', true);
 require rtrim(getenv('ESP_WP_ROOT'), '/') . '/wp-load.php';
 $_SERVER['SERVER_SOFTWARE']='Apache/2.4';
 if (strpos(DB_NAME,'esp_')!==0 || !class_exists('ESP_Media_Index') ||
-    !ESP_Media_Index::enabled() || !ESP_Media_Index::ready()) {
+    !ESP_Media_Index::enabled() ||
+    (!in_array($mode,['restore','inspect'],true) && !ESP_Media_Index::ready())) {
     throw new RuntimeException('ESP67 collision requires disposable strict READY WordPress');
 }
 global $wpdb;
