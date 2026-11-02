@@ -715,7 +715,7 @@ esp67_global_race_phase() {
   docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
     ESP67_GLOBAL_RACE_PHASE="$1" ESP67_GLOBAL_RACE_MODE="$2" php "$esp67_global_race_php"
 }
-for esp67_global_race_mode in dirty pending; do
+for esp67_global_race_mode in dirty pending gated; do
   docker exec "$container" rm -f \
     /var/www/html/wp-content/uploads/.esp67-global-race/guarded \
     /var/www/html/wp-content/uploads/.esp67-global-race/resume \
@@ -750,9 +750,15 @@ for esp67_global_race_mode in dirty pending; do
   esp67_global_race_http="$(curl -sS -o "$fixture_root/http-probe-body" -w '%{http_code}' \
     'http://127.0.0.1:8094/wp-content/uploads/esp31-public-150x150.jpg')"
   echo "ESP67_GLOBAL_RACE_HTTP $esp67_global_race_mode $esp67_global_race_http"
-  [[ "$esp67_global_race_http" == 200 ]]
-  cmp -s "$fixture_root/http-probe-body" "$fixture_root/wordpress/wp-content/uploads/esp31-public-150x150.jpg"
-  echo 'ESP67_GLOBAL_RACE_P0: global dirty was prematurely republished and HTTP served bytes'
+  if [[ "$esp67_global_race_mode" == gated ]]; then
+    [[ "$esp67_global_race_http" == 503 ]]
+    ! cmp -s "$fixture_root/http-probe-body" "$fixture_root/wordpress/wp-content/uploads/esp31-public-150x150.jpg"
+    echo 'ESP67_GLOBAL_RACE_GATED: global ticket plus publication gate rejects prewrite Cron race'
+  else
+    [[ "$esp67_global_race_http" == 200 ]]
+    cmp -s "$fixture_root/http-probe-body" "$fixture_root/wordpress/wp-content/uploads/esp31-public-150x150.jpg"
+    echo 'ESP67_GLOBAL_RACE_P0: global dirty was prematurely republished and HTTP served bytes'
+  fi
   docker exec "$container" touch /var/www/html/wp-content/uploads/.esp67-global-race/httpresume
   if ! wait "$esp67_global_race_worker"; then
     cat "$report_root/esp67-global-race-${esp67_global_race_mode}-worker.log" >&2
