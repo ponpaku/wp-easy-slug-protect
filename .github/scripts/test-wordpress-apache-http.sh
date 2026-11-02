@@ -706,6 +706,63 @@ for esp67_promotion_mode in vulnerable global; do
   assert_http esp31-public-150x150.jpg 200
 done
 
+# #67: independent global dirty alone is NOT a complete fallback.
+# A full audit may republish READY while an in-flight worker is paused in
+# the pre-write hook, after independent dirty but before Core canonical SQL.
+# Even state[0].pending_count=1 has no effect without audit publication gates.
+esp67_global_race_php="/var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-issue-67-global-race-ci.php"
+esp67_global_race_phase() {
+  docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+    ESP67_GLOBAL_RACE_PHASE="$1" ESP67_GLOBAL_RACE_MODE="$2" php "$esp67_global_race_php"
+}
+for esp67_global_race_mode in dirty pending; do
+  docker exec "$container" rm -f \
+    /var/www/html/wp-content/uploads/.esp67-global-race/guarded \
+    /var/www/html/wp-content/uploads/.esp67-global-race/resume \
+    /var/www/html/wp-content/uploads/.esp67-global-race/updated \
+    /var/www/html/wp-content/uploads/.esp67-global-race/httpresume
+  esp67_global_race_phase hold "$esp67_global_race_mode" >"$report_root/esp67-global-race-${esp67_global_race_mode}-worker.log" 2>&1 &
+  esp67_global_race_worker=$!
+  esp67_global_race_signal="$fixture_root/wordpress/wp-content/uploads/.esp67-global-race"
+  esp67_guarded=0
+  for attempt in $(seq 1 120); do
+    if [[ -f "$esp67_global_race_signal/guarded" ]]; then esp67_guarded=1; break; fi
+    if ! kill -0 "$esp67_global_race_worker" 2>/dev/null; then break; fi
+    sleep 0.2
+  done
+  if (( esp67_guarded != 1 )); then
+    cat "$report_root/esp67-global-race-${esp67_global_race_mode}-worker.log" >&2
+    echo "ESP67 global race $esp67_global_race_mode prewrite guard missing" >&2
+    exit 1
+  fi
+  esp67_global_race_phase audit "$esp67_global_race_mode" | tee "$report_root/esp67-global-race-${esp67_global_race_mode}-audit.log"
+  esp67_updated=0
+  for attempt in $(seq 1 120); do
+    if [[ -f "$esp67_global_race_signal/updated" ]]; then esp67_updated=1; break; fi
+    if ! kill -0 "$esp67_global_race_worker" 2>/dev/null; then break; fi
+    sleep 0.2
+  done
+  if (( esp67_updated != 1 )); then
+    cat "$report_root/esp67-global-race-${esp67_global_race_mode}-worker.log" >&2
+    echo "ESP67 global race $esp67_global_race_mode did not reach canonical write" >&2
+    exit 1
+  fi
+  esp67_global_race_http="$(curl -sS -o "$fixture_root/http-probe-body" -w '%{http_code}' \
+    'http://127.0.0.1:8094/wp-content/uploads/esp31-public-150x150.jpg')"
+  echo "ESP67_GLOBAL_RACE_HTTP $esp67_global_race_mode $esp67_global_race_http"
+  [[ "$esp67_global_race_http" == 200 ]]
+  cmp -s "$fixture_root/http-probe-body" "$fixture_root/wordpress/wp-content/uploads/esp31-public-150x150.jpg"
+  echo 'ESP67_GLOBAL_RACE_P0: global dirty was prematurely republished and HTTP served bytes'
+  docker exec "$container" touch /var/www/html/wp-content/uploads/.esp67-global-race/httpresume
+  if ! wait "$esp67_global_race_worker"; then
+    cat "$report_root/esp67-global-race-${esp67_global_race_mode}-worker.log" >&2
+    exit 1
+  fi
+  cat "$report_root/esp67-global-race-${esp67_global_race_mode}-worker.log"
+  esp67_global_race_phase restore "$esp67_global_race_mode" | tee "$report_root/esp67-global-race-${esp67_global_race_mode}-restored.log"
+  assert_http esp31-public-150x150.jpg 200
+done
+
 # R02: measure fresh independent Apache media requests, including the Core
 # SELECT VERSION() and optional get_option SQL outside the 1-query owner lookup.
 docker exec "$container" mkdir -p /var/www/html/wp-content/mu-plugins
