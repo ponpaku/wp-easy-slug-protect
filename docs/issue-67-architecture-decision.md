@@ -104,3 +104,26 @@ WordPress正本を**他プラグインが直接SQLで編集する**場合、Word
 また、PHP処理がクラッシュしたとき更新IDが残って対象画像が503になるのは安全側の挙動だが、可用性の障害。**タイムアウトのみのID解除は認めない**。管理画面に対象ID・残留時間を表示し、対象書込みを停止してから検証・再構築する運用を実装すべき。
 
 実験的裏付けは「主要な防護条件を満たす方式を見つけた」という結論であり、**#67のクローズ・PR #62のmainマージ・strict自動有効化の承認とは異なる**。
+
+
+## 全体更新IDのREADY公開ゲート：最終比較の実証
+
+[GitHub Actions #41374325149](https://github.com/ponpaku/wp-easy-slug-protect/actions/runs/41374325149) **全8ジョブ成功**（WordPress 7.1.3 + MySQL 8.0.46 + Apache）。テスト \`tests/wordpress-issue-67-global-race-ci.php\` は、global prehookの直後・Core SQLの直前でPHPを停止し、別プロセスのWordPress Cronが全監査を試みる同じ障害順序を比較した。
+
+| 実際のglobal制御行 | Cronの再公開 | 匿名HTTP | 結果 |
+| --- | --- | --- | --- |
+| 独立COMMITした\`status=dirty\`、pending=0 | **READYへ戻る** | **200・JPEG本文一致** | **不合格** |
+| 独立COMMITした\`status=dirty,pending_count=1\`、現行Cron/Resolverは件数無視 | **READYへ戻る** | **200・JPEG本文一致** | **不合格** |
+| 独立COMMITした\`status=dirty,pending_count=1\`、**READY公開を未完了IDの存在で禁止** | READYへ戻らない | **503・本文非配信** | **この競合に対する防護は成立** |
+| 最後のID解除→完全監査 | READYへ戻れる | **200・正常復旧** | PASS |
+
+最後の実証では**使い捨てのMySQL BEFORE UPDATEトリガー**で\`state0\`の\`pending_count>0\`中の\`status=ready\`への変更を拒否した。これは**試験専用の公開禁止条件の代用**であって、製品にDBトリガーを導入する案ではない。製品案は、\`run_batch()\`のglobal READY公開SQLに\`WHERE pending_count=0 AND active_mutations='[]'\`を追加し、既存\`revision\`/audit cursor CASと組み合わせること。また\`resolve()\`の既存1回のSQL内でも\`state0\`のpending/ID整合を検証して、READY破損状態からの公開を拒否する。
+
+この実験は**「公開条件の不変条件は効く」ことを示すが、製品コードに公開CASを実装して全経路で検証したことを示さない**。
+
+### 最終の設計採否
+
+- **第一推奨**：attachment単位の独立先行COMMIT済みID集合＋dirty＋全候補予約、caller行ロック、WordPress正本確定後に自分のIDだけ解除、添付単位の再構築。匿名HTTPの停止範囲が小さい。
+- **制限付き代替**：変更対象パスが事前に安全に列挙できず、そのWordPress更新を禁止できない場合、同じ\`state\`行ID=0に**独立COMMIT済みglobal更新ID**を登録し、Cron公開CAS/Resolverの双方でそのIDが残る限りREADYを禁止。完全監査が終わるまで全対象メディアを503にするため、最小限の例外に限る。
+- **排除**：数値\`pending_count++/--\`、呼出元TX内だけのID、global dirtyだけ、global pendingを保存するだけで現行Cronを使う案。
+- **重要な未完了条件**：全フックへの製品実装、process crash時の安全な復旧、混合バージョン移行、同一primaryへの独立接続、lock-orderや同時多数ワーカー、MariaDB旧バージョン、更新時性能。#67はOpen、strict本番自動有効化は不可。
