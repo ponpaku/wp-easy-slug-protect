@@ -658,6 +658,54 @@ esp67_integrated_phase restore | tee "$report_root/esp67-integrated-restored.log
 assert_http esp31-public-150x150.jpg 200
 echo 'PASS: ESP67 integrated state one-column, external TX lock, Core reconnect and HTTP denial'
 
+# #67: post-to-attachment promotion has no canonical postmeta write to
+# intercept: the new protected owner appears via wp_posts post_type UPDATE.
+# Compare the legacy in-caller-transaction pre_post_update guard to an
+# independently COMMITted global coverage fallback.
+esp67_promotion_php="/var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-issue-67-promotion-gap-ci.php"
+esp67_promotion_phase() {
+  docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+    ESP67_PROMOTION_PHASE="$1" php "$esp67_promotion_php"
+}
+for esp67_promotion_mode in vulnerable global; do
+  esp67_promotion_phase prepare | tee "$report_root/esp67-promotion-${esp67_promotion_mode}-prepare.log"
+  esp67_promotion_phase "$esp67_promotion_mode" >"$report_root/esp67-promotion-${esp67_promotion_mode}.log" 2>&1 &
+  esp67_promotion_worker=$!
+  esp67_promotion_signal="$fixture_root/wordpress/wp-content/uploads/.esp67-promotion"
+  esp67_promotion_ready=0
+  for attempt in $(seq 1 120); do
+    if [[ -f "$esp67_promotion_signal/ready" ]]; then esp67_promotion_ready=1; break; fi
+    if ! kill -0 "$esp67_promotion_worker" 2>/dev/null; then break; fi
+    sleep 0.2
+  done
+  if (( esp67_promotion_ready != 1 )); then
+    cat "$report_root/esp67-promotion-${esp67_promotion_mode}.log" >&2
+    echo "ESP67 promotion $esp67_promotion_mode failed before HTTP witness" >&2
+    exit 1
+  fi
+  esp67_promotion_http="$(curl -sS -o "$fixture_root/http-probe-body" -w '%{http_code}' \
+    'http://127.0.0.1:8094/wp-content/uploads/esp31-public-150x150.jpg')"
+  echo "ESP67_PROMOTION_HTTP $esp67_promotion_mode $esp67_promotion_http"
+  esp67_promotion_phase inspect | tee "$report_root/esp67-promotion-${esp67_promotion_mode}-inspect.log"
+  if [[ "$esp67_promotion_mode" == vulnerable ]]; then
+    [[ "$esp67_promotion_http" == 200 ]]
+    cmp -s "$fixture_root/http-probe-body" "$fixture_root/wordpress/wp-content/uploads/esp31-public-150x150.jpg"
+    echo 'ESP67_PROMOTION_UNFENCED: newly promoted protected owner omitted from strict index'
+  else
+    [[ "$esp67_promotion_http" == 503 ]]
+    ! cmp -s "$fixture_root/http-probe-body" "$fixture_root/wordpress/wp-content/uploads/esp31-public-150x150.jpg"
+    echo 'ESP67_PROMOTION_GLOBAL_FENCED: no candidate path needed for anonymous denial'
+  fi
+  docker exec "$container" touch /var/www/html/wp-content/uploads/.esp67-promotion/resume
+  if ! wait "$esp67_promotion_worker"; then
+    cat "$report_root/esp67-promotion-${esp67_promotion_mode}.log" >&2
+    exit 1
+  fi
+  cat "$report_root/esp67-promotion-${esp67_promotion_mode}.log"
+  esp67_promotion_phase restore | tee "$report_root/esp67-promotion-${esp67_promotion_mode}-restore.log"
+  assert_http esp31-public-150x150.jpg 200
+done
+
 # R02: measure fresh independent Apache media requests, including the Core
 # SELECT VERSION() and optional get_option SQL outside the 1-query owner lookup.
 docker exec "$container" mkdir -p /var/www/html/wp-content/mu-plugins
