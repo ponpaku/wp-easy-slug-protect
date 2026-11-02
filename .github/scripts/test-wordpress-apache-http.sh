@@ -558,6 +558,7 @@ for esp67_collision_mode in vulnerable fenced; do
     'http://127.0.0.1:8094/wp-content/uploads/esp31-public-150x150.jpg')"
   echo "ESP67_COLLISION_HTTP $esp67_collision_mode $esp67_collision_http" | tee -a "$report_root/esp67-collision-${esp67_collision_mode}.log"
   cat "$report_root/esp67-collision-${esp67_collision_mode}.log"
+  esp67_collision_phase inspect | tee -a "$report_root/esp67-collision-${esp67_collision_mode}.log"
   if [[ "$esp67_collision_mode" == vulnerable ]]; then
     [[ "$esp67_collision_http" == 200 ]]
     cmp -s "$fixture_root/http-probe-body" "$fixture_root/wordpress/wp-content/uploads/esp31-public-150x150.jpg"
