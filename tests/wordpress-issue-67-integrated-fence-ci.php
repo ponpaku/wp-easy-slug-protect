@@ -13,7 +13,7 @@
 declare(strict_types=1);
 $phase=getenv('ESP67_INTEGRATED_PHASE');
 if (getenv('ESP_ALLOW_DISPOSABLE_DB')!=='1'||!getenv('ESP_WP_ROOT')||
-    !in_array($phase,['setup','disconnect','txhold','restore'],true))exit(1);
+    !in_array($phase,['setup','disconnect','txhold','txcommit','crash_seed','crash_inspect','crash_recover','restore'],true))exit(1);
 define('WP_DISABLE_FATAL_ERROR_HANDLER',true);
 require rtrim(getenv('ESP_WP_ROOT'),'/').'/wp-load.php';
 $_SERVER['SERVER_SOFTWARE']='Apache/2.4';
@@ -149,6 +149,47 @@ if($phase==='setup') {
     $db->close();
     exit(0);
 }
+if($phase==='crash_seed') {
+    int67_register($state,$files,$id,'CRASH',$public);
+    // Simulate a killed PHP worker: no completion callback or successful
+    // canonical write. This process exits while the independent ID persists.
+    $db=int67_db();
+    $r=int67_row($db,$state,$id);
+    $db->close();
+    int67_check($r['ids']===['CRASH'] && $r['status']==='dirty',
+        'independently committed ID survives hypothetical worker death');
+    echo "ESP67_INTEGRATED_CRASH_SEEDED\n";
+    exit(0);
+}
+if($phase==='crash_inspect') {
+    $db=int67_db();
+    $r=int67_row($db,$state,$id);
+    $db->close();
+    int67_check($r['ids']===['CRASH'] && $r['status']==='dirty',
+        'new PHP process observes stranded ID');
+    int67_check(!ESP_Media_Index::reindex_attachment($id),
+        'Cron-style rebuild refuses active orphan ticket');
+    int67_check(ESP_Media_Index::resolve($file)['status']==='error',
+        'strict resolver fails closed with stranded owner candidate');
+    echo "ESP67_INTEGRATED_CRASH_FAIL_CLOSED\n";
+    exit(0);
+}
+if($phase==='crash_recover') {
+    // A *simulated manual* recovery: test runner knows the worker exited and
+    // never wrote WordPress canonical metadata. A production operator must
+    // stop/verify writers before this step. Do not implement a TTL release.
+    $db=int67_db();
+    $before=int67_row($db,$state,$id);$db->close();
+    int67_check($before['ids']===['CRASH'],'manual recovery sees original ID');
+    int67_check(int67_retire($state,$id,'CRASH'),
+        'manually authorized ticket retirement works');
+    int67_check(ESP_Media_Index::reindex_attachment($id),
+        'audit rebuild after the writer is known terminated');
+    $r=ESP_Media_Index::resolve($file);
+    int67_check($r['status']==='resolved' && ($r['protected_path_id']??null)==='',
+        'public attachment recovered only after explicit cleanup');
+    echo "ESP67_INTEGRATED_MANUAL_RECOVERY\n";exit(0);
+}
 if($phase==='restore') {
     $meta=wp_get_attachment_metadata($id,true);
     int67_check(is_array($meta),'canonical restoration metadata exists');
@@ -175,7 +216,7 @@ int67_check(is_array($meta)&&!isset($meta['sizes']['esp67_integrated']),
     'clean baseline before test');
 $meta['sizes']['esp67_integrated']=[
     'file'=>$public,'width'=>150,'height'=>150,'mime-type'=>'image/jpeg'];
-$ticket=$phase==='txhold'?'TX_LOCK':'ACK_LOSS';
+$ticket=$phase==='txhold'?'TX_LOCK':($phase==='txcommit'?'TX_COMMIT':'ACK_LOSS');
 int67_remove_legacy_hooks();
 $guard=int67_guard($state,$files,$id,$key,$public,$ticket);
 add_filter('update_post_metadata',$guard,3,5);
@@ -201,6 +242,30 @@ try {
     if($phase==='disconnect')remove_filter('update_post_metadata',$kill,7);
 }
 int67_check($ok!==false,'Core update_post_meta accepted the canonical mutation');
+if($phase==='txcommit') {
+    int67_check(!int67_retire($state,$id,$ticket,1),
+        'early completion cannot overtake uncommitted metadata');
+    int67_check($wpdb->query('COMMIT')!==false,
+        'caller commits canonical WordPress change after holding fence');
+    $db=int67_db();
+    $canonical=$db->query("SELECT meta_value FROM {$wpdb->postmeta}
+        WHERE post_id=$id AND meta_key='_wp_attachment_metadata'
+        ORDER BY meta_id LIMIT 1")->fetch_assoc();
+    $actual=$canonical?maybe_unserialize($canonical['meta_value']):null;
+    $r=int67_row($db,$state,$id);$db->close();
+    int67_check(is_array($actual)&&
+        ($actual['sizes']['esp67_integrated']['file']??null)===$public &&
+        $r['ids']===[$ticket] && $r['status']==='dirty',
+        'COMMIT persists canonical new owner while independent fence persists');
+    int67_check(int67_retire($state,$id,$ticket),
+        'ticket can retire after COMMIT');
+    int67_check(ESP_Media_Index::reindex_attachment($id),
+        'reindex uses committed protected collision, not stale metadata');
+    int67_check(ESP_Media_Index::resolve($file)['status']==='ambiguous',
+        'after COMMIT, multiple owners cannot be served as public');
+    echo "ESP67_INTEGRATED_TX_COMMIT_PROTECTED\n";
+    exit(0);
+}
 if($phase==='txhold') {
     // While caller TX has uncommitted wp_postmeta, an independent completion
     // MUST wait for its state-row FOR UPDATE lock rather than clearing the ID.
