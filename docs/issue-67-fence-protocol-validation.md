@@ -141,3 +141,72 @@ state行をロックしていると先行フェンスを確定できない。
 `state`への1列追加だけでは不足し、
 **外部トランザクションのROLLBACKで消えない「正本書込み前の永続フェンス」**と、
 **安全な更新完了・復旧プロトコル**が必要。
+
+
+## 2026-11-02 追加：更新ID集合＋先行永続フェンス＋caller行ロックの一体化実証
+
+**実行**：[GitHub Actions #41370951448](https://github.com/ponpaku/wp-easy-slug-protect/actions/runs/41370951448) **全7ジョブ成功**。
+初期一体化版：[Actions #41370542704](https://github.com/ponpaku/wp-easy-slug-protect/actions/runs/41370542704) 全7ジョブ成功。
+コード：\`tests/wordpress-issue-67-integrated-fence-ci.php\`、\`.github/scripts/test-wordpress-apache-http.sh\`。
+
+### 何を組み合わせたか
+
+1. 実際の\`esp_media_file_state_v1\`に試験用\`esp67_mutation_ids LONGTEXT\`を1列一時追加。
+2. 実WordPressの\`update_post_metadata\`に試験専用priority 3 guardを設定。
+   **このPHPプロセスでのみ**既存ESPのpriority 5 metadata guardと
+   \`updated_post_meta\` actionを外し、従来pending_countとの二重管理を避けた。
+3. guardは独立したmysqli/InnoDBトランザクションで
+   \`state.status=dirty\`、更新ID集合、\`pending_count=count(IDs)\`、
+   新規所有者の候補\`files\`行をまとめてCOMMIT。登録呼出し2回でも同一IDに収束。
+4. **独立コミット後に、元の\`wpdb\`接続が\`SELECT ... FOR UPDATE\`で
+   同一state行をロック**。呼出元が外部トランザクション内なら
+   そのCOMMIT/ROLLBACK/接続消失まで別接続の完了処理は進まない。
+5. 正本書込みの終了後に独立mysqliで自分の更新IDだけを解除し、
+   その後Cron相当の\`reindex_attachment()\`がWordPress正本から索引を再構築。
+   更新IDが残る限りREADY公開しない。
+
+### 実WordPressでの合否
+
+| ケース | 実測と判定 |
+|---|---|
+| 外部TX中、正本が未コミットのまま独立接続で更新IDを解除 | **ロック待ちタイムアウトで解除拒否**（PASS） |
+| 外部TXをROLLBACK | 先行コミットの更新ID/dirtyは残留。ROLLBACKされた正本を前提に、TX終了後だけ解除・安全に再構築（PASS） |
+| 外部TXをCOMMIT | COMMITまでは解除拒否。正本と独立フェンスが併存し、COMMIT後に解除・再構築。保護/公開の2所有者競合は\`ambiguous\`として拒否（PASS） |
+| ESP事前ガード後、WordPressの元DBセッションを\`KILL CONNECTION\` | Coreが正本のみ再送・確定しても、独立確定したID＋候補行は消失せず（PASS） |
+| 更新ID保留中の独立匿名Apache HTTP | **503・画像本文非配信**（PASS） |
+| 最終ID解除後・再構築した所有者競合の匿名HTTP | **403・画像本文非配信**（PASS） |
+| WordPress保護メタを元に戻し再構築 | **200・公開所有者の正常復旧**（PASS） |
+| 同じ更新IDの登録2回・解除2回 | 追加IDなし／他者のIDに影響なし（PASS） |
+| PHPワーカー消失を模し、登録後に別PHPプロセスから状態検査 | 更新IDは残り、CronはREADY拒否、匿名HTTP503（PASS） |
+| 試験ランナーがワーカー終了・未書込みを知る状態で明示回収 | 解除→正本監査→公開HTTP200（PASS）。**本番で一般的に終了を証明する仕組みではない** |
+
+### 採否に関する重要な制限
+
+- **本番実装ではない**：既存のmetadata guardを試験PHPプロセスで差し替えた。
+  他のWordPressフック経路を本体に実装したものではない。
+- **単一のWordPress API更新経路**で、公開A/保護Bの同一ファイル所有を競合させて検証。
+  新規添付、by-midサニタイズ、添付削除、post_type変換、
+  無関係なプラグインの直接SQL書込みは別途検証・ガードが必要。
+- **後続のトランザクション制御が重要**：外部TXがstate行ロックを既に保持している、
+  または元の接続がロックを失った場合は、先行フェンスのCOMMITが不可能・
+  局所的な行ロックの継続性が失われることがある。そこで成功の確認まで
+  WordPress書込みを拒否し、独立IDを保留してfail-closedする必要がある。
+- **自動的な「タイムアウト解除」は禁止**：PHP処理が停止したまま再開する可能性がある。
+  更新IDの残留を検出し、対象書込み停止・再監査を行う運用フローが必要。
+- **単一のprimary DBへの独立接続**とCOMMIT可視性を前提とした試験。
+  ホスティングのDB接続方式、プロキシ・レプリカ、MariaDBの下限、
+  独立接続の最大数・接続失敗時のフェールクローズ、デッドロック解消、
+  更新ID集合の件数・サイズ上限、スキーマ移行、性能は未検証。
+- **更新IDは試験固定文字列**。本番ではランダムな高エントロピーID、
+  リクエスト内の生存区間・重複フック処理、ID再利用禁止を規定する。
+- \`wpdb\`の通常メタフック以外にCoreが書込みを行う場合、候補パスを
+  完全に予約できないなら、**独立してCOMMITしたglobal coverage失効**か
+  API更新の拒否が必要。
+- 事故対応の判断では、「他者の公開所有者しか索引にいないのに正本で
+  保護所有者が生えている」状態をP0の認可不整合として扱う。
+
+**現時点の判断**：既存2テーブル＋state追加1列という構成で
+必要な防護の主要部分が実現できることを実験的に支持する。
+ただし本番コードへ広げる前に、全WordPress書込み経路のフェンス処理、
+更新IDライフサイクルと外部TXの解除契約、障害復旧、MariaDB互換、
+性能・接続数を実証しなければならない。Issue #67はOpenのまま。
