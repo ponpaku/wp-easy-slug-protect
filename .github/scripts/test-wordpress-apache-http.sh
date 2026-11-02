@@ -987,6 +987,9 @@ docker exec "$container" cp \
   /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-issue-67-http-auto-repair-mu.php \
   /var/www/html/wp-content/mu-plugins/esp67-test-auto-repair.php
 esp67_flock_phase setup crash | tee "$report_root/esp67-flock-http-setup.log"
+# CLI fixture setup runs as root; Apache PHP runs as www-data. The same
+# stable lockfile must be accessible to both or lazy recovery would 503.
+docker exec "$container" chown -R www-data:www-data /var/www/html/wp-content/uploads/.esp67-flock
 docker exec "$container" touch /var/www/html/wp-content/uploads/.esp67-flock/enable-http-repair
 esp67_flock_phase writer crash >"$report_root/esp67-flock-http-worker.log" 2>&1 &
 esp67_flock_http_worker=$!
