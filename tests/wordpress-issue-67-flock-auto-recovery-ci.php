@@ -13,7 +13,7 @@ declare(strict_types=1);
 $phase=getenv('ESP67_FLOCK_PHASE');
 $scenario=getenv('ESP67_FLOCK_SCENARIO');
 if(getenv('ESP_ALLOW_DISPOSABLE_DB')!=='1'||!getenv('ESP_WP_ROOT')||
-    !in_array($phase,['inode','setup','writer','recover','verify','kill_db','sql_observe','restore'],true)||
+    !in_array($phase,['inode','setup','writer','recover','verify','kill_db','sql_observe','http_verify','restore'],true)||
     !in_array($scenario,['crash','db-loss','inflight'],true))exit(1);
 define('WP_DISABLE_FATAL_ERROR_HANDLER',true);
 require rtrim(getenv('ESP_WP_ROOT'),'/').'/wp-load.php';
@@ -104,6 +104,15 @@ if($phase==='restore'){
     fl67_check(ESP_Media_Index::resolve($path)['status']==='resolved',
         'public path restored after recovery');
     echo "ESP67_FLOCK_RESTORED\n";exit(0);
+}
+if($phase==='http_verify'){
+    $s=fl67_get($state,$id);
+    fl67_check($s['esp67_flock_ids']==='[]'&&
+        (int)$s['pending_count']===0&&$s['status']==='ready',
+        'anonymous HTTP already retired orphan ticket and published READY');
+    fl67_check(ESP_Media_Index::resolve($path)['status']==='resolved',
+        'anonymous request restored public path without operator');
+    echo "ESP67_FLOCK_HTTP_LAZY_RECOVERY_COMPLETE\n";exit(0);
 }
 if($phase==='sql_observe'){
     $db=fl67_db();
