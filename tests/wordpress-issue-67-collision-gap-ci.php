@@ -20,7 +20,7 @@
 declare(strict_types=1);
 $mode = getenv('ESP67_COLLISION_PHASE');
 if (getenv('ESP_ALLOW_DISPOSABLE_DB') !== '1' || !getenv('ESP_WP_ROOT') ||
-    !in_array($mode, ['vulnerable','fenced','restore','inspect'], true) ||
+    !in_array($mode, ['vulnerable','fenced','global','restore','inspect'], true) ||
     !defined('STDOUT')) { exit(1); }
 define('WP_DISABLE_FATAL_ERROR_HANDLER', true);
 require rtrim(getenv('ESP_WP_ROOT'), '/') . '/wp-load.php';
@@ -76,6 +76,23 @@ if ($mode==='restore') {
             'restore canonical metadata via WordPress API');
     }
     ESP_Media_Index::finish_noop_writes();
+    // Global fallback deliberately prevents ALL indexed HTTP delivery until
+    // a complete audit has reconstructed the coverage epoch. No raw SQL
+    // flip of READY is permitted in this test.
+    $control_before=$wpdb->get_row("SELECT status,audit_cursor FROM $state
+        WHERE attachment_id=0",ARRAY_A);
+    if(is_array($control_before)&&$control_before['status']==='dirty') {
+        $covered=false;
+        for($i=0;$i<120;$i++) {
+            ESP_Media_Index::run_batch();
+            $ctl=$wpdb->get_row("SELECT status,audit_cursor FROM $state
+                 WHERE attachment_id=0",ARRAY_A);
+            if(is_array($ctl)&&$ctl['status']==='ready') {
+                $covered=true;break;
+            }
+        }
+        esp67_require($covered,'real global coverage audit completed before READY');
+    }
     esp67_require(ESP_Media_Index::reindex_attachment($id),
         'rebuild canonical protected owner');
     $resolved=ESP_Media_Index::resolve($path);
@@ -98,6 +115,29 @@ $meta['sizes']['esp67_collision']=[
     'file'=>$public,'width'=>150,'height'=>150,'mime-type'=>'image/jpeg'
 ];
 $pre_seen=false;$killed=false;$out_of_band=false;
+if ($mode==='global') {
+    // Alternative (no candidate reservation): an independent COMMIT
+    // invalidates the global coverage row ahead of the canonical mutation.
+    // Existing priority-5 local owner writes still run under the caller
+    // transaction and will be rolled back on KILL.
+    $global_guard=static function($check,$post_id,$meta_key)use(
+        $id,&$out_of_band,$state
+    ){
+        if((int)$post_id!==$id||$meta_key!=='_wp_attachment_metadata')return $check;
+        $db=esp67_direct_conn();
+        $db->begin_transaction();
+        try {
+            $rows=$db->query("UPDATE $state SET status='dirty',revision=revision+1,
+                 audit_cursor=0 WHERE attachment_id=0");
+            if(!$rows||$db->affected_rows!==1)
+                throw new RuntimeException('Global coverage independent fence failed');
+            $db->commit();$out_of_band=true;
+        }catch(Throwable $e){$db->rollback();throw $e;}
+        finally{$db->close();}
+        return $check;
+    };
+    add_filter('update_post_metadata',$global_guard,3,5);
+}
 if ($mode==='fenced') {
     // Proof of a separately COMMITTED fence and candidate reservation before
     // the normal ESP priority-5 guard obtains a state row lock inside the
@@ -161,6 +201,7 @@ try { $updated=wp_update_attachment_metadata($id,$meta); }
 finally {
     remove_filter('update_post_metadata',$probe,7);
     if ($mode==='fenced')remove_filter('update_post_metadata',$independent_guard,3);
+    if ($mode==='global')remove_filter('update_post_metadata',$global_guard,3);
 }
 esp67_require($pre_seen&&$killed&&$updated!==false,
     'actual Core write returned success after forced reconnection');
