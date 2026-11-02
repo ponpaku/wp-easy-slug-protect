@@ -35,8 +35,14 @@ add_action('init', static function (): void {
     error_log('ESP67_HTTP_MU_ATTEMPT_REPAIR');
     $file="$root/".hash('sha256',DB_NAME."\0".$wpdb->prefix."\0".$id).'.lock';
     $lock=@fopen($file,'c+');
-    if(!is_resource($lock))return;
-    if(!flock($lock,LOCK_EX|LOCK_NB)){fclose($lock);return;}
+    if(!is_resource($lock)){
+        error_log('ESP67_HTTP_MU_LOCK_OPEN_FAILED path='.$file);
+        return;
+    }
+    if(!flock($lock,LOCK_EX|LOCK_NB)){
+        error_log('ESP67_HTTP_MU_WRITER_STILL_ACTIVE');
+        fclose($lock);return;
+    }
     // The real product needs stable inode identity in state and must reject
     // replacement. The test fixture never replaces the lockfile.
     $db=new mysqli(DB_HOST,DB_USER,DB_PASSWORD,DB_NAME);
