@@ -841,7 +841,7 @@ for attempt in $(seq 1 100); do
   sleep 0.1
 done
 grep -q ESP67_PROXY_READY "$report_root/esp67-delayed-packet-proxy.log"
-for esp67_delayed_case in network-unsafe network-gated; do
+for esp67_delayed_case in network-unsafe network-gated network-killed; do
   rm -f "$esp67_hold_marks/packet-received" \
     "$esp67_hold_marks/packet-release" "$esp67_hold_marks/packet-done"
   esp67_flock_phase setup "$esp67_delayed_case" | tee "$report_root/esp67-delayed-${esp67_delayed_case}-setup.log"
@@ -881,18 +881,38 @@ for esp67_delayed_case in network-unsafe network-gated; do
     echo 'ESP67 expected killed network-packet PHP worker' >&2
     exit 1
   fi
+  if [[ "$esp67_delayed_case" == network-killed ]]; then
+    esp67_flock_phase kill_backend "$esp67_delayed_case" | tee "$report_root/esp67-delayed-killed-backend.log"
+  fi
   esp67_flock_phase recover "$esp67_delayed_case" | tee "$report_root/esp67-delayed-${esp67_delayed_case}-reaped.log"
   assert_http esp31-public-150x150.jpg 200
   touch "$esp67_hold_marks/packet-release"
-  esp67_packet_replied=0
-  for attempt in $(seq 1 150); do
-    if [[ -f "$esp67_hold_marks/packet-done" ]]; then esp67_packet_replied=1; break; fi
-    sleep 0.1
-  done
-  if (( esp67_packet_replied != 1 )); then
-    cat "$report_root/esp67-delayed-packet-proxy.log" >&2
-    echo "ESP67 $esp67_delayed_case delayed MySQL response not observed" >&2
-    exit 1
+  if [[ "$esp67_delayed_case" == network-killed ]]; then
+    # A dead backend cannot return a MySQL OK. The TCP relay may still
+    # attempt delivery, but no SQL may commit on the killed connection.
+    esp67_forwarded=0
+    for attempt in $(seq 1 100); do
+      if [[ "$(grep -c 'ESP67_PROXY_SQL_FORWARDED_AFTER_PHP_DEATH' "$report_root/esp67-delayed-packet-proxy.log" || true)" -ge 3 ]]; then
+        esp67_forwarded=1; break
+      fi
+      sleep 0.1
+    done
+    (( esp67_forwarded == 1 )) || {
+      cat "$report_root/esp67-delayed-packet-proxy.log" >&2
+      exit 1
+    }
+    sleep 1
+  else
+    esp67_packet_replied=0
+    for attempt in $(seq 1 150); do
+      if [[ -f "$esp67_hold_marks/packet-done" ]]; then esp67_packet_replied=1; break; fi
+      sleep 0.1
+    done
+    if (( esp67_packet_replied != 1 )); then
+      cat "$report_root/esp67-delayed-packet-proxy.log" >&2
+      echo "ESP67 $esp67_delayed_case delayed MySQL response not observed" >&2
+      exit 1
+    fi
   fi
   esp67_flock_phase network_verify "$esp67_delayed_case" | tee "$report_root/esp67-delayed-${esp67_delayed_case}-verified.log"
   assert_http esp31-public-150x150.jpg 200
