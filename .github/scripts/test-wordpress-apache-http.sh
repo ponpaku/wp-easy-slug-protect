@@ -869,6 +869,15 @@ esp67_flock_phase restore trigger-reconnect | tee "$report_root/esp67-trigger-re
 assert_http esp31-public-150x150.jpg 200
 echo 'PASS: WordPress wpdb reconnect under trigger safely refuses untagged SQL and automatically recovers'
 
+# #67: actual WordPress Core INSERT/UPDATE/DELETE can all be checked at
+# the MySQL execution boundary by three scoped per-writer DB triggers.
+# Demonstrate valid paths and missing/revoked actor failure without modifying
+# production plugin logic or leaving any triggers in the disposable database.
+docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+  php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-issue-67-crud-trigger-ci.php \
+  | tee "$report_root/esp67-crud-trigger-check.log"
+assert_http esp31-public-150x150.jpg 200
+
 # #67: distinguish "SQL already holds the InnoDB row" from "SQL is
 # still queued in a TCP relay". Killing PHP releases flock before a delayed
 # packet is forwarded to MySQL. Without SQL-time ticket gating, old Core
