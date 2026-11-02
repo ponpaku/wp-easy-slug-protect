@@ -13,8 +13,8 @@ declare(strict_types=1);
 $phase=getenv('ESP67_FLOCK_PHASE');
 $scenario=getenv('ESP67_FLOCK_SCENARIO');
 if(getenv('ESP_ALLOW_DISPOSABLE_DB')!=='1'||!getenv('ESP_WP_ROOT')||
-    !in_array($phase,['inode','setup','writer','recover','verify','kill_db','sql_observe','http_verify','restore'],true)||
-    !in_array($scenario,['crash','db-loss','inflight'],true))exit(1);
+    !in_array($phase,['inode','setup','writer','recover','verify','kill_db','sql_observe','http_verify','network_verify','restore'],true)||
+    !in_array($scenario,['crash','db-loss','inflight','network-unsafe','network-gated'],true))exit(1);
 define('WP_DISABLE_FATAL_ERROR_HANDLER',true);
 require rtrim(getenv('ESP_WP_ROOT'),'/').'/wp-load.php';
 $_SERVER['SERVER_SOFTWARE']='Apache/2.4';
@@ -104,6 +104,34 @@ if($phase==='restore'){
     fl67_check(ESP_Media_Index::resolve($path)['status']==='resolved',
         'public path restored after recovery');
     echo "ESP67_FLOCK_RESTORED\n";exit(0);
+}
+if($phase==='network_verify'){
+    $db=fl67_db();
+    $source=$db->query("SELECT meta_value FROM {$wpdb->postmeta}
+        WHERE post_id=$id AND meta_key='_wp_attachment_metadata'
+        ORDER BY meta_id LIMIT 1")->fetch_assoc();
+    $reserved=$db->query("SELECT COUNT(*) AS n FROM $files WHERE
+        attachment_id=$id AND path_hash='".hash('sha256',$public)."'")->fetch_assoc();
+    $db->close();
+    $actual=$source?maybe_unserialize($source['meta_value']):null;
+    $has=($actual['sizes']['esp67_flock']['file']??null)===$public;
+    $r=fl67_get($state,$id);
+    fl67_check($r['status']==='ready' &&
+        $r['esp67_flock_ids']==='[]'&&(int)$r['pending_count']===0,
+        'orphan ticket reclaimed before delayed network packet arrived');
+    fl67_check((int)$reserved['n']===0,'old index reservation was discarded');
+    if($scenario==='network-unsafe'){
+        fl67_check($has,'UNSAFE: MySQL committed delayed old WP SQL after local lock GC');
+        fl67_check(ESP_Media_Index::resolve($path)['status']==='resolved',
+            'UNSAFE: strict Resolver still sees old public owner');
+        echo "ESP67_NETWORK_DELAY_UNSAFE_PUBLIC_OWNER_GAP\n";
+    }else{
+        fl67_check(!$has,'FENCED: server-side ID predicate rejected late packet');
+        fl67_check(ESP_Media_Index::resolve($path)['status']==='resolved',
+            'FENCED: public authorization agrees with canonical WordPress metadata');
+        echo "ESP67_NETWORK_DELAY_SERVER_FENCED_SAFE\n";
+    }
+    exit(0);
 }
 if($phase==='http_verify'){
     $s=fl67_get($state,$id);
@@ -195,7 +223,7 @@ if($phase==='recover'){
     fl67_check(ESP_Media_Index::reindex_attachment($id),
         'rebuild under exclusive filesystem lock from canonical WordPress meta');
     $r=ESP_Media_Index::resolve($path);
-    if($scenario==='crash'){
+    if(in_array($scenario,['crash','network-unsafe','network-gated'],true)){
         fl67_check($r['status']==='resolved'&&
             ($r['protected_path_id']??null)==='',
             'crashed pre-write worker restored old public path');
@@ -263,6 +291,37 @@ $pre=static function($check,$post_id,$meta_key)use(
     return $check;
 };
 add_filter('update_post_metadata',$pre,3,5);
+if(in_array($scenario,['network-unsafe','network-gated'],true)){
+    $endpoint=getenv('ESP67_FLOCK_PROXY_HOST');
+    if(!is_string($endpoint)||!str_contains($endpoint,':'))
+        throw new RuntimeException('missing disposable network relay');
+    [$host,$port]=explode(':',$endpoint,2);
+    if($wpdb->dbh instanceof mysqli)$wpdb->dbh->close();
+    $transport=mysqli_init();
+    $transport->options(MYSQLI_OPT_CONNECT_TIMEOUT,5);
+    $transport->options(MYSQLI_OPT_READ_TIMEOUT,30);
+    if(!$transport->real_connect($host,DB_USER,DB_PASSWORD,DB_NAME,(int)$port))
+        throw new RuntimeException('cannot connect to disposable MySQL relay');
+    $wpdb->dbh=$transport;
+    $gate=static function($sql)use($wpdb,$state,$id,$scenario){
+        if(!str_starts_with(ltrim($sql),'UPDATE ')||
+            stripos($sql,$wpdb->postmeta)===false)return $sql;
+        if(!preg_match('/^UPDATE\s+.+?\s+SET\s+(.+)\s+WHERE\s+(.+)$/is',
+            trim($sql),$matches))return $sql;
+        if(!str_contains($matches[2],'post_id')||
+            !str_contains($matches[2],"'_wp_attachment_metadata'"))return $sql;
+        if($scenario==='network-gated'){
+            return "UPDATE {$wpdb->postmeta} AS m
+                INNER JOIN $state AS s ON s.attachment_id=$id
+                SET ".$matches[1]." WHERE (".$matches[2].")
+                AND s.status='dirty' AND s.pending_count=1
+                AND BINARY s.esp67_flock_ids=BINARY '[\"FLOCK\"]'
+                /* ESP67_DELAY_SQL_PACKET */";
+        }
+        return $sql.' /* ESP67_DELAY_SQL_PACKET */';
+    };
+    add_filter('query',$gate,PHP_INT_MAX,1);
+}
 if($scenario==='inflight'){
     // Actual wpdb::query UPDATE from update_post_meta(). Inject a delay
     // INSIDE the server-side SET expression after InnoDB has the row.
@@ -286,6 +345,8 @@ try{$ok=wp_update_attachment_metadata($id,$m);}
 finally{
     remove_filter('update_post_metadata',$pre,3);
     if($scenario==='inflight')remove_filter('query',$slow,PHP_INT_MAX);
+    if(in_array($scenario,['network-unsafe','network-gated'],true))
+        remove_filter('query',$gate,PHP_INT_MAX);
     @$liveness->close();
 }
 fl67_check($ok!==false,'WordPress completed canonical postmeta write');
