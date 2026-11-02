@@ -13,7 +13,7 @@
 declare(strict_types=1);
 $phase=getenv('ESP67_INTEGRATED_PHASE');
 if (getenv('ESP_ALLOW_DISPOSABLE_DB')!=='1'||!getenv('ESP_WP_ROOT')||
-    !in_array($phase,['setup','disconnect','txhold','txcommit','autocommit','noop','fence_blocked','bymid','crash_seed','crash_inspect','crash_recover','restore'],true))exit(1);
+    !in_array($phase,['setup','disconnect','txhold','txcommit','autocommit','noop','fence_blocked','bymid','bymid_disconnect','crash_seed','crash_inspect','crash_recover','restore'],true))exit(1);
 define('WP_DISABLE_FATAL_ERROR_HANDLER',true);
 require rtrim(getenv('ESP_WP_ROOT'),'/').'/wp-load.php';
 $_SERVER['SERVER_SOFTWARE']='Apache/2.4';
@@ -172,7 +172,7 @@ if($phase==='setup') {
     $db->close();
     exit(0);
 }
-if($phase==='bymid') {
+if($phase==='bymid' || $phase==='bymid_disconnect') {
     // Unlike ordinary update_post_meta, Core sanitizes the by-mid value
     // *after* the prefilter. The early ticket cannot reserve a guessed value.
     // Reserve from the exact serialized value at update_postmeta (pre-SQL)
@@ -187,14 +187,32 @@ if($phase==='bymid') {
     $meta=wp_get_attachment_metadata($id,true);
     int67_check(is_array($meta)&&!isset($meta['sizes']['esp67_integrated']),
         'by-mid begins with original canonical WordPress metadata');
+    $raw='esp67-raw-unsanitized.jpg';
     $meta['sizes']['esp67_integrated']=[
-        'file'=>$public,'width'=>150,'height'=>150,'mime-type'=>'image/jpeg'];
-    $ticket='BYMID';
-    $pre_seen=false;$action_seen=false;
+        'file'=>$raw,'width'=>150,'height'=>150,'mime-type'=>'image/jpeg'];
+    $ticket=$phase==='bymid'?'BYMID':'BYMID_TX';
+    $pre_seen=false;$action_seen=false;$sanitized=false;$raw_seen=false;
+    // Core sanitizes only AFTER the by-mid prefilter. Alter the proposed
+    // derivative to the collision path, proving post-sanitize reservation
+    // uses the final value rather than guessing from untrusted raw input.
+    $sanitize=static function($value)use($raw,$public,&$sanitized){
+        if(is_array($value) &&
+           ($value['sizes']['esp67_integrated']['file']??null)===$raw){
+            $value['sizes']['esp67_integrated']['file']=$public;
+            $sanitized=true;
+        }
+        return $value;
+    };
+    add_filter('sanitize_post_meta__wp_attachment_metadata',$sanitize,15,3);
     $early=static function($check,$mid)use(
-        $meta_id,$state,$files,$id,$ticket,&$pre_seen
+        $meta_id,$state,$files,$id,$ticket,$raw,&$pre_seen,&$raw_seen
     ){
         if((int)$mid!==$meta_id||$check!==null)return $check;
+        // The value here has NOT passed through sanitize_meta().
+        $args=func_get_args();
+        $value=$args[2]??null;
+        $raw_seen=is_array($value)&&
+            ($value['sizes']['esp67_integrated']['file']??null)===$raw;
         int67_register($state,$files,$id,$ticket,null);
         $pre_seen=true;
         return $check;
@@ -219,14 +237,34 @@ if($phase==='bymid') {
     };
     add_filter('update_post_metadata_by_mid',$early,3,4);
     add_action('update_postmeta',$late,0,4);
+    $killed=false;
+    if($phase==='bymid_disconnect') {
+        int67_check($wpdb->query('START TRANSACTION')!==false,
+            'by-mid caller-owned external TX started before Core');
+        $kill=static function($mid)use($meta_id,&$killed){
+            if((int)$mid!==$meta_id)return;
+            global $wpdb;
+            $connection=(int)$wpdb->get_var('SELECT CONNECTION_ID()');
+            if($connection<=0)throw new RuntimeException('by-mid connection ID missing');
+            $other=int67_db();
+            $other->query('KILL CONNECTION '.$connection);
+            $other->close();
+            $killed=true;
+        };
+        add_action('update_postmeta',$kill,10,4);
+    }
     try {
         $ok=update_metadata_by_mid('post',$meta_id,$meta);
     } finally {
         remove_filter('update_post_metadata_by_mid',$early,3);
         remove_action('update_postmeta',$late,0);
+        remove_filter('sanitize_post_meta__wp_attachment_metadata',$sanitize,15);
+        if($phase==='bymid_disconnect')remove_action('update_postmeta',$kill,10);
     }
-    int67_check($ok!==false&&$pre_seen&&$action_seen,
-        'WordPress by-mid prefilter and post-sanitize pre-SQL hook both ran');
+    int67_check($ok!==false&&$pre_seen&&$raw_seen&&$sanitized&&$action_seen,
+        'WordPress by-mid raw prefilter, sanitization and exact pre-SQL reservation all ran');
+    if($phase==='bymid_disconnect')
+        int67_check($killed,'by-mid external TX disconnected after durable candidate reservation');
     $db=int67_db();
     $r=int67_row($db,$state,$id);
     $rows=$db->query("SELECT COUNT(*) AS n FROM $files WHERE
@@ -244,7 +282,9 @@ if($phase==='bymid') {
         'by-mid rebuilt from final sanitized WordPress value');
     int67_check(ESP_Media_Index::resolve($file)['status']==='ambiguous',
         'by-mid protected/public ownership collision is denied');
-    echo "ESP67_INTEGRATED_BYMID_PROTECTED\n";
+    echo $phase==='bymid' ?
+        "ESP67_INTEGRATED_BYMID_SANITIZED_PROTECTED\n" :
+        "ESP67_INTEGRATED_BYMID_RECONNECT_PROTECTED\n";
     exit(0);
 }
 if($phase==='crash_seed') {
