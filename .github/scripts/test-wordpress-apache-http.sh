@@ -899,6 +899,44 @@ for esp67_flock_case in crash db-loss; do
   esp67_flock_phase restore "$esp67_flock_case" | tee "$report_root/esp67-flock-${esp67_flock_case}-restored.log"
   assert_http esp31-public-150x150.jpg 200
 done
+# #67: demonstrate *normal anonymous HTTP* performs lazy orphan recovery,
+# not just an explicit test/admin command. Test-only MU plugin is installed
+# in the disposable Apache container and removed before finishing.
+docker exec "$container" mkdir -p /var/www/html/wp-content/mu-plugins
+docker exec "$container" cp \
+  /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-issue-67-http-auto-repair-mu.php \
+  /var/www/html/wp-content/mu-plugins/esp67-test-auto-repair.php
+esp67_flock_phase setup crash | tee "$report_root/esp67-flock-http-setup.log"
+docker exec "$container" touch /var/www/html/wp-content/uploads/.esp67-flock/enable-http-repair
+esp67_flock_phase writer crash >"$report_root/esp67-flock-http-worker.log" 2>&1 &
+esp67_flock_http_worker=$!
+esp67_flock_http_ready="$fixture_root/wordpress/wp-content/uploads/.esp67-flock/ready"
+for attempt in $(seq 1 120); do
+  if [[ -f "$esp67_flock_http_ready" ]]; then break; fi
+  if ! kill -0 "$esp67_flock_http_worker" 2>/dev/null; then break; fi
+  sleep 0.2
+done
+[[ -f "$esp67_flock_http_ready" ]] || {
+  cat "$report_root/esp67-flock-http-worker.log" >&2
+  exit 1
+}
+assert_http esp31-public-150x150.jpg 503
+esp67_flock_http_pid="$(cat "$fixture_root/wordpress/wp-content/uploads/.esp67-flock/pid")"
+docker exec "$container" kill -KILL "$esp67_flock_http_pid"
+if wait "$esp67_flock_http_worker"; then
+  echo 'ESP67 HTTP orphan worker should die on SIGKILL' >&2
+  exit 1
+fi
+# Anonymous request itself acquires orphan lock, retires ticket and rebuilds.
+assert_http esp31-public-150x150.jpg 200
+esp67_flock_phase http_verify crash | tee "$report_root/esp67-flock-http-auto-verified.log"
+docker exec "$container" rm -f \
+  /var/www/html/wp-content/mu-plugins/esp67-test-auto-repair.php \
+  /var/www/html/wp-content/uploads/.esp67-flock/enable-http-repair
+esp67_flock_phase restore crash | tee "$report_root/esp67-flock-http-restored.log"
+assert_http esp31-public-150x150.jpg 200
+echo 'PASS: ESP67 anonymous HTTP recovers crashed PHP orphan without admin action'
+
 # Same mechanism, but KILL PHP while Core's genuine wp_postmeta UPDATE
 # is still executing on MySQL. Safe reaper must wait or retry until the
 # postmeta row is no longer owned by the server-side SQL.
