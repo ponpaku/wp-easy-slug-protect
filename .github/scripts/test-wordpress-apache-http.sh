@@ -559,11 +559,11 @@ for esp67_collision_mode in vulnerable fenced; do
   echo "ESP67_COLLISION_HTTP $esp67_collision_mode $esp67_collision_http" | tee -a "$report_root/esp67-collision-${esp67_collision_mode}.log"
   if [[ "$esp67_collision_mode" == vulnerable ]]; then
     [[ "$esp67_collision_http" == 200 ]]
-    grep -q ESP31_PUBLIC "$fixture_root/http-probe-body"
-    echo 'ESP67_REAL_WP_PUBLIC_BYPASS: protected new owner missing, anonymous HTTP returned file body'
+    cmp -s "$fixture_root/http-probe-body" "$fixture_root/wordpress/wp-content/uploads/esp31-public-150x150.jpg"
+    echo 'ESP67_REAL_WP_PUBLIC_BYPASS: protected new owner missing, anonymous HTTP returned exact image body'
   else
     [[ "$esp67_collision_http" == 503 ]]
-    ! grep -q ESP31_PUBLIC "$fixture_root/http-probe-body"
+    ! cmp -s "$fixture_root/http-probe-body" "$fixture_root/wordpress/wp-content/uploads/esp31-public-150x150.jpg"
     echo 'ESP67_OUT_OF_BAND_FENCE: anonymous HTTP blocked during lost caller transaction'
   fi
   docker exec "$container" touch /var/www/html/wp-content/uploads/.esp67-collision/resume
