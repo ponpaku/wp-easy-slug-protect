@@ -884,6 +884,11 @@ done
 cat "$report_root/esp67-delayed-packet-proxy.log"
 echo 'PASS: ESP67 PHP lifetime and canonical-row locks alone cannot fence network-queued SQL; server token blocks replay'
 
+esp67_flock_php="/var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-issue-67-flock-auto-recovery-ci.php"
+esp67_flock_phase() {
+  docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+    ESP67_FLOCK_PHASE="$1" ESP67_FLOCK_SCENARIO="$2" php "$esp67_flock_php"
+}
 # #67: server-side UPDATE may still be in flight after PHP SIGKILL;
 # observe it and separately lock canonical row before declaring recovery safe.
 esp67_inflight_php="/var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-issue-67-db-inflight-ci.php"
@@ -914,11 +919,6 @@ esp67_inflight_phase cleanup | tee "$report_root/esp67-inflight-cleanup.log"
 # #67: single-host crash-safe auto-recovery prototype. PHP holds a
 # per-attachment OS flock SH through the WHOLE WordPress request, including
 # any wpdb reconnect; GC requires OS flock EX before removing orphan IDs.
-esp67_flock_php="/var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-issue-67-flock-auto-recovery-ci.php"
-esp67_flock_phase() {
-  docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
-    ESP67_FLOCK_PHASE="$1" ESP67_FLOCK_SCENARIO="$2" php "$esp67_flock_php"
-}
 esp67_flock_phase inode crash | tee "$report_root/esp67-flock-inode-replacement.log"
 for esp67_flock_case in crash db-loss; do
   esp67_flock_phase setup "$esp67_flock_case" | tee "$report_root/esp67-flock-${esp67_flock_case}-setup.log"
