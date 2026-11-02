@@ -13,8 +13,8 @@ declare(strict_types=1);
 $phase=getenv('ESP67_FLOCK_PHASE');
 $scenario=getenv('ESP67_FLOCK_SCENARIO');
 if(getenv('ESP_ALLOW_DISPOSABLE_DB')!=='1'||!getenv('ESP_WP_ROOT')||
-    !in_array($phase,['inode','setup','writer','recover','verify','kill_db','restore'],true)||
-    !in_array($scenario,['crash','db-loss'],true))exit(1);
+    !in_array($phase,['inode','setup','writer','recover','verify','kill_db','sql_observe','restore'],true)||
+    !in_array($scenario,['crash','db-loss','inflight'],true))exit(1);
 define('WP_DISABLE_FATAL_ERROR_HANDLER',true);
 require rtrim(getenv('ESP_WP_ROOT'),'/').'/wp-load.php';
 $_SERVER['SERVER_SOFTWARE']='Apache/2.4';
@@ -105,6 +105,23 @@ if($phase==='restore'){
         'public path restored after recovery');
     echo "ESP67_FLOCK_RESTORED\n";exit(0);
 }
+if($phase==='sql_observe'){
+    $db=fl67_db();
+    $running=false;
+    for($i=0;$i<50;$i++){
+        $rows=$db->query('SHOW FULL PROCESSLIST')->fetch_all(MYSQLI_ASSOC);
+        foreach($rows as $row){
+            if(str_contains((string)($row['Info']??''),'ESP67_FLOCK_SQL_INFLIGHT')){
+                $running=true;break;
+            }
+        }
+        if($running)break;
+        usleep(100000);
+    }
+    $db->close();
+    fl67_check($running,'WordPress Core canonical SQL executing on MySQL server');
+    echo "ESP67_FLOCK_MYSQL_UPDATE_INFLIGHT\n";exit(0);
+}
 if($phase==='kill_db'){
     fl67_check(file_exists($ready),'PHP writer still blocked in actual pre-SQL hook');
     $session=(int)file_get_contents($sessionfile);
@@ -147,7 +164,15 @@ if($phase==='recover'){
             WHERE post_id=$id AND meta_key IN ('_wp_attached_file',
             '_wp_attachment_metadata','_esp_protection')
             FOR UPDATE");
-        if($meta_lock===false)throw new RuntimeException('canonical postmeta row lock failed');
+        if($meta_lock===false){
+            if((int)$db->errno===1205){
+                $db->rollback();$db->close();
+                flock($lock,LOCK_UN);fclose($lock);
+                echo "ESP67_FLOCK_CANONICAL_SQL_STILL_INFLIGHT_RETRY\n";
+                exit(0);
+            }
+            throw new RuntimeException('canonical postmeta row lock failed: '.$db->error);
+        }
         fl67_check(true,'recovery acquired canonical post and metadata locks');
         fl67_check($r['esp67_flock_ids']==='["FLOCK"]' &&
             (int)$r['pending_count']===1,'unowned ticket exists after all PHP locks released');
@@ -229,9 +254,29 @@ $pre=static function($check,$post_id,$meta_key)use(
     return $check;
 };
 add_filter('update_post_metadata',$pre,3,5);
+if($scenario==='inflight'){
+    // Actual wpdb::query UPDATE from update_post_meta(). Inject a delay
+    // INSIDE the server-side SET expression after InnoDB has the row.
+    // An independent coordinator kills PHP after observing this SQL live.
+    $slow=static function($sql)use($wpdb){
+        if(!str_starts_with(ltrim($sql),'UPDATE ')||
+           stripos($sql,$wpdb->postmeta)===false)return $sql;
+        $matches=[];
+        if(!preg_match('/^(UPDATE\s+.+?\s+SET\s+)(.+?)(\s+WHERE\s+.+)$/is',
+            trim($sql),$matches))return $sql;
+        // Core SQL uses SET meta_value=<serialized> WHERE...
+        if(!preg_match('/^\x60?meta_value\x60?\s*=\s*(.+)$/is',
+            $matches[2],$assignment))return $sql;
+        return $matches[1]."\x60meta_value\x60 = IF(SLEEP(5)=0, ".
+            $assignment[1].", \x60meta_value\x60)".$matches[3].
+            ' /* ESP67_FLOCK_SQL_INFLIGHT */';
+    };
+    add_filter('query',$slow,PHP_INT_MAX,1);
+}
 try{$ok=wp_update_attachment_metadata($id,$m);}
 finally{
     remove_filter('update_post_metadata',$pre,3);
+    if($scenario==='inflight')remove_filter('query',$slow,PHP_INT_MAX);
     @$liveness->close();
 }
 fl67_check($ok!==false,'WordPress completed canonical postmeta write');
