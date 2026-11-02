@@ -41,8 +41,11 @@ function int67_check(bool $result,string $message):void {
 }
 function int67_db():mysqli { return new mysqli(DB_HOST,DB_USER,DB_PASSWORD,DB_NAME); }
 function int67_row(mysqli $db,string $state,int $id,bool $lock=false):array {
-    $r=$db->query("SELECT status,revision,pending_count,esp67_mutation_ids
-      FROM $state WHERE attachment_id=$id".($lock?' FOR UPDATE':''))->fetch_assoc();
+    $result=$db->query("SELECT status,revision,pending_count,esp67_mutation_ids
+      FROM $state WHERE attachment_id=$id".($lock?' FOR UPDATE':''));
+    if($result===false)throw new RuntimeException(
+        'state query failed errno='.$db->errno.': '.$db->error);
+    $r=$result->fetch_assoc();
     if(!$r)throw new RuntimeException('Missing state row');
     $ids=json_decode((string)$r['esp67_mutation_ids'],true,512,JSON_THROW_ON_ERROR);
     if(!is_array($ids)||!array_is_list($ids)||count($ids)!==count(array_unique($ids))||
@@ -98,8 +101,14 @@ function int67_retire(string $state,int $id,string $ticket,int $lock_timeout=2):
         $db->rollback();
         if((int)$e->getCode()===1205)return false;
         throw $e;
-    }catch(Throwable $e){$db->rollback();throw $e;}
-    finally{$db->close();}
+    }catch(Throwable $e){
+        $errno=(int)$db->errno;
+        $db->rollback();
+        // WP Core disables mysqli strict reporting, so lock wait can be a
+        // mysqli query() false rather than mysqli_sql_exception.
+        if($errno===1205)return false;
+        throw $e;
+    }finally{$db->close();}
 }
 function int67_remove_legacy_hooks():void {
     remove_filter('update_post_metadata',['ESP_Media_Index','guard_update_meta'],5);
