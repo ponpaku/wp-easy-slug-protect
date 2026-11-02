@@ -70,4 +70,4 @@ WordPressプラグイン向けに残る実装候補は次の3種類。
 
 [Actions #41438463842](https://github.com/ponpaku/wp-easy-slug-protect/actions/runs/41438463842) の実WordPress＋MySQL 8検証で、試験用トリガーは正常に作成されたが、actor IDを単純な`VARCHAR`で照合すると **`utf8mb4_0900_ai_ci` とWordPress側 `utf8mb4_unicode_520_ci` のcollation不一致**により正当な`add_post_meta()`まで失敗した。これを「安全だから問題ない」とみなすのは可用性要件に反する。
 
-本番のactor-IDは **バイナリ固定長（例：ランダム32バイト）**とし、MySQLセッション変数を`CAST(... AS BINARY)`で比較することで照合規則への依存を排除する方針。修正版の全CRUDテスト結果がPASSするまでは、この改善は**候補**であり実証済みとは呼ばない。
+本番のactor-IDは **バイナリ固定長（例：ランダム32バイト）**とし、MySQLセッション変数を`CAST(... AS BINARY)`で比較して照合規則への依存を排除する。**[Actions #41438964505](https://github.com/ponpaku/wp-easy-slug-protect/actions/runs/41438964505) でこの修正後の実WordPress INSERT/UPDATE/DELETE（正常・未設定actor・失効actor）すべてPASS、全8ジョブ成功。** 同試験は他のWordPress更新経路（`wp_posts`やby-mid）のトリガー製品実装を保証するものではない。
