@@ -827,6 +827,35 @@ esp67_flock_phase() {
   docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
     ESP67_FLOCK_PHASE="$1" ESP67_FLOCK_SCENARIO="$2" php "$esp67_flock_php"
 }
+# #67: normal Core API regression: with a test-only state-checking DB
+# trigger installed, a VALID durable ticket must still permit writes.
+esp67_flock_phase setup trigger-normal | tee "$report_root/esp67-trigger-normal-setup.log"
+esp67_flock_phase writer trigger-normal >"$report_root/esp67-trigger-normal-writer.log" 2>&1 &
+esp67_trigger_normal_worker=$!
+esp67_trigger_normal_signal="$fixture_root/wordpress/wp-content/uploads/.esp67-flock/ready"
+for attempt in $(seq 1 120); do
+  if [[ -f "$esp67_trigger_normal_signal" ]]; then break; fi
+  if ! kill -0 "$esp67_trigger_normal_worker" 2>/dev/null; then break; fi
+  sleep 0.1
+done
+[[ -f "$esp67_trigger_normal_signal" ]] || {
+  cat "$report_root/esp67-trigger-normal-writer.log" >&2
+  exit 1
+}
+docker exec "$container" touch /var/www/html/wp-content/uploads/.esp67-flock/resume
+if ! wait "$esp67_trigger_normal_worker"; then
+  cat "$report_root/esp67-trigger-normal-writer.log" >&2
+  echo 'ESP67 normal WordPress UPDATE failed under test-only DB trigger' >&2
+  exit 1
+fi
+esp67_flock_phase verify trigger-normal | tee "$report_root/esp67-trigger-normal-verify.log"
+assert_http esp31-public-150x150.jpg 503
+esp67_flock_phase recover trigger-normal | tee "$report_root/esp67-trigger-normal-recovered.log"
+assert_http esp31-public-150x150.jpg 403
+esp67_flock_phase restore trigger-normal | tee "$report_root/esp67-trigger-normal-restored.log"
+assert_http esp31-public-150x150.jpg 200
+echo 'PASS: actual WordPress Core UPDATE works with server-side trigger when ticket remains active'
+
 # #67: distinguish "SQL already holds the InnoDB row" from "SQL is
 # still queued in a TCP relay". Killing PHP releases flock before a delayed
 # packet is forwarded to MySQL. Without SQL-time ticket gating, old Core
