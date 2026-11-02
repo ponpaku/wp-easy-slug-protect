@@ -13,7 +13,7 @@
 declare(strict_types=1);
 $phase=getenv('ESP67_INTEGRATED_PHASE');
 if (getenv('ESP_ALLOW_DISPOSABLE_DB')!=='1'||!getenv('ESP_WP_ROOT')||
-    !in_array($phase,['setup','disconnect','txhold','txcommit','autocommit','noop','fence_blocked','crash_seed','crash_inspect','crash_recover','restore'],true))exit(1);
+    !in_array($phase,['setup','disconnect','txhold','txcommit','autocommit','noop','fence_blocked','bymid','crash_seed','crash_inspect','crash_recover','restore'],true))exit(1);
 define('WP_DISABLE_FATAL_ERROR_HANDLER',true);
 require rtrim(getenv('ESP_WP_ROOT'),'/').'/wp-load.php';
 $_SERVER['SERVER_SOFTWARE']='Apache/2.4';
@@ -55,7 +55,7 @@ function int67_row(mysqli $db,string $state,int $id,bool $lock=false):array {
     }
     $r['ids']=$ids;return $r;
 }
-function int67_register(string $state,string $files,int $id,string $ticket,string $public):void {
+function int67_register(string $state,string $files,int $id,string $ticket,?string $public):void {
     $db=int67_db();
     $db->query('SET SESSION innodb_lock_wait_timeout=1');
     $db->begin_transaction();
@@ -72,14 +72,35 @@ function int67_register(string $state,string $files,int $id,string $ticket,strin
             pending_count=$count,esp67_mutation_ids='$encoded'
             WHERE attachment_id=$id AND revision=".(int)$r['revision']);
         int67_check($db->affected_rows===1,'independent state fence persisted');
-        $path=$db->real_escape_string($public);
+        if($public!==null) {
+            $path=$db->real_escape_string($public);
+            $hash=hash('sha256',$public);
+            // Probe reserves only the interesting colliding derivative.
+            $db->query("INSERT INTO $files
+                (path_hash,file_path,attachment_id,generation,protected_path_id)
+                VALUES('$hash','$path',$id,$revision,'')");
+        }
+        $db->commit();
+    }catch(Throwable $e){$db->rollback();throw $e;}
+    finally{$db->close();}
+}
+function int67_reserve_after_sanitize(string $state,string $files,int $id,
+        string $ticket,string $public):void {
+    // Called in Core's update_postmeta action, AFTER sanitize_meta(),
+    // BEFORE the actual UPDATE. The source wpdb transaction must not
+    // have locked the state row yet or this independent transaction blocks.
+    $db=int67_db();$db->begin_transaction();
+    try {
+        $r=int67_row($db,$state,$id,true);
+        if(!in_array($ticket,$r['ids'],true)||$r['status']!=='dirty')
+            throw new RuntimeException('missing early pre-fence ticket');
+        $rev=(int)$r['revision'];
         $hash=hash('sha256',$public);
-        // In production, reserve EVERY derived path, not just this single
-        // test collision. Existing ready protected_path_id is immaterial while
-        // the candidate state remains dirty.
-        $db->query("INSERT INTO $files
+        $escaped=$db->real_escape_string($public);
+        if($db->query("INSERT IGNORE INTO $files
             (path_hash,file_path,attachment_id,generation,protected_path_id)
-            VALUES('$hash','$path',$id,$revision,'')");
+            VALUES('$hash','$escaped',$id,$rev,'')")===false)
+            throw new RuntimeException('late independent candidate reservation failed');
         $db->commit();
     }catch(Throwable $e){$db->rollback();throw $e;}
     finally{$db->close();}
@@ -149,6 +170,81 @@ if($phase==='setup') {
     int67_check(int67_row($db,$state,$id)['ids']===[],
         'one added column initialized with empty mutation IDs');
     $db->close();
+    exit(0);
+}
+if($phase==='bymid') {
+    // Unlike ordinary update_post_meta, Core sanitizes the by-mid value
+    // *after* the prefilter. The early ticket cannot reserve a guessed value.
+    // Reserve from the exact serialized value at update_postmeta (pre-SQL)
+    // and only THEN obtain the caller's state-row lock.
+    int67_remove_legacy_hooks();
+    remove_filter('update_post_metadata_by_mid',['ESP_Media_Index','guard_by_mid'],5);
+    remove_action('update_postmeta',['ESP_Media_Index','reserve_sanitized_by_mid'],1);
+    $meta_id=(int)$wpdb->get_var($wpdb->prepare(
+        "SELECT meta_id FROM {$wpdb->postmeta} WHERE post_id=%d AND meta_key=%s
+         ORDER BY meta_id LIMIT 1",$id,'_wp_attachment_metadata'));
+    int67_check($meta_id>0,'actual WordPress by-mid metadata row exists');
+    $meta=wp_get_attachment_metadata($id,true);
+    int67_check(is_array($meta)&&!isset($meta['sizes']['esp67_integrated']),
+        'by-mid begins with original canonical WordPress metadata');
+    $meta['sizes']['esp67_integrated']=[
+        'file'=>$public,'width'=>150,'height'=>150,'mime-type'=>'image/jpeg'];
+    $ticket='BYMID';
+    $pre_seen=false;$action_seen=false;
+    $early=static function($check,$mid)use(
+        $meta_id,$state,$files,$id,$ticket,&$pre_seen
+    ){
+        if((int)$mid!==$meta_id||$check!==null)return $check;
+        int67_register($state,$files,$id,$ticket,null);
+        $pre_seen=true;
+        return $check;
+    };
+    $late=static function($mid,$post_id,$meta_key,$serialized)use(
+        $meta_id,$state,$files,$id,$ticket,$public,&$action_seen
+    ){
+        if((int)$mid!==$meta_id||$meta_key!=='_wp_attachment_metadata')return;
+        int67_check((int)$post_id===$id,'sanitized by-mid hook has correct owner');
+        $value=maybe_unserialize($serialized);
+        $attached=get_post_meta($id,'_wp_attached_file',true);
+        $paths=ESP_Media_Index::enumerate($attached,$value);
+        int67_check(is_array($paths)&&in_array($public,$paths,true),
+            'by-mid sanitized serialized value contains new derivative owner');
+        int67_reserve_after_sanitize($state,$files,$id,$ticket,$public);
+        global $wpdb;
+        $locked=$wpdb->get_var($wpdb->prepare(
+            "SELECT revision FROM $state WHERE attachment_id=%d FOR UPDATE",$id));
+        if($wpdb->last_error!==''||$locked===null)
+            throw new RuntimeException('by-mid caller state row lock failed');
+        $action_seen=true;
+    };
+    add_filter('update_post_metadata_by_mid',$early,3,4);
+    add_action('update_postmeta',$late,0,4);
+    try {
+        $ok=update_metadata_by_mid('post',$meta_id,$meta);
+    } finally {
+        remove_filter('update_post_metadata_by_mid',$early,3);
+        remove_action('update_postmeta',$late,0);
+    }
+    int67_check($ok!==false&&$pre_seen&&$action_seen,
+        'WordPress by-mid prefilter and post-sanitize pre-SQL hook both ran');
+    $db=int67_db();
+    $r=int67_row($db,$state,$id);
+    $rows=$db->query("SELECT COUNT(*) AS n FROM $files WHERE
+        attachment_id=$id AND path_hash='".hash('sha256',$public)."'")->fetch_assoc();
+    $canonical=$db->query("SELECT meta_value FROM {$wpdb->postmeta}
+        WHERE meta_id=$meta_id")->fetch_assoc();$db->close();
+    $actual=$canonical?maybe_unserialize($canonical['meta_value']):null;
+    int67_check($r['ids']===[$ticket] && (int)$rows['n']>=1 &&
+        ($actual['sizes']['esp67_integrated']['file']??null)===$public,
+        'by-mid persisted canonical collision and independent candidate together');
+    int67_check(ESP_Media_Index::resolve($file)['status']==='error',
+        'by-mid mutable owner stays dirty through core update');
+    int67_check(int67_retire($state,$id,$ticket),'by-mid ticket retired only after write');
+    int67_check(ESP_Media_Index::reindex_attachment($id),
+        'by-mid rebuilt from final sanitized WordPress value');
+    int67_check(ESP_Media_Index::resolve($file)['status']==='ambiguous',
+        'by-mid protected/public ownership collision is denied');
+    echo "ESP67_INTEGRATED_BYMID_PROTECTED\n";
     exit(0);
 }
 if($phase==='crash_seed') {
