@@ -804,6 +804,7 @@ esp67_flock_phase() {
   docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
     ESP67_FLOCK_PHASE="$1" ESP67_FLOCK_SCENARIO="$2" php "$esp67_flock_php"
 }
+esp67_flock_phase inode crash | tee "$report_root/esp67-flock-inode-replacement.log"
 for esp67_flock_case in crash db-loss; do
   esp67_flock_phase setup "$esp67_flock_case" | tee "$report_root/esp67-flock-${esp67_flock_case}-setup.log"
   esp67_flock_phase writer "$esp67_flock_case" >"$report_root/esp67-flock-${esp67_flock_case}-worker.log" 2>&1 &
