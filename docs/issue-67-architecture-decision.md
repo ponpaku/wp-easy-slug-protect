@@ -127,3 +127,38 @@ WordPress正本を**他プラグインが直接SQLで編集する**場合、Word
 - **制限付き代替**：変更対象パスが事前に安全に列挙できず、そのWordPress更新を禁止できない場合、同じ\`state\`行ID=0に**独立COMMIT済みglobal更新ID**を登録し、Cron公開CAS/Resolverの双方でそのIDが残る限りREADYを禁止。完全監査が終わるまで全対象メディアを503にするため、最小限の例外に限る。
 - **排除**：数値\`pending_count++/--\`、呼出元TX内だけのID、global dirtyだけ、global pendingを保存するだけで現行Cronを使う案。
 - **重要な未完了条件**：全フックへの製品実装、process crash時の安全な復旧、混合バージョン移行、同一primaryへの独立接続、lock-orderや同時多数ワーカー、MariaDB旧バージョン、更新時性能。#67はOpen、strict本番自動有効化は不可。
+
+
+## 2026-11-02 最終追加確認：DBトリガー不要のglobal READY公開CAS
+
+[Actions #41375237511](https://github.com/ponpaku/wp-easy-slug-protect/actions/runs/41375237511) の `mysql-integration` および `mariadb-issue67` ジョブで、試験用トリガーを使用せず、実際の **条件付きUPDATE SQL** と独立2接続で検証した。
+
+- 監査が `revision=11` を読む。
+- 別接続がglobal更新ID `G1` を独立トランザクションでCOMMITし、`revision=12,pending_count=1,active_mutations=["G1"],status=dirty` にする。
+- stale監査による `revision=11` のREADY公開CASは変更0行。
+- 新しいrevisionを読んだ監査でも、`pending_count=0 AND active_mutations='[]'` の条件により変更0行。
+- 人為的に `status=ready` が残った不整合状態でも、Resolver側の `status+pending_count+active_mutations` 完全述語は公開拒否。
+- IDを解除し `revision=13,pending=0,set=[]` とした後の新しい監査のみREADY公開に成功。SQL再送は無害。
+
+**MySQL 8.0とMariaDB 10.11の双方で上記PASS。** 実WordPress Cronの失敗とテスト専用トリガーによる保護は [Actions #41374325149](https://github.com/ponpaku/wp-easy-slug-protect/actions/runs/41374325149) で既に対比済み。今回のSQL試験により **製品用DBトリガーは必要ない** と判断する。ただし最終WordPress製品コードへSQL条件を導入したE2Eまでは未完了。
+
+製品実装時のREADY CAS例（適宜実スキーマの照合・revisionとcursor CASを併用）：
+
+```sql
+UPDATE wp_esp_media_file_state_v1
+SET status='ready', audit_cursor=0
+WHERE attachment_id=0
+  AND status='dirty'
+  AND revision=?
+  AND audit_cursor=?
+  AND pending_count=0
+  AND BINARY active_mutations=BINARY '[]';
+```
+
+Resolverが参照するglobal rowについても、同じSQL照会内で `status='ready'` に加え、`pending_count=0` と空ID集合を確認する。SQLの行変更0は「再監査が必要な競合」扱いとし、成功としてREADYを公開しない。通常の添付単位READY公開も同様に `pending_count=0` と空集合を必須にする。
+
+### 導入に向けた二段階の推奨判断
+
+**採用する設計候補**：局所の独立永続更新ID＋候補パス予約＋caller行ロックを基本とし、列挙できない変更だけglobal更新ID＋公開CAS/Resolver両ゲートへ切替える。表の増設は避ける。SQL再送冪等性、DB切断、外部TX、`by-mid`サニタイズ、投稿種別昇格、Cron競合の主要な証拠が揃った。
+
+**製品採用に進む条件**：必要な書込み前フックを本体で一元化し、更新処理側の追加接続・lock順序・クラッシュ回復運用・完全監査・旧pending移行を含む実WordPress受け入れ試験をPASSさせること。本検証は設計選択の根拠であり、まだ本番の認可保証ではない。
