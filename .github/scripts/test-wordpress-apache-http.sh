@@ -769,6 +769,33 @@ for esp67_global_race_mode in dirty pending gated; do
   assert_http esp31-public-150x150.jpg 200
 done
 
+# #67: server-side UPDATE may still be in flight after PHP SIGKILL;
+# observe it and separately lock canonical row before declaring recovery safe.
+esp67_inflight_php="/var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-issue-67-db-inflight-ci.php"
+esp67_inflight_phase() {
+  docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+    ESP67_INFLIGHT_PHASE="$1" php "$esp67_inflight_php"
+}
+esp67_inflight_phase setup | tee "$report_root/esp67-inflight-setup.log"
+esp67_inflight_phase writer >"$report_root/esp67-inflight-writer.log" 2>&1 &
+esp67_inflight_worker=$!
+esp67_inflight_ready="$fixture_root/wordpress/wp-content/uploads/.esp67-inflight/started"
+for attempt in $(seq 1 120); do
+  if [[ -f "$esp67_inflight_ready" ]]; then break; fi
+  if ! kill -0 "$esp67_inflight_worker" 2>/dev/null; then break; fi
+  sleep 0.2
+done
+[[ -f "$esp67_inflight_ready" ]] || { cat "$report_root/esp67-inflight-writer.log" >&2; exit 1; }
+esp67_inflight_phase observe | tee "$report_root/esp67-inflight-observe.log"
+esp67_inflight_pid="$(cat "$esp67_inflight_ready")"
+docker exec "$container" kill -KILL "$esp67_inflight_pid"
+if wait "$esp67_inflight_worker"; then
+  echo 'ESP67 inflight worker should be terminated by SIGKILL' >&2
+  exit 1
+fi
+esp67_inflight_phase final | tee "$report_root/esp67-inflight-final.log"
+esp67_inflight_phase cleanup | tee "$report_root/esp67-inflight-cleanup.log"
+
 # #67: single-host crash-safe auto-recovery prototype. PHP holds a
 # per-attachment OS flock SH through the WHOLE WordPress request, including
 # any wpdb reconnect; GC requires OS flock EX before removing orphan IDs.
