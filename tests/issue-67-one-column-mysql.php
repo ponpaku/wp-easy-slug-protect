@@ -238,6 +238,41 @@ try {
     $pub->close();
     echo "PASS #67 GLOBAL SQL: READY CAS and resolver predicate block audit/write race on real DB\n";
 
+    // Alternative architecture for clusters: an actual canonical UPDATE
+    // must include a server-side ticket predicate AND lock that state row.
+    // Without such enforcement, a time-expired lease cannot stop a paused
+    // PHP writer / Core SQL replay. This is NOT presently done by WordPress.
+    change67($a,'SQL_FENCE',true);
+    $guarded = row67($a);
+    check67($guarded['active_mutations']==='["SQL_FENCE"]',
+        'SQL-level write gate token registered');
+    $guarded_sql = "UPDATE esp67_meta_probe AS m
+        INNER JOIN esp67_state_probe AS s
+          ON s.attachment_id=m.attachment_id
+        SET m.canonical_value='fenced_change'
+        WHERE m.attachment_id=123
+          AND s.status='dirty' AND s.pending_count=1
+          AND BINARY s.active_mutations=BINARY '[\"SQL_FENCE\"]'";
+    $a->begin_transaction();
+    check67($a->query($guarded_sql)===true && $a->affected_rows===1,
+        'canonical UPDATE uses server-side state-ticket JOIN');
+    $b->query('SET SESSION innodb_lock_wait_timeout=1');
+    $blocked_by_canonical = false;
+    try {
+        $b->query("UPDATE esp67_state_probe SET
+            active_mutations='[]',pending_count=0,revision=revision+1
+            WHERE attachment_id=123");
+    } catch (mysqli_sql_exception $e) {
+        $blocked_by_canonical = (int)$e->getCode()===1205;
+    }
+    check67($blocked_by_canonical,
+        'server-side canonical UPDATE holds state lock against premature GC');
+    $a->commit();
+    change67($b,'SQL_FENCE',false);
+    $replay = $b->query($guarded_sql);
+    check67($replay===true && $b->affected_rows===0,
+        'SQL replay after token retirement cannot modify canonical owner');
+
     echo "RESULT #67: SQL idempotence YES; overlap YES; crash recovery NO; external transaction retry NO\n";
 } finally {
     $clean = db67();
