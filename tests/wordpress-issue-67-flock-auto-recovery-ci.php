@@ -13,7 +13,7 @@ declare(strict_types=1);
 $phase=getenv('ESP67_FLOCK_PHASE');
 $scenario=getenv('ESP67_FLOCK_SCENARIO');
 if(getenv('ESP_ALLOW_DISPOSABLE_DB')!=='1'||!getenv('ESP_WP_ROOT')||
-    !in_array($phase,['setup','writer','recover','verify','kill_db','restore'],true)||
+    !in_array($phase,['inode','setup','writer','recover','verify','kill_db','restore'],true)||
     !in_array($scenario,['crash','db-loss'],true))exit(1);
 define('WP_DISABLE_FATAL_ERROR_HANDLER',true);
 require rtrim(getenv('ESP_WP_ROOT'),'/').'/wp-load.php';
@@ -47,6 +47,28 @@ function fl67_get(string $state,int $id):array {
     $db->close();
     if(!is_array($r))throw new RuntimeException('no state');
     return $r;
+}
+if($phase==='inode'){
+    // A lockfile may be unlinked and replaced while the previous PHP owner
+    // still holds its original inode. The *path* is not the lock identity.
+    // Real implementation must never unlink and must verify persisted inode
+    // / generation before permitting automatic orphan reclamation.
+    $a="$root/replace-test.lock";
+    @unlink($a);
+    $older=fopen($a,'c+');
+    fl67_check(is_resource($older)&&flock($older,LOCK_SH),
+        'first PHP owner holds original lock inode');
+    $old=fstat($older);
+    fl67_check(unlink($a),'test removes the lock pathname while owner still alive');
+    $newer=fopen($a,'c+');
+    fl67_check(is_resource($newer)&&flock($newer,LOCK_EX|LOCK_NB),
+        'new pathname permits incompatible exclusive lock on different inode');
+    $now=fstat($newer);
+    fl67_check($old['ino']!==$now['ino'] || $old['dev']!==$now['dev'],
+        'fstat detects replaced lock identity and must block ticket recovery');
+    echo "ESP67_FLOCK_INODE_REPLACEMENT_UNSAFE_WITHOUT_IDENTITY_CHECK\n";
+    flock($newer,LOCK_UN);fclose($newer);
+    flock($older,LOCK_UN);fclose($older);@unlink($a);exit(0);
 }
 if($phase==='setup'){
     foreach([$ready,$resume,$pidfile,$sessionfile,$written] as $f)@unlink($f);
