@@ -146,8 +146,13 @@ $query_filter=static function($sql)use($wpdb,$state,$id,$case,$started,$resume,&
   trim($sql),$hit)){
   echo "ESP67_SQL_GATE_UNRECOGNIZED_UPDATE\n";return $sql;
  }
- if(!str_contains($hit[2],'meta_id')){
-  echo "ESP67_SQL_GATE_NO_METAID_IN_WHERE\n";return $sql;
+ // WordPress Core update_metadata() writes by post_id + meta_key,
+ // not necessarily meta_id (the actual WordPress 7.1.3 SQL observed in CI).
+ // Scope tightly to our single protected fixture before rewriting.
+ if(!str_contains($hit[2],'post_id') ||
+    !str_contains($hit[2],"'_wp_attachment_metadata'") ||
+    !preg_match('/\\bpost_id\\s*\\x60?\\s*=\\s*'.(int)$id.'\\b/i',$hit[2])){
+  echo "ESP67_SQL_GATE_UNSCOPED_UPDATE\n";return $sql;
  }
  $rewrite++;
  // Same SQL must enforce ticket at MySQL commit, not just PHP precheck.
