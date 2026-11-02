@@ -769,6 +769,62 @@ for esp67_global_race_mode in dirty pending gated; do
   assert_http esp31-public-150x150.jpg 200
 done
 
+# #67: single-host crash-safe auto-recovery prototype. PHP holds a
+# per-attachment OS flock SH through the WHOLE WordPress request, including
+# any wpdb reconnect; GC requires OS flock EX before removing orphan IDs.
+esp67_flock_php="/var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-issue-67-flock-auto-recovery-ci.php"
+esp67_flock_phase() {
+  docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+    ESP67_FLOCK_PHASE="$1" ESP67_FLOCK_SCENARIO="$2" php "$esp67_flock_php"
+}
+for esp67_flock_case in crash db-loss; do
+  esp67_flock_phase setup "$esp67_flock_case" | tee "$report_root/esp67-flock-${esp67_flock_case}-setup.log"
+  esp67_flock_phase writer "$esp67_flock_case" >"$report_root/esp67-flock-${esp67_flock_case}-worker.log" 2>&1 &
+  esp67_flock_worker=$!
+  esp67_flock_signal="$fixture_root/wordpress/wp-content/uploads/.esp67-flock"
+  esp67_flock_ready=0
+  for attempt in $(seq 1 120); do
+    if [[ -f "$esp67_flock_signal/ready" ]]; then esp67_flock_ready=1; break; fi
+    if ! kill -0 "$esp67_flock_worker" 2>/dev/null; then break; fi
+    sleep 0.2
+  done
+  if (( esp67_flock_ready != 1 )); then
+    cat "$report_root/esp67-flock-${esp67_flock_case}-worker.log" >&2
+    echo "ESP67 flock worker $esp67_flock_case not ready" >&2
+    exit 1
+  fi
+  esp67_flock_phase recover "$esp67_flock_case" | tee "$report_root/esp67-flock-${esp67_flock_case}-active.log"
+  assert_http esp31-public-150x150.jpg 503
+  if [[ "$esp67_flock_case" == crash ]]; then
+    esp67_flock_pid="$(cat "$esp67_flock_signal/pid")"
+    docker exec "$container" kill -KILL "$esp67_flock_pid"
+    # SIGKILL must be observed; nonzero exit is expected for a killed worker.
+    if wait "$esp67_flock_worker"; then
+      echo "ESP67 flock expected SIGKILL but worker exited successfully" >&2
+      exit 1
+    fi
+    esp67_flock_phase recover "$esp67_flock_case" | tee "$report_root/esp67-flock-crash-auto-recovery.log"
+    assert_http esp31-public-150x150.jpg 200
+  else
+    esp67_flock_phase kill_db "$esp67_flock_case" | tee "$report_root/esp67-flock-killed-only-db.log"
+    esp67_flock_phase recover "$esp67_flock_case" | tee "$report_root/esp67-flock-db-loss-still-active.log"
+    assert_http esp31-public-150x150.jpg 503
+    docker exec "$container" touch /var/www/html/wp-content/uploads/.esp67-flock/resume
+    if ! wait "$esp67_flock_worker"; then
+      cat "$report_root/esp67-flock-${esp67_flock_case}-worker.log" >&2
+      echo 'ESP67 flock legitimate PHP writer failed to resume' >&2
+      exit 1
+    fi
+    cat "$report_root/esp67-flock-${esp67_flock_case}-worker.log"
+    esp67_flock_phase verify "$esp67_flock_case" | tee "$report_root/esp67-flock-db-loss-finished.log"
+    esp67_flock_phase recover "$esp67_flock_case" | tee "$report_root/esp67-flock-db-loss-auto-recovery.log"
+    assert_http esp31-public-150x150.jpg 403
+  fi
+  esp67_flock_phase restore "$esp67_flock_case" | tee "$report_root/esp67-flock-${esp67_flock_case}-restored.log"
+  assert_http esp31-public-150x150.jpg 200
+done
+echo 'PASS: ESP67 single-host PHP-lifetime flock auto-GC handles crash and DB-only disconnect'
+
 # #67: a lost MySQL named lock or expired timer does not prove that
 # a PHP writer has terminated. Live worker is paused INSIDE WordPress's
 # pre-SQL hook; kill only its independent liveness session, perform unsafe
