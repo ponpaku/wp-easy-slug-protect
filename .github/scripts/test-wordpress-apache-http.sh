@@ -19,9 +19,14 @@ started=0
 q01_proxy_pid=0
 q01_wpdb_proxy_pid=0
 esp67_wpdb_proxy_pid=0
+esp67_hold_proxy_pid=0
 cleanup() {
   # Capture the failing command's status BEFORE any proxy teardown changes $?.
   local result=$?
+  if [[ $esp67_hold_proxy_pid -gt 0 ]]; then
+    kill "$esp67_hold_proxy_pid" >/dev/null 2>&1 || true
+    wait "$esp67_hold_proxy_pid" >/dev/null 2>&1 || true
+  fi
   if [[ $esp67_wpdb_proxy_pid -gt 0 ]]; then
     kill "$esp67_wpdb_proxy_pid" >/dev/null 2>&1 || true
     wait "$esp67_wpdb_proxy_pid" >/dev/null 2>&1 || true
@@ -816,6 +821,68 @@ for esp67_query_gate_case in stale normal; do
   esp67_query_gate_phase restore "$esp67_query_gate_case" | tee "$report_root/esp67-query-gate-${esp67_query_gate_case}-restored.log"
   assert_http esp31-public-150x150.jpg 200
 done
+
+# #67: distinguish "SQL already holds the InnoDB row" from "SQL is
+# still queued in a TCP relay". Killing PHP releases flock before a delayed
+# packet is forwarded to MySQL. Without SQL-time ticket gating, old Core
+# can write AFTER ticket GC and READY publication.
+esp67_hold_marks="$fixture_root/esp67-hold-marks"
+mkdir -p "$esp67_hold_marks"
+python3 -u tests/issue-67-hold-mysql-query-proxy.py 33310 "$esp67_hold_marks" \
+  >"$report_root/esp67-delayed-packet-proxy.log" 2>&1 &
+esp67_hold_proxy_pid=$!
+for attempt in $(seq 1 100); do
+  if grep -q ESP67_PROXY_READY "$report_root/esp67-delayed-packet-proxy.log"; then break; fi
+  sleep 0.1
+done
+grep -q ESP67_PROXY_READY "$report_root/esp67-delayed-packet-proxy.log"
+for esp67_delayed_case in network-unsafe network-gated; do
+  rm -f "$esp67_hold_marks/packet-received" \
+    "$esp67_hold_marks/packet-release" "$esp67_hold_marks/packet-done"
+  esp67_flock_phase setup "$esp67_delayed_case" | tee "$report_root/esp67-delayed-\${esp67_delayed_case}-setup.log"
+  docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+    ESP67_FLOCK_PHASE=writer ESP67_FLOCK_SCENARIO="$esp67_delayed_case" \
+    ESP67_FLOCK_PROXY_HOST=host.docker.internal:33310 \
+    php "$esp67_flock_php" >"$report_root/esp67-delayed-\${esp67_delayed_case}-writer.log" 2>&1 &
+  esp67_delayed_worker=$!
+  esp67_delayed_received=0
+  for attempt in $(seq 1 150); do
+    if [[ -f "$esp67_hold_marks/packet-received" ]]; then esp67_delayed_received=1; break; fi
+    if ! kill -0 "$esp67_delayed_worker" 2>/dev/null; then break; fi
+    sleep 0.1
+  done
+  if (( esp67_delayed_received != 1 )); then
+    cat "$report_root/esp67-delayed-\${esp67_delayed_case}-writer.log" >&2
+    cat "$report_root/esp67-delayed-packet-proxy.log" >&2
+    echo "ESP67 $esp67_delayed_case SQL packet was not held in network" >&2
+    exit 1
+  fi
+  esp67_delayed_pid="$(cat "$fixture_root/wordpress/wp-content/uploads/.esp67-flock/pid")"
+  docker exec "$container" kill -KILL "$esp67_delayed_pid"
+  if wait "$esp67_delayed_worker"; then
+    echo 'ESP67 expected killed network-packet PHP worker' >&2
+    exit 1
+  fi
+  esp67_flock_phase recover "$esp67_delayed_case" | tee "$report_root/esp67-delayed-\${esp67_delayed_case}-reaped.log"
+  assert_http esp31-public-150x150.jpg 200
+  touch "$esp67_hold_marks/packet-release"
+  esp67_packet_replied=0
+  for attempt in $(seq 1 150); do
+    if [[ -f "$esp67_hold_marks/packet-done" ]]; then esp67_packet_replied=1; break; fi
+    sleep 0.1
+  done
+  if (( esp67_packet_replied != 1 )); then
+    cat "$report_root/esp67-delayed-packet-proxy.log" >&2
+    echo "ESP67 $esp67_delayed_case delayed MySQL response not observed" >&2
+    exit 1
+  fi
+  esp67_flock_phase network_verify "$esp67_delayed_case" | tee "$report_root/esp67-delayed-\${esp67_delayed_case}-verified.log"
+  assert_http esp31-public-150x150.jpg 200
+  esp67_flock_phase restore "$esp67_delayed_case" | tee "$report_root/esp67-delayed-\${esp67_delayed_case}-restored.log"
+  assert_http esp31-public-150x150.jpg 200
+done
+cat "$report_root/esp67-delayed-packet-proxy.log"
+echo 'PASS: ESP67 PHP lifetime and canonical-row locks alone cannot fence network-queued SQL; server token blocks replay'
 
 # #67: server-side UPDATE may still be in flight after PHP SIGKILL;
 # observe it and separately lock canonical row before declaring recovery safe.
