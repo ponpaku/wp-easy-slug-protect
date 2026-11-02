@@ -769,6 +769,49 @@ for esp67_global_race_mode in dirty pending gated; do
   assert_http esp31-public-150x150.jpg 200
 done
 
+# #67: a lost MySQL named lock or expired timer does not prove that
+# a PHP writer has terminated. Live worker is paused INSIDE WordPress's
+# pre-SQL hook; kill only its independent liveness session, perform unsafe
+# recovery, then let Core write AFTER recovery. Anonymous HTTP must show the
+# stale-public counterexample. Restore fixture immediately afterward.
+esp67_gc_php="/var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-issue-67-unsafe-auto-gc-ci.php"
+esp67_gc_phase() {
+  docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+    ESP67_GC_PHASE="$1" php "$esp67_gc_php"
+}
+esp67_gc_phase setup | tee "$report_root/esp67-gc-setup.log"
+esp67_gc_phase writer >"$report_root/esp67-gc-writer.log" 2>&1 &
+esp67_gc_worker=$!
+esp67_gc_signal="$fixture_root/wordpress/wp-content/uploads/.esp67-auto-gc"
+esp67_gc_started=0
+for attempt in $(seq 1 120); do
+  if [[ -f "$esp67_gc_signal/started" ]]; then esp67_gc_started=1; break; fi
+  if ! kill -0 "$esp67_gc_worker" 2>/dev/null; then break; fi
+  sleep 0.2
+done
+if (( esp67_gc_started != 1 )); then
+  cat "$report_root/esp67-gc-writer.log" >&2
+  echo 'ESP67 auto-GC counterexample worker did not enter pre-SQL hook' >&2
+  exit 1
+fi
+esp67_gc_phase reap | tee "$report_root/esp67-gc-unsafe-reap.log"
+assert_http esp31-public-150x150.jpg 200
+docker exec "$container" touch /var/www/html/wp-content/uploads/.esp67-auto-gc/resume
+if ! wait "$esp67_gc_worker"; then
+  cat "$report_root/esp67-gc-writer.log" >&2
+  exit 1
+fi
+cat "$report_root/esp67-gc-writer.log"
+esp67_gc_phase verify | tee "$report_root/esp67-gc-late-writer.log"
+esp67_gc_http="$(curl -sS -o "$fixture_root/http-probe-body" -w '%{http_code}' \
+  'http://127.0.0.1:8094/wp-content/uploads/esp31-public-150x150.jpg')"
+echo "ESP67_UNSAFE_AUTO_GC_HTTP $esp67_gc_http"
+[[ "$esp67_gc_http" == 200 ]]
+cmp -s "$fixture_root/http-probe-body" "$fixture_root/wordpress/wp-content/uploads/esp31-public-150x150.jpg"
+echo 'ESP67_UNSAFE_AUTO_GC_P0: named-lock loss did not mean PHP was dead'
+esp67_gc_phase restore | tee "$report_root/esp67-gc-restored.log"
+assert_http esp31-public-150x150.jpg 200
+
 # R02: measure fresh independent Apache media requests, including the Core
 # SELECT VERSION() and optional get_option SQL outside the 1-query owner lookup.
 docker exec "$container" mkdir -p /var/www/html/wp-content/mu-plugins
