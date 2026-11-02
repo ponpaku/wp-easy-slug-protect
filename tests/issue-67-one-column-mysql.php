@@ -166,6 +166,23 @@ try {
     check67($value['canonical_value'] === 'private' && row67($a)['status'] === 'ready',
         'COUNTEREXAMPLE: replay of canonical write alone leaves READY without fence');
     echo "EXPECTED LIMITATION #67: one-column set does NOT solve caller transaction lost on reconnect\n";
+    // Two-connection durable fencing has an important lock-order constraint:
+    // if the caller has already locked the state row, an independent guard
+    // cannot commit a durable fence on that same row before the caller commits.
+    $a->begin_transaction();
+    $a->query('SELECT revision FROM esp67_state_probe WHERE attachment_id=123 FOR UPDATE');
+    $b->query('SET SESSION innodb_lock_wait_timeout=1');
+    $blocked = false;
+    try {
+        $b->query("UPDATE esp67_state_probe SET status='dirty' WHERE attachment_id=123");
+    } catch (mysqli_sql_exception $e) {
+        $blocked = (int)$e->getCode() === 1205;
+    } finally {
+        $a->rollback();
+    }
+    check67($blocked, 'independent durable fence blocks if caller transaction already owns state row');
+    echo "EXPECTED LIMITATION #67: out-of-band fencing must run before caller locks state (or fail closed)\n";
+
     echo "RESULT #67: SQL idempotence YES; overlap YES; crash recovery NO; external transaction retry NO\n";
 } finally {
     $clean = db67();
