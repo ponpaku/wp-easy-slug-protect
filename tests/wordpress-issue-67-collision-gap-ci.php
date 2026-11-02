@@ -83,6 +83,40 @@ $meta['sizes']['esp67_collision']=[
     'file'=>$public,'width'=>150,'height'=>150,'mime-type'=>'image/jpeg'
 ];
 $pre_seen=false;$killed=false;$out_of_band=false;
+if ($mode==='fenced') {
+    // Proof of a separately COMMITTED fence and candidate reservation before
+    // the normal ESP priority-5 guard obtains a state row lock inside the
+    // caller-owned transaction. Doing this at priority 7 is TOO LATE and
+    // deadlocks; do not translate this diagnostic directly into production.
+    $independent_guard=static function($check,$post_id,$meta_key) use (
+        $id,$state,$files,$public,&$out_of_band
+    ) {
+        if ((int)$post_id!==$id || $meta_key!=='_wp_attachment_metadata')return $check;
+        $conn=esp67_direct_conn();
+        $conn->begin_transaction();
+        try {
+            $row=$conn->query("SELECT revision FROM $state WHERE attachment_id=".(int)$id.
+                ' FOR UPDATE')->fetch_assoc();
+            if (!$row)throw new RuntimeException('No state row for durable fence');
+            $revision=(int)$row['revision']+1;
+            $conn->query("UPDATE $state SET status='dirty',
+                revision=$revision,pending_count=pending_count+1 WHERE attachment_id=".(int)$id);
+            $hash=hash('sha256',$public);
+            $st=$conn->prepare("INSERT INTO $files
+                (path_hash,file_path,attachment_id,generation,protected_path_id)
+                VALUES(?,?,?,?,'')");
+            $st->bind_param('ssii',$hash,$public,$id,$revision);
+            $st->execute();
+            $conn->commit();
+            $out_of_band=true;
+        } catch(Throwable $e) {
+            $conn->rollback();
+            throw $e;
+        } finally { $conn->close(); }
+        return $check;
+    };
+    add_filter('update_post_metadata',$independent_guard,3,5);
+}
 $probe=static function($check,$post_id,$meta_key) use(
     $id,$state,$files,$public,$mode,&$pre_seen,&$killed,&$out_of_band,$wpdb
 ) {
@@ -98,30 +132,6 @@ $probe=static function($check,$post_id,$meta_key) use(
         throw new RuntimeException('pre-hook did not stage collision under external transaction');
     }
     $pre_seen=true;
-    if ($mode==='fenced') {
-        // Emulate out-of-band durable fence+reservation, in ONE independent
-        // transaction. We deliberately do not use the caller-owned WP DB
-        // connection: rollback after a network fault must NOT erase the fence.
-        $conn=esp67_direct_conn();
-        $conn->begin_transaction();
-        try {
-            // ATTENTION: the current PHP transaction holds the state row lock
-            // already. A durable fence here would BLOCK/DEADLOCK. To avoid
-            // silently treating a timeout as a pass, report the limitation.
-            $conn->query('SET SESSION innodb_lock_wait_timeout=2');
-            $q=$conn->prepare("UPDATE $state SET status='dirty',revision=revision+1
-                WHERE attachment_id=?");
-            $q->bind_param('i',$id);
-            $q->execute();
-            $conn->commit();
-            $out_of_band=true;
-        } catch(Throwable $e) {
-            $conn->rollback();
-            echo 'ESP67_OUT_OF_BAND_LOCK_BLOCKED '.wp_json_encode([
-                'class'=>get_class($e),'error'=>$e->getMessage()
-            ])."\n";
-        } finally { $conn->close(); }
-    }
     $session=(int)$wpdb->get_var('SELECT CONNECTION_ID()');
     $killer=esp67_direct_conn();
     $killer->query('KILL CONNECTION '.$session);
@@ -133,7 +143,10 @@ esp67_require($wpdb->query('START TRANSACTION')!==false,
     'external transaction started');
 add_filter('update_post_metadata',$probe,7,5);
 try { $updated=wp_update_attachment_metadata($id,$meta); }
-finally { remove_filter('update_post_metadata',$probe,7); }
+finally {
+    remove_filter('update_post_metadata',$probe,7);
+    if ($mode==='fenced')remove_filter('update_post_metadata',$independent_guard,3);
+}
 esp67_require($pre_seen&&$killed&&$updated!==false,
     'actual Core write returned success after forced reconnection');
 $independent=esp67_direct_conn();
