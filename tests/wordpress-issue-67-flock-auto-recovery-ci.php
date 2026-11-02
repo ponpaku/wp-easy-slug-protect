@@ -106,7 +106,10 @@ if($phase==='setup'){
                     END IF;
                 END IF;
             END";
-        fl67_check($db->query($ddl)!==false,
+        $created=$db->query($ddl);
+        if($created===false)
+            echo "ESP67_TRIGGER_DDL_ERROR ".$db->errno.' '.$db->error."\n";
+        fl67_check($created!==false,
             'test-only WP postmeta BEFORE UPDATE trigger installed');
     }
     $db->close();
