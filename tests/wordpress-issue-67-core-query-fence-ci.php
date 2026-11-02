@@ -139,10 +139,16 @@ $rewrite=0;
 $query_filter=static function($sql)use($wpdb,$state,$id,$case,$started,$resume,&$rewrite){
  if(stripos($sql,$wpdb->postmeta)!==false)
   echo 'ESP67_SQL_GATE_SEEN '.preg_replace('/\s+/',' ',substr($sql,0,300))."\n";
- $table=preg_quote($wpdb->postmeta,'/');
- if(!preg_match('/^UPDATE\s+(?:\x60)?'.$table.'(?:\x60)?\s+SET\s+(.+?)\s+WHERE\s+(.+)$/is',
-  trim($sql),$hit))return $sql;
- if(!str_contains($hit[2],'meta_id'))return $sql;
+ if(!str_starts_with(ltrim($sql),'UPDATE ') ||
+    stripos($sql,$wpdb->postmeta)===false)return $sql;
+ // Wide probe-only parse; not a production SQL parser.
+ if(!preg_match('/^UPDATE\s+.+?\s+SET\s+(.+)\s+WHERE\s+(.+)$/is',
+  trim($sql),$hit)){
+  echo "ESP67_SQL_GATE_UNRECOGNIZED_UPDATE\n";return $sql;
+ }
+ if(!str_contains($hit[2],'meta_id')){
+  echo "ESP67_SQL_GATE_NO_METAID_IN_WHERE\n";return $sql;
+ }
  $rewrite++;
  // Same SQL must enforce ticket at MySQL commit, not just PHP precheck.
  $gated="UPDATE {$wpdb->postmeta} AS m
