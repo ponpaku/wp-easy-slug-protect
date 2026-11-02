@@ -86,11 +86,11 @@ if($phase==='setup'){
     $db->query("UPDATE $state SET esp67_flock_ids='[]' WHERE attachment_id=$id");
     if(in_array($scenario,['network-trigger','trigger-normal'],true)){
         $trigger=$wpdb->prefix.'esp67_update_ticket_check';
-        $db->query("DROP TRIGGER IF EXISTS \`$trigger\`");
+        $db->query("DROP TRIGGER IF EXISTS `$trigger`");
         // Test-only server-side auth fence on genuine Core UPDATE.
         // Unlike query-filter SQL rewriting this runs no matter whether the
         // WordPress SQL arrived before or after PHP died / was replayed.
-        $ddl="CREATE TRIGGER \`$trigger\` BEFORE UPDATE ON {$wpdb->postmeta}
+        $ddl="CREATE TRIGGER `$trigger` BEFORE UPDATE ON {$wpdb->postmeta}
             FOR EACH ROW BEGIN
                 DECLARE n INT DEFAULT 0;
                 IF NEW.post_id=$id
@@ -118,7 +118,7 @@ if($phase==='setup'){
 if($phase==='restore'){
     if(in_array($scenario,['network-trigger','trigger-normal'],true)){
         $db=fl67_db();
-        $db->query("DROP TRIGGER IF EXISTS \`{$wpdb->prefix}esp67_update_ticket_check\`");
+        $db->query("DROP TRIGGER IF EXISTS `{$wpdb->prefix}esp67_update_ticket_check`");
         $db->close();
     }
     $m=wp_get_attachment_metadata($id,true);
