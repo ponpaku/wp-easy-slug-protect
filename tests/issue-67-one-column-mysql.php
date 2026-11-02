@@ -183,6 +183,61 @@ try {
     check67($blocked, 'independent durable fence blocks if caller transaction already owns state row');
     echo "EXPECTED LIMITATION #67: out-of-band fencing must run before caller locks state (or fail closed)\n";
 
+
+    // Proposed PRODUCTION-safe global coverage publication uses a conditional
+    // CAS rather than a DB trigger. Test on both MySQL 8 and MariaDB 10.11.
+    // Audit starts with a snapshot of epoch 11, then an independent WP writer
+    // registers a global ID, bumping epoch and keeping coverage dirty.
+    $a->query("INSERT INTO esp67_state_probe
+        (attachment_id,status,revision,pending_count,active_mutations)
+        VALUES(0,'dirty',11,0,'[]')");
+    $baseline = $a->query("SELECT revision FROM esp67_state_probe
+        WHERE attachment_id=0")->fetch_assoc();
+    $audit_epoch = (int)$baseline['revision'];
+    $pub = $a->prepare("UPDATE esp67_state_probe SET status='ready'
+        WHERE attachment_id=0 AND revision=? AND status='dirty'
+          AND pending_count=0 AND BINARY active_mutations=BINARY '[]'");
+    $pub->bind_param('i',$audit_epoch);
+
+    $b->begin_transaction();
+    $registered = $b->query("UPDATE esp67_state_probe SET
+        status='dirty',revision=revision+1,pending_count=1,
+        active_mutations='[\"G1\"]'
+        WHERE attachment_id=0 AND revision=11
+          AND pending_count=0 AND active_mutations='[]'");
+    check67($registered && $b->affected_rows===1,
+        'independent global writer registered ID before canonical operation');
+    $b->commit();
+    $pub->execute();
+    check67($pub->affected_rows===0,
+        'stale pre-write audit epoch cannot publish READY after global ID registration');
+    $audit_epoch=12;
+    $pub->execute();
+    check67($pub->affected_rows===0,
+        'even fresh audit epoch refuses READY while a global ticket is pending');
+
+    // A malformed READY row must NOT grant access just because status looks
+    // correct. Product resolver should check status+count+set consistently.
+    $b->query("UPDATE esp67_state_probe SET status='ready'
+        WHERE attachment_id=0 AND revision=12");
+    $coverage = $a->query("SELECT (status='ready' AND
+        pending_count=0 AND BINARY active_mutations=BINARY '[]') AS allowed
+        FROM esp67_state_probe WHERE attachment_id=0")->fetch_assoc();
+    check67((int)$coverage['allowed']===0,
+        'resolver-side complete predicate refuses malformed READY with active global ticket');
+    $b->query("UPDATE esp67_state_probe SET status='dirty',
+        revision=revision+1,pending_count=0,active_mutations='[]'
+        WHERE attachment_id=0 AND revision=12");
+    $audit_epoch=13;
+    $pub->execute();
+    check67($pub->affected_rows===1,
+        'after final global ID removal, fresh audit epoch can publish READY');
+    $pub->execute();
+    check67($pub->affected_rows===0,
+        'same audited publication replay has no duplicate side effect');
+    $pub->close();
+    echo "PASS #67 GLOBAL SQL: READY CAS and resolver predicate block audit/write race on real DB\n";
+
     echo "RESULT #67: SQL idempotence YES; overlap YES; crash recovery NO; external transaction retry NO\n";
 } finally {
     $clean = db67();
