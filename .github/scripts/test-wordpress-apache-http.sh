@@ -23,7 +23,7 @@ esp67_hold_proxy_pid=0
 cleanup() {
   # Capture the failing command's status BEFORE any proxy teardown changes $?.
   local result=$?
-  if [[ $esp67_hold_proxy_pid -gt 0 ]]; then
+  if [[ ${esp67_hold_proxy_pid:-0} -gt 0 ]]; then
     kill "$esp67_hold_proxy_pid" >/dev/null 2>&1 || true
     wait "$esp67_hold_proxy_pid" >/dev/null 2>&1 || true
   fi
