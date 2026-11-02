@@ -124,26 +124,6 @@ g67_check(is_array($meta)&&!isset($meta['sizes']['esp67_global_race']),
     'protected owner originally lacks shared public path');
 $meta['sizes']['esp67_global_race']=[
     'file'=>$public,'width'=>150,'height'=>150,'mime-type'=>'image/jpeg'];
-$guard=static function($check,$post_id,$meta_key)use($id,$key,$state,$mode,$guarded){
-    if((int)$post_id!==$id||$meta_key!==$key)return $check;
-    // Simulate independent global coverage invalidation PRIOR to Core update.
-    // This deliberately has no global mutation-set publication CAS.
-    $db=g67_db();$db->begin_transaction();
-    try {
-        $value=in_array($mode,['pending','gated'],true)?'pending_count=pending_count+1,':'';
-        $db->query("UPDATE $state SET $value status='dirty',revision=revision+1,
-            audit_cursor=0 WHERE attachment_id=0");
-        g67_check($db->affected_rows===1,'independent global dirty committed');
-        $db->commit();
-    }catch(Throwable $e){$db->rollback();throw $e;}
-    finally{$db->close();}
-    file_put_contents($guarded,'dirty');
-    $until=microtime(true)+35;
-    while(!file_exists("$guarded.done")&&microtime(true)<$until)usleep(100000);
-    // The audit worker will create resume, not guarded.done. Keep no
-    // asynchronous marker dependency beyond the explicit resume below.
-    return $check;
-};
 $pause=static function($check,$post_id,$meta_key)use($id,$key,$guarded,$resume){
     if((int)$post_id!==$id||$meta_key!==$key)return $check;
     g67_check(file_exists($guarded),'prewrite independently committed fence visible');
@@ -167,7 +147,7 @@ $fast_guard=static function($check,$post_id,$meta_key)use($id,$key,$state,$mode,
     if((int)$post_id!==$id||$meta_key!==$key)return $check;
     $db=g67_db();$db->begin_transaction();
     try {
-        $count_sql=$mode==='pending'?'pending_count=pending_count+1,':'';
+        $count_sql=in_array($mode,['pending','gated'],true)?'pending_count=pending_count+1,':'';
         $db->query("UPDATE $state SET $count_sql status='dirty',
              revision=revision+1,audit_cursor=0 WHERE attachment_id=0");
         g67_check($db->affected_rows===1,'independent global fence COMMIT before Core SQL');
