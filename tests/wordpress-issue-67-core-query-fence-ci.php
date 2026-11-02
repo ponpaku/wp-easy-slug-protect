@@ -137,6 +137,8 @@ $pre=static function($check,$post_id,$meta_key)use($id,$state,$files,$public){
 add_filter('update_post_metadata',$pre,3,5);
 $rewrite=0;
 $query_filter=static function($sql)use($wpdb,$state,$id,$case,$started,$resume,&$rewrite){
+ if(stripos($sql,$wpdb->postmeta)!==false)
+  echo 'ESP67_SQL_GATE_SEEN '.preg_replace('/\s+/',' ',substr($sql,0,300))."\n";
  $table=preg_quote($wpdb->postmeta,'/');
  if(!preg_match('/^UPDATE\s+(?:\x60)?'.$table.'(?:\x60)?\s+SET\s+(.+?)\s+WHERE\s+(.+)$/is',
   trim($sql),$hit))return $sql;
@@ -163,7 +165,7 @@ finally{
  remove_filter('query',$query_filter,PHP_INT_MAX);
  remove_filter('update_post_metadata',$pre,3);
 }
-qg67_check($rewrite>=1,'actual Core wpdb UPDATE passed through SQL gate');
 echo 'ESP67_SQL_GATE_CORE_RETURN '.json_encode($ok)."\n";
+qg67_check($rewrite>=1,'actual Core wpdb UPDATE passed through SQL gate');
 file_put_contents($completed,'done');
 echo "ESP67_SQL_GATE_WORKER_DONE\n";
