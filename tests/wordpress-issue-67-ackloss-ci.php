@@ -48,6 +48,8 @@ try {
     if ((int)$client->get_var('SELECT 1')!==1) {
         throw new RuntimeException('ESP67 ACK wpdb proxy preliminary SQL failed');
     }
+    $session_before=(int)$client->get_var('SELECT CONNECTION_ID()');
+    if($session_before<=0)throw new RuntimeException('ESP67 ACK initial server session missing');
     $sql = $client->prepare(
         "UPDATE $table
          SET revision=revision+1,pending_count=1,active_mutations=%s
@@ -58,6 +60,10 @@ try {
     );
     $return = $client->query($sql);
     $wpdb_error = $client->last_error;
+    $session_after=(int)$client->get_var('SELECT CONNECTION_ID()');
+    if($session_after<=0||$session_after===$session_before)
+        throw new RuntimeException('ESP67 ACK WordPress transport did not change server-side connection ID');
+    echo "ESP67_WPDB_RECONNECTED_SERVER_SESSION ".$session_before." -> ".$session_after."\n";
     $actual = $wpdb->get_row(
         "SELECT revision,pending_count,active_mutations FROM $table WHERE attachment_id=123",
         ARRAY_A
@@ -71,6 +77,8 @@ try {
     }
     echo 'ESP67_WPDB_ACK_LOSS ' . wp_json_encode([
         'wordpress_wpdb' => true,
+        'server_session_before' => $session_before,
+        'server_session_after' => $session_after,
         'wpdb_return_after_reconnect' => $return,
         'wpdb_error' => $wpdb_error,
         'stored_revision' => (int)$actual['revision'],
