@@ -20,7 +20,7 @@
 declare(strict_types=1);
 $mode = getenv('ESP67_COLLISION_PHASE');
 if (getenv('ESP_ALLOW_DISPOSABLE_DB') !== '1' || !getenv('ESP_WP_ROOT') ||
-    !in_array($mode, ['vulnerable','fenced','restore'], true) ||
+    !in_array($mode, ['vulnerable','fenced','restore','inspect'], true) ||
     !defined('STDOUT')) { exit(1); }
 define('WP_DISABLE_FATAL_ERROR_HANDLER', true);
 require rtrim(getenv('ESP_WP_ROOT'), '/') . '/wp-load.php';
@@ -50,6 +50,20 @@ function esp67_require($yes,$reason) {
 }
 function esp67_direct_conn(): mysqli {
     return new mysqli(DB_HOST,DB_USER,DB_PASSWORD,DB_NAME);
+}
+if ($mode==='inspect') {
+    $independent=esp67_direct_conn();
+    $inspect_state=$independent->query("SELECT attachment_id,status,revision,pending_count,
+        active_generation FROM $state WHERE attachment_id=".(int)$id)->fetch_assoc();
+    $inspect_files=$independent->query("SELECT generation,protected_path_id
+        FROM $files WHERE attachment_id=".(int)$id."
+        AND path_hash='".hash('sha256',$public)."'")->fetch_all(MYSQLI_ASSOC);
+    $independent->close();
+    echo 'ESP67_COLLISION_INSPECT '.wp_json_encode([
+        'state'=>$inspect_state,'candidate_file_rows'=>$inspect_files,
+        'public_resolver'=>ESP_Media_Index::resolve($path)
+    ])."\n";
+    exit(0);
 }
 if ($mode==='restore') {
     esp67_require(file_exists($resume),'HTTP witness signaled');
