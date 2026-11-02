@@ -98,7 +98,8 @@ if($phase==='setup'){
                     SELECT COUNT(*) INTO n FROM $state
                       WHERE attachment_id=$id AND status='dirty'
                         AND pending_count=1
-                        AND BINARY esp67_flock_ids=BINARY '[\"FLOCK\"]'
+                        AND IFNULL(JSON_CONTAINS(esp67_flock_ids,
+                            JSON_QUOTE(@esp67_wp_actor)),0)=1
                       FOR UPDATE;
                     IF n<>1 THEN
                         SIGNAL SQLSTATE '45000'
@@ -309,7 +310,7 @@ $m['sizes']['esp67_flock']=['file'=>$public,'width'=>150,'height'=>150,
 remove_filter('update_post_metadata',['ESP_Media_Index','guard_update_meta'],5);
 remove_action('updated_post_meta',['ESP_Media_Index','on_meta_saved'],20);
 $pre=static function($check,$post_id,$meta_key)use(
-    $id,$state,$files,$public,$ready,$resume
+    $id,$state,$files,$public,$ready,$resume,$scenario
 ){
     if((int)$post_id!==$id||$meta_key!=='_wp_attachment_metadata')return $check;
     $db=fl67_db();$db->begin_transaction();
@@ -328,6 +329,14 @@ $pre=static function($check,$post_id,$meta_key)use(
         $db->commit();
     }catch(Throwable $e){$db->rollback();throw $e;}
     finally{$db->close();}
+    if(in_array($scenario,['trigger-normal','network-trigger'],true)){
+        // Bind a per-writer identity on the VERY SAME backend connection
+        // that will run Core's SQL. A wpdb reconnect drops this session var,
+        // so reconnect replay fails closed unless explicitly re-registered.
+        global $wpdb;
+        fl67_check($wpdb->query("SET @esp67_wp_actor='FLOCK'")!==false,
+            'real WordPress DB session carries actor ID for trigger');
+    }
     file_put_contents($ready,'ready');
     $until=microtime(true)+60;
     while(!file_exists($resume)&&microtime(true)<$until)usleep(100000);
