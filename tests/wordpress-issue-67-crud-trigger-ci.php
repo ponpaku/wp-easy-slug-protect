@@ -48,8 +48,17 @@ try {
  }
  c67_assert($wpdb->query("SET @esp67_actor_id='ACTOR_A'")!==false,
     'WordPress caller sets per-writer identity');
- c67_assert(add_post_meta($id,$key,'created',true)!==false,
-    'Core add_post_meta INSERT passes valid actor');
+ $actor=$wpdb->get_var('SELECT @esp67_actor_id');
+ $gateRow=$db->query("SELECT owner_id,actor FROM $gate WHERE owner_id=$id")->fetch_assoc();
+ echo 'ESP67_CRUD_DIAG preinsert '.wp_json_encode(['actor'=>$actor,'gate'=>$gateRow])."\n";
+ $created=add_post_meta($id,$key,'created',true);
+ if($created===false)
+    echo 'ESP67_CRUD_DIAG insert_fail '.wp_json_encode([
+       'wpdb_error'=>$wpdb->last_error,
+       'sql'=>$wpdb->last_query,
+       'present'=>get_post_meta($id,$key,false)
+    ])."\n";
+ c67_assert($created!==false,'Core add_post_meta INSERT passes valid actor');
  c67_assert(get_post_meta($id,$key,true)==='created',
     'valid INSERT changed canonical metadata');
  c67_assert(update_post_meta($id,$key,'updated')!==false,
