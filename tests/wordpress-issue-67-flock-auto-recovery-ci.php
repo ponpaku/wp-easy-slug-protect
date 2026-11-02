@@ -13,7 +13,7 @@ declare(strict_types=1);
 $phase=getenv('ESP67_FLOCK_PHASE');
 $scenario=getenv('ESP67_FLOCK_SCENARIO');
 if(getenv('ESP_ALLOW_DISPOSABLE_DB')!=='1'||!getenv('ESP_WP_ROOT')||
-    !in_array($phase,['setup','writer','recover','verify','restore'],true)||
+    !in_array($phase,['setup','writer','recover','verify','kill_db','restore'],true)||
     !in_array($scenario,['crash','db-loss'],true))exit(1);
 define('WP_DISABLE_FATAL_ERROR_HANDLER',true);
 require rtrim(getenv('ESP_WP_ROOT'),'/').'/wp-load.php';
@@ -82,6 +82,15 @@ if($phase==='restore'){
     fl67_check(ESP_Media_Index::resolve($path)['status']==='resolved',
         'public path restored after recovery');
     echo "ESP67_FLOCK_RESTORED\n";exit(0);
+}
+if($phase==='kill_db'){
+    fl67_check(file_exists($ready),'PHP writer still blocked in actual pre-SQL hook');
+    $session=(int)file_get_contents($sessionfile);
+    fl67_check($session>0,'optional liveness connection ID recorded');
+    $killer=fl67_db();$killer->query('KILL CONNECTION '.$session);
+    $killer->close();
+    // KILL above does NOT kill the PHP request or its stable local flock.
+    echo "ESP67_FLOCK_MYSQL_LIVENESS_LOST\n";exit(0);
 }
 if($phase==='recover'){
     $lock=fopen($lockfile,'c+');
