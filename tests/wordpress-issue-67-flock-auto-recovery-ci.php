@@ -14,7 +14,7 @@ $phase=getenv('ESP67_FLOCK_PHASE');
 $scenario=getenv('ESP67_FLOCK_SCENARIO');
 if(getenv('ESP_ALLOW_DISPOSABLE_DB')!=='1'||!getenv('ESP_WP_ROOT')||
     !in_array($phase,['inode','setup','writer','recover','verify','kill_db','sql_observe','http_verify','network_verify','kill_backend','restore'],true)||
-    !in_array($scenario,['crash','db-loss','inflight','network-unsafe','network-gated','network-killed','network-trigger'],true))exit(1);
+    !in_array($scenario,['crash','db-loss','inflight','network-unsafe','network-gated','network-killed','network-trigger','trigger-normal'],true))exit(1);
 define('WP_DISABLE_FATAL_ERROR_HANDLER',true);
 require rtrim(getenv('ESP_WP_ROOT'),'/').'/wp-load.php';
 $_SERVER['SERVER_SOFTWARE']='Apache/2.4';
@@ -84,7 +84,7 @@ if($phase==='setup'){
     fl67_check($db->query("ALTER TABLE $state ADD COLUMN esp67_flock_ids LONGTEXT NULL")!==false,
         'test-only mutation ID column added');
     $db->query("UPDATE $state SET esp67_flock_ids='[]' WHERE attachment_id=$id");
-    if($scenario==='network-trigger'){
+    if(in_array($scenario,['network-trigger','trigger-normal'],true)){
         $trigger=$wpdb->prefix.'esp67_update_ticket_check';
         $db->query("DROP TRIGGER IF EXISTS \`$trigger\`");
         // Test-only server-side auth fence on genuine Core UPDATE.
@@ -113,7 +113,7 @@ if($phase==='setup'){
     echo "ESP67_FLOCK_SETUP\n";exit(0);
 }
 if($phase==='restore'){
-    if($scenario==='network-trigger'){
+    if(in_array($scenario,['network-trigger','trigger-normal'],true)){
         $db=fl67_db();
         $db->query("DROP TRIGGER IF EXISTS \`{$wpdb->prefix}esp67_update_ticket_check\`");
         $db->close();
@@ -264,7 +264,7 @@ if($phase==='recover'){
     fl67_check(ESP_Media_Index::reindex_attachment($id),
         'rebuild under exclusive filesystem lock from canonical WordPress meta');
     $r=ESP_Media_Index::resolve($path);
-    if(in_array($scenario,['crash','network-unsafe','network-gated','network-killed','network-trigger'],true)){
+    if(in_array($scenario,['crash','network-unsafe','network-gated','network-killed','network-trigger','trigger-normal'],true)){
         fl67_check($r['status']==='resolved'&&
             ($r['protected_path_id']??null)==='',
             'crashed pre-write worker restored old public path');
@@ -332,7 +332,7 @@ $pre=static function($check,$post_id,$meta_key)use(
     return $check;
 };
 add_filter('update_post_metadata',$pre,3,5);
-if(in_array($scenario,['network-unsafe','network-gated','network-killed','network-trigger'],true)){
+if(in_array($scenario,['network-unsafe','network-gated','network-killed','network-trigger','trigger-normal'],true)){
     $endpoint=getenv('ESP67_FLOCK_PROXY_HOST');
     if(!is_string($endpoint)||!str_contains($endpoint,':'))
         throw new RuntimeException('missing disposable network relay');
