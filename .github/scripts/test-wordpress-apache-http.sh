@@ -769,6 +769,54 @@ for esp67_global_race_mode in dirty pending gated; do
   assert_http esp31-public-150x150.jpg 200
 done
 
+# #67: alternative to PHP-liveness fencing: Core's exact SQL itself
+# JOINs the durable active ticket. A timed-out ticket may be reaped while
+# PHP is paused BEFORE SQL dispatch; the subsequent Core UPDATE must change
+# zero rows even if the SQL is eventually sent or wpdb retries it.
+esp67_query_gate_php="/var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-issue-67-core-query-fence-ci.php"
+esp67_query_gate_phase() {
+  docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+    ESP67_QUERY_GATE_PHASE="$1" ESP67_QUERY_GATE_CASE="$2" php "$esp67_query_gate_php"
+}
+for esp67_query_gate_case in stale normal; do
+  esp67_query_gate_phase setup "$esp67_query_gate_case" | tee "$report_root/esp67-query-gate-${esp67_query_gate_case}-setup.log"
+  if [[ "$esp67_query_gate_case" == stale ]]; then
+    esp67_query_gate_phase writer "$esp67_query_gate_case" >"$report_root/esp67-query-gate-stale-writer.log" 2>&1 &
+    esp67_query_gate_worker=$!
+    esp67_query_gate_signal="$fixture_root/wordpress/wp-content/uploads/.esp67-query-gate"
+    esp67_query_gate_ready=0
+    for attempt in $(seq 1 120); do
+      if [[ -f "$esp67_query_gate_signal/started" ]]; then esp67_query_gate_ready=1; break; fi
+      if ! kill -0 "$esp67_query_gate_worker" 2>/dev/null; then break; fi
+      sleep 0.2
+    done
+    if (( esp67_query_gate_ready != 1 )); then
+      cat "$report_root/esp67-query-gate-stale-writer.log" >&2
+      echo 'ESP67 Core SQL token writer not paused before Core statement' >&2
+      exit 1
+    fi
+    esp67_query_gate_phase reap "$esp67_query_gate_case" | tee "$report_root/esp67-query-gate-reap.log"
+    assert_http esp31-public-150x150.jpg 200
+    docker exec "$container" touch /var/www/html/wp-content/uploads/.esp67-query-gate/resume
+    if ! wait "$esp67_query_gate_worker"; then
+      cat "$report_root/esp67-query-gate-stale-writer.log" >&2
+      echo 'ESP67 Core token-gated SQL worker failed' >&2
+      exit 1
+    fi
+    cat "$report_root/esp67-query-gate-stale-writer.log"
+  else
+    esp67_query_gate_phase writer "$esp67_query_gate_case" | tee "$report_root/esp67-query-gate-normal-writer.log"
+  fi
+  esp67_query_gate_phase verify "$esp67_query_gate_case" | tee "$report_root/esp67-query-gate-${esp67_query_gate_case}-verified.log"
+  if [[ "$esp67_query_gate_case" == normal ]]; then
+    assert_http esp31-public-150x150.jpg 503
+  else
+    assert_http esp31-public-150x150.jpg 200
+  fi
+  esp67_query_gate_phase restore "$esp67_query_gate_case" | tee "$report_root/esp67-query-gate-${esp67_query_gate_case}-restored.log"
+  assert_http esp31-public-150x150.jpg 200
+done
+
 # #67: server-side UPDATE may still be in flight after PHP SIGKILL;
 # observe it and separately lock canonical row before declaring recovery safe.
 esp67_inflight_php="/var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-issue-67-db-inflight-ci.php"
