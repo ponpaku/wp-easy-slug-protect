@@ -13,7 +13,7 @@
 declare(strict_types=1);
 $phase=getenv('ESP67_INTEGRATED_PHASE');
 if (getenv('ESP_ALLOW_DISPOSABLE_DB')!=='1'||!getenv('ESP_WP_ROOT')||
-    !in_array($phase,['setup','disconnect','txhold','txcommit','crash_seed','crash_inspect','crash_recover','restore'],true))exit(1);
+    !in_array($phase,['setup','disconnect','txhold','txcommit','autocommit','noop','fence_blocked','crash_seed','crash_inspect','crash_recover','restore'],true))exit(1);
 define('WP_DISABLE_FATAL_ERROR_HANDLER',true);
 require rtrim(getenv('ESP_WP_ROOT'),'/').'/wp-load.php';
 $_SERVER['SERVER_SOFTWARE']='Apache/2.4';
@@ -56,7 +56,9 @@ function int67_row(mysqli $db,string $state,int $id,bool $lock=false):array {
     $r['ids']=$ids;return $r;
 }
 function int67_register(string $state,string $files,int $id,string $ticket,string $public):void {
-    $db=int67_db();$db->begin_transaction();
+    $db=int67_db();
+    $db->query('SET SESSION innodb_lock_wait_timeout=1');
+    $db->begin_transaction();
     try {
         $r=int67_row($db,$state,$id,true);
         if(in_array($ticket,$r['ids'],true)) {
@@ -214,13 +216,18 @@ if($phase==='restore') {
 $meta=wp_get_attachment_metadata($id,true);
 int67_check(is_array($meta)&&!isset($meta['sizes']['esp67_integrated']),
     'clean baseline before test');
-$meta['sizes']['esp67_integrated']=[
-    'file'=>$public,'width'=>150,'height'=>150,'mime-type'=>'image/jpeg'];
-$ticket=$phase==='txhold'?'TX_LOCK':($phase==='txcommit'?'TX_COMMIT':'ACK_LOSS');
+if($phase!=='noop' && $phase!=='fence_blocked') {
+    $meta['sizes']['esp67_integrated']=[
+        'file'=>$public,'width'=>150,'height'=>150,'mime-type'=>'image/jpeg'];
+}
+$ticket=$phase==='txhold'?'TX_LOCK':($phase==='txcommit'?'TX_COMMIT':
+    ($phase==='autocommit'?'AUTOCOMMIT':($phase==='noop'?'NOOP':'ACK_LOSS')));
 int67_remove_legacy_hooks();
 $guard=int67_guard($state,$files,$id,$key,$public,$ticket);
 add_filter('update_post_metadata',$guard,3,5);
-int67_check($wpdb->query('START TRANSACTION')!==false,'external caller transaction started');
+if(!in_array($phase,['autocommit','noop','fence_blocked'],true)) {
+    int67_check($wpdb->query('START TRANSACTION')!==false,'external caller transaction started');
+}
 if($phase==='disconnect') {
     $killed=false;
     $kill=static function($check,$post_id,$meta_key) use($id,$key,&$killed) {
@@ -235,13 +242,75 @@ if($phase==='disconnect') {
     };
     add_filter('update_post_metadata',$kill,7,5);
 }
+if($phase==='fence_blocked') {
+    // A foreign plugin has already locked the state row. The separate
+    // connection cannot persist a fence; the correct outcome is to reject
+    // WordPress's canonical write, not admit it with an in-TX marker.
+    $foreign=int67_db();
+    $foreign->begin_transaction();
+    $foreign->query("SELECT revision FROM $state WHERE attachment_id=$id FOR UPDATE");
+    $caught=false;
+    try {
+        wp_update_attachment_metadata($id,$meta);
+    } catch(Throwable $e) {
+        $caught=true;
+        echo 'ESP67_INTEGRATED_EXPECTED_FENCE_FAILURE '.get_class($e)."\n";
+    } finally {
+        $foreign->rollback();
+        $foreign->close();
+        remove_filter('update_post_metadata',$guard,3);
+    }
+    int67_check($caught,'guard refused canonical write because independent fence could not commit');
+    $db=int67_db();
+    $r=int67_row($db,$state,$id);$db->close();
+    int67_check($r['ids']===[]&&$r['status']==='ready',
+        'fence rejection left no partial mutation ID');
+    int67_check(ESP_Media_Index::resolve($file)['status']==='resolved',
+        'rejected write preserved previous public authorization');
+    echo "ESP67_INTEGRATED_FENCE_BLOCKED_SAFE\n";exit(0);
+}
 try {
     $ok=wp_update_attachment_metadata($id,$meta);
 } finally {
     remove_filter('update_post_metadata',$guard,3);
     if($phase==='disconnect')remove_filter('update_post_metadata',$kill,7);
 }
+if($phase==='noop') {
+    int67_check($ok===false,'WordPress correctly returned false for no-op metadata write');
+    $db=int67_db();
+    $r=int67_row($db,$state,$id);$db->close();
+    int67_check($r['ids']===[$ticket]&&$r['status']==='dirty',
+        'no-op still registered durable ID before Core returned false');
+    int67_check(int67_retire($state,$id,$ticket),'no-op retires ticket explicitly');
+    int67_check(ESP_Media_Index::reindex_attachment($id),
+        'no-op permits rebuilding original canonical metadata');
+    int67_check(ESP_Media_Index::resolve($file)['status']==='resolved',
+        'no-op leaves public owner correct');
+    echo "ESP67_INTEGRATED_NOOP_SAFE\n";exit(0);
+}
 int67_check($ok!==false,'Core update_post_meta accepted the canonical mutation');
+if($phase==='autocommit') {
+    $db=int67_db();
+    $r=int67_row($db,$state,$id);
+    $canonical=$db->query("SELECT meta_value FROM {$wpdb->postmeta}
+        WHERE post_id=$id AND meta_key='_wp_attachment_metadata'
+        ORDER BY meta_id LIMIT 1")->fetch_assoc();
+    $db->close();
+    $actual=$canonical?maybe_unserialize($canonical['meta_value']):null;
+    int67_check(is_array($actual)&&
+        ($actual['sizes']['esp67_integrated']['file']??null)===$public &&
+        $r['ids']===[$ticket] && $r['status']==='dirty',
+        'autocommit Core write completed while independent ID stayed active');
+    int67_check(!ESP_Media_Index::reindex_attachment($id),
+        'autocommit cannot reindex while ID active');
+    int67_check(int67_retire($state,$id,$ticket),
+        'autocommit release after Core write succeeds');
+    int67_check(ESP_Media_Index::reindex_attachment($id),
+        'autocommit rebuild sees committed conflicting owner');
+    int67_check(ESP_Media_Index::resolve($file)['status']==='ambiguous',
+        'autocommit protected collision is denied');
+    echo "ESP67_INTEGRATED_AUTOCOMMIT_SAFE\n";exit(0);
+}
 if($phase==='txcommit') {
     int67_check(!int67_retire($state,$id,$ticket,1),
         'early completion cannot overtake uncommitted metadata');
