@@ -14,7 +14,7 @@ $phase=getenv('ESP67_FLOCK_PHASE');
 $scenario=getenv('ESP67_FLOCK_SCENARIO');
 if(getenv('ESP_ALLOW_DISPOSABLE_DB')!=='1'||!getenv('ESP_WP_ROOT')||
     !in_array($phase,['inode','setup','writer','recover','verify','kill_db','sql_observe','http_verify','network_verify','kill_backend','restore'],true)||
-    !in_array($scenario,['crash','db-loss','inflight','network-unsafe','network-gated','network-killed','network-trigger','trigger-normal'],true))exit(1);
+    !in_array($scenario,['crash','db-loss','inflight','network-unsafe','network-gated','network-killed','network-trigger','trigger-normal','trigger-reconnect'],true))exit(1);
 define('WP_DISABLE_FATAL_ERROR_HANDLER',true);
 require rtrim(getenv('ESP_WP_ROOT'),'/').'/wp-load.php';
 $_SERVER['SERVER_SOFTWARE']='Apache/2.4';
@@ -84,7 +84,7 @@ if($phase==='setup'){
     fl67_check($db->query("ALTER TABLE $state ADD COLUMN esp67_flock_ids LONGTEXT NULL")!==false,
         'test-only mutation ID column added');
     $db->query("UPDATE $state SET esp67_flock_ids='[]' WHERE attachment_id=$id");
-    if(in_array($scenario,['network-trigger','trigger-normal'],true)){
+    if(in_array($scenario,['network-trigger','trigger-normal','trigger-reconnect'],true)){
         $trigger=$wpdb->prefix.'esp67_update_ticket_check';
         $db->query("DROP TRIGGER IF EXISTS `$trigger`");
         // Test-only server-side auth fence on genuine Core UPDATE.
@@ -268,7 +268,7 @@ if($phase==='recover'){
     fl67_check(ESP_Media_Index::reindex_attachment($id),
         'rebuild under exclusive filesystem lock from canonical WordPress meta');
     $r=ESP_Media_Index::resolve($path);
-    if(in_array($scenario,['crash','network-unsafe','network-gated','network-killed','network-trigger'],true)){
+    if(in_array($scenario,['crash','network-unsafe','network-gated','network-killed','network-trigger','trigger-reconnect'],true)){
         fl67_check($r['status']==='resolved'&&
             ($r['protected_path_id']??null)==='',
             'crashed pre-write worker restored old public path');
@@ -329,13 +329,24 @@ $pre=static function($check,$post_id,$meta_key)use(
         $db->commit();
     }catch(Throwable $e){$db->rollback();throw $e;}
     finally{$db->close();}
-    if(in_array($scenario,['trigger-normal','network-trigger'],true)){
+    if(in_array($scenario,['trigger-normal','network-trigger','trigger-reconnect'],true)){
         // Bind a per-writer identity on the VERY SAME backend connection
         // that will run Core's SQL. A wpdb reconnect drops this session var,
         // so reconnect replay fails closed unless explicitly re-registered.
         global $wpdb;
         fl67_check($wpdb->query("SET @esp67_wp_actor='FLOCK'")!==false,
             'real WordPress DB session carries actor ID for trigger');
+    }
+    if($scenario==='trigger-reconnect'){
+        // A real WordPress Core reconnect loses MySQL session variables.
+        // The trigger must reject the replay; observe user-visible failure.
+        $backend=(int)$wpdb->get_var('SELECT CONNECTION_ID()');
+        fl67_check($backend>0,'original wpdb connection identified');
+        $killer=fl67_db();
+        fl67_check($killer->query('KILL CONNECTION '.$backend)!==false,
+            'killed original wpdb connection just before Core SQL');
+        $killer->close();
+        echo "ESP67_TRIGGER_WPDB_SESSION_KILLED\n";
     }
     file_put_contents($ready,'ready');
     $until=microtime(true)+60;
@@ -407,7 +418,22 @@ finally{
         remove_filter('query',$gate,PHP_INT_MAX);
     @$liveness->close();
 }
-fl67_check($ok!==false,'WordPress completed canonical postmeta write');
+if($scenario==='trigger-reconnect'){
+    // Core must report its retry as failed (no session token after reconnect).
+    fl67_check($ok===false,
+        'WordPress Core cannot commit after reconnect lost session token');
+    $db=fl67_db();
+    $canonical=$db->query("SELECT meta_value FROM {$wpdb->postmeta}
+        WHERE post_id=$id AND meta_key='_wp_attachment_metadata'
+        ORDER BY meta_id LIMIT 1")->fetch_assoc();
+    $db->close();
+    $actual=$canonical?maybe_unserialize($canonical['meta_value']):null;
+    fl67_check(($actual['sizes']['esp67_flock']['file']??null)!==$public,
+        'trigger rejects Core replay instead of writing without an actor ID');
+    echo "ESP67_TRIGGER_WPDB_RECONNECT_FAIL_CLOSED\n";
+}else{
+    fl67_check($ok!==false,'WordPress completed canonical postmeta write');
+}
 file_put_contents($written,'done');
 // The shared flock is deliberately NOT manually released early; the PHP
 // request must terminate before exclusive recovery can proceed.
