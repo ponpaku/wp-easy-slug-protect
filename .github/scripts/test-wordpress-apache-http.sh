@@ -592,6 +592,13 @@ esp67_integrated_phase() {
     ESP67_INTEGRATED_PHASE="$1" php "$esp67_integrated_php"
 }
 esp67_integrated_phase setup | tee "$report_root/esp67-integrated-setup.log"
+esp67_integrated_phase fence_blocked | tee "$report_root/esp67-integrated-fence-blocked.log"
+esp67_integrated_phase noop | tee "$report_root/esp67-integrated-noop.log"
+esp67_integrated_phase autocommit | tee "$report_root/esp67-integrated-autocommit.log"
+assert_http esp31-public-150x150.jpg 403
+esp67_integrated_phase restore | tee "$report_root/esp67-integrated-autocommit-restored.log"
+assert_http esp31-public-150x150.jpg 200
+esp67_integrated_phase setup | tee "$report_root/esp67-integrated-after-autocommit-setup.log"
 esp67_integrated_phase txhold | tee "$report_root/esp67-integrated-txhold.log"
 # A simulated crash must preserve an ID across independent WP requests.
 esp67_integrated_phase crash_seed | tee "$report_root/esp67-integrated-crash-seed.log"
