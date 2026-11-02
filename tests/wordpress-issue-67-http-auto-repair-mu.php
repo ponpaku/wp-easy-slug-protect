@@ -8,9 +8,13 @@
  */
 defined('ABSPATH') || exit;
 add_action('init', static function (): void {
+    error_log('ESP67_HTTP_MU_INIT uri='.($_SERVER['REQUEST_URI']??'<none>'));
     if (strpos(DB_NAME,'esp_')!==0) return;
     if (!str_contains((string)($_SERVER['REQUEST_URI']??''),'esp31-public-150x150.jpg')) return;
-    if (!class_exists('ESP_Media_Index')||!ESP_Media_Index::enabled())return;
+    if (!class_exists('ESP_Media_Index')||!ESP_Media_Index::enabled()){
+        error_log('ESP67_HTTP_MU_NO_INDEX_CLASS_OR_ENABLED');
+        return;
+    }
     global $wpdb;
     $id=(int)$wpdb->get_var($wpdb->prepare("SELECT ID FROM {$wpdb->posts}
         WHERE post_type='attachment' AND post_title=%s LIMIT 1",'ESP31 protected JPEG'));
@@ -18,10 +22,17 @@ add_action('init', static function (): void {
     $state=ESP_Media_Index::state_table();
     $r=$wpdb->get_row($wpdb->prepare("SELECT status,pending_count FROM $state
         WHERE attachment_id=%d",$id),ARRAY_A);
-    if(!is_array($r)||$r['status']!=='dirty'||(int)$r['pending_count']!==1)return;
+    if(!is_array($r)||$r['status']!=='dirty'||(int)$r['pending_count']!==1){
+        error_log('ESP67_HTTP_MU_STATE '.wp_json_encode($r));
+        return;
+    }
     // setup() has to place this opt-in marker; no other environment may run it.
     $root=wp_upload_dir()['basedir'].'/.esp67-flock';
-    if(!is_file("$root/enable-http-repair"))return;
+    if(!is_file("$root/enable-http-repair")){
+        error_log('ESP67_HTTP_MU_MARKER_NOT_FOUND '.$root);
+        return;
+    }
+    error_log('ESP67_HTTP_MU_ATTEMPT_REPAIR');
     $file="$root/".hash('sha256',DB_NAME."\0".$wpdb->prefix."\0".$id).'.lock';
     $lock=@fopen($file,'c+');
     if(!is_resource($lock))return;
