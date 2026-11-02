@@ -856,6 +856,19 @@ esp67_flock_phase restore trigger-normal | tee "$report_root/esp67-trigger-norma
 assert_http esp31-public-150x150.jpg 200
 echo 'PASS: actual WordPress Core UPDATE works with server-side trigger when ticket remains active'
 
+# #67: MySQL session variables deliberately fail closed across real
+# WordPress wpdb reconnect. Check the operational cost of trigger identity:
+# a valid operation can return false after an involuntary DB disconnect,
+# but it must neither mutate canonical metadata nor require manual repair.
+esp67_flock_phase setup trigger-reconnect | tee "$report_root/esp67-trigger-reconnect-setup.log"
+docker exec "$container" touch /var/www/html/wp-content/uploads/.esp67-flock/resume
+esp67_flock_phase writer trigger-reconnect | tee "$report_root/esp67-trigger-reconnect-writer.log"
+esp67_flock_phase recover trigger-reconnect | tee "$report_root/esp67-trigger-reconnect-recovered.log"
+assert_http esp31-public-150x150.jpg 200
+esp67_flock_phase restore trigger-reconnect | tee "$report_root/esp67-trigger-reconnect-restored.log"
+assert_http esp31-public-150x150.jpg 200
+echo 'PASS: WordPress wpdb reconnect under trigger safely refuses untagged SQL and automatically recovers'
+
 # #67: distinguish "SQL already holds the InnoDB row" from "SQL is
 # still queued in a TCP relay". Killing PHP releases flock before a delayed
 # packet is forwarded to MySQL. Without SQL-time ticket gating, old Core
