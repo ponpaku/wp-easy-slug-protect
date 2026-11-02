@@ -540,6 +540,11 @@ esp67_collision_phase() {
     ESP67_COLLISION_PHASE="$1" php "$esp67_collision_php"
 }
 for esp67_collision_mode in vulnerable fenced; do
+  # Each mode must wait for its OWN writer. A stale marker from the prior
+  # successful phase would cause the HTTP witness to race ahead of the fence.
+  docker exec "$container" rm -f \
+    /var/www/html/wp-content/uploads/.esp67-collision/injected \
+    /var/www/html/wp-content/uploads/.esp67-collision/resume
   esp67_collision_phase "$esp67_collision_mode" >"$report_root/esp67-collision-${esp67_collision_mode}.log" 2>&1 &
   esp67_collision_worker=$!
   esp67_collision_signal="$fixture_root/wordpress/wp-content/uploads/.esp67-collision"
