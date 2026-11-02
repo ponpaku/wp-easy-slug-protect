@@ -117,7 +117,7 @@ if($phase==='setup'){
     echo "ESP67_FLOCK_SETUP\n";exit(0);
 }
 if($phase==='restore'){
-    if(in_array($scenario,['network-trigger','trigger-normal'],true)){
+    if(in_array($scenario,['network-trigger','trigger-normal','trigger-reconnect'],true)){
         $db=fl67_db();
         $db->query("DROP TRIGGER IF EXISTS `{$wpdb->prefix}esp67_update_ticket_check`");
         $db->close();
