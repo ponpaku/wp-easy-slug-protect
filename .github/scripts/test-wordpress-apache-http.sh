@@ -822,6 +822,11 @@ for esp67_query_gate_case in stale normal; do
   assert_http esp31-public-150x150.jpg 200
 done
 
+esp67_flock_php="/var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-issue-67-flock-auto-recovery-ci.php"
+esp67_flock_phase() {
+  docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+    ESP67_FLOCK_PHASE="$1" ESP67_FLOCK_SCENARIO="$2" php "$esp67_flock_php"
+}
 # #67: distinguish "SQL already holds the InnoDB row" from "SQL is
 # still queued in a TCP relay". Killing PHP releases flock before a delayed
 # packet is forwarded to MySQL. Without SQL-time ticket gating, old Core
@@ -884,11 +889,6 @@ done
 cat "$report_root/esp67-delayed-packet-proxy.log"
 echo 'PASS: ESP67 PHP lifetime and canonical-row locks alone cannot fence network-queued SQL; server token blocks replay'
 
-esp67_flock_php="/var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-issue-67-flock-auto-recovery-ci.php"
-esp67_flock_phase() {
-  docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
-    ESP67_FLOCK_PHASE="$1" ESP67_FLOCK_SCENARIO="$2" php "$esp67_flock_php"
-}
 # #67: server-side UPDATE may still be in flight after PHP SIGKILL;
 # observe it and separately lock canonical row before declaring recovery safe.
 esp67_inflight_php="/var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-issue-67-db-inflight-ci.php"
