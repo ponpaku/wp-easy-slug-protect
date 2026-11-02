@@ -593,6 +593,18 @@ esp67_integrated_phase() {
 }
 esp67_integrated_phase setup | tee "$report_root/esp67-integrated-setup.log"
 esp67_integrated_phase txhold | tee "$report_root/esp67-integrated-txhold.log"
+# A simulated crash must preserve an ID across independent WP requests.
+esp67_integrated_phase crash_seed | tee "$report_root/esp67-integrated-crash-seed.log"
+assert_http esp31-public-150x150.jpg 503
+esp67_integrated_phase crash_inspect | tee "$report_root/esp67-integrated-crash-inspect.log"
+esp67_integrated_phase crash_recover | tee "$report_root/esp67-integrated-crash-recover.log"
+assert_http esp31-public-150x150.jpg 200
+# A normal external COMMIT must keep the fence until transaction completion.
+esp67_integrated_phase txcommit | tee "$report_root/esp67-integrated-txcommit.log"
+assert_http esp31-public-150x150.jpg 403
+esp67_integrated_phase restore | tee "$report_root/esp67-integrated-after-commit-restored.log"
+assert_http esp31-public-150x150.jpg 200
+esp67_integrated_phase setup | tee "$report_root/esp67-integrated-re-setup.log"
 docker exec "$container" rm -f \
   /var/www/html/wp-content/uploads/.esp67-integrated/ready \
   /var/www/html/wp-content/uploads/.esp67-integrated/resume
