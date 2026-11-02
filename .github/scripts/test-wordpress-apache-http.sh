@@ -841,7 +841,7 @@ for attempt in $(seq 1 100); do
   sleep 0.1
 done
 grep -q ESP67_PROXY_READY "$report_root/esp67-delayed-packet-proxy.log"
-for esp67_delayed_case in network-unsafe network-gated network-killed; do
+for esp67_delayed_case in network-unsafe network-gated network-killed network-trigger; do
   rm -f "$esp67_hold_marks/packet-received" \
     "$esp67_hold_marks/packet-release" "$esp67_hold_marks/packet-done"
   esp67_flock_phase setup "$esp67_delayed_case" | tee "$report_root/esp67-delayed-${esp67_delayed_case}-setup.log"
@@ -913,6 +913,9 @@ for esp67_delayed_case in network-unsafe network-gated network-killed; do
       echo "ESP67 $esp67_delayed_case delayed MySQL response not observed" >&2
       exit 1
     fi
+  fi
+  if [[ "$esp67_delayed_case" == network-trigger ]]; then
+    grep -q 'ESP67_PROXY_LATE_SERVER_REPLY 255' "$report_root/esp67-delayed-packet-proxy.log"
   fi
   esp67_flock_phase network_verify "$esp67_delayed_case" | tee "$report_root/esp67-delayed-${esp67_delayed_case}-verified.log"
   assert_http esp31-public-150x150.jpg 200
