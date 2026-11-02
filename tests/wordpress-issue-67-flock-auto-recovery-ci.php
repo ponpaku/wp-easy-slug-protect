@@ -130,8 +130,21 @@ if($phase==='recover'){
     // Invariant: all legitimate writers held LOCK_SH before registration and
     // continue holding it to request termination; exclusive lock excludes
     // any late writer after this point. Future writers must acquire SH first.
-    $db=fl67_db();$db->begin_transaction();
+    $db=fl67_db();$db->query('SET SESSION innodb_lock_wait_timeout=2');$db->begin_transaction();
     try {
+        // PHP death releases flock, but an already-dispatched Core SQL may
+        // still be running on the MySQL server. Wait on canonical InnoDB
+        // locks BEFORE clearing the ticket; the separate in-flight test
+        // demonstrates a post-SIGKILL commit is possible.
+        $post_lock=$db->query("SELECT ID FROM {$GLOBALS['wpdb']->posts}
+            WHERE ID=$id FOR UPDATE");
+        if($post_lock===false)throw new RuntimeException('canonical post row lock failed');
+        $meta_lock=$db->query("SELECT meta_id FROM {$GLOBALS['wpdb']->postmeta}
+            WHERE post_id=$id AND meta_key IN ('_wp_attached_file',
+            '_wp_attachment_metadata','_esp_protection')
+            FOR UPDATE");
+        if($meta_lock===false)throw new RuntimeException('canonical postmeta row lock failed');
+        fl67_check(true,'recovery acquired canonical post and metadata locks');
         $r=$db->query("SELECT revision,pending_count,esp67_flock_ids
             FROM $state WHERE attachment_id=$id FOR UPDATE")->fetch_assoc();
         fl67_check($r['esp67_flock_ids']==='["FLOCK"]' &&
