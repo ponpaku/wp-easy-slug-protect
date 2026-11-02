@@ -531,6 +531,51 @@ docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html
   php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-issue-67-tx-loss-ci.php \
   | tee "$report_root/q01-wpdb-transaction-reconnect.log"
 
+# #67: after an external transaction drops the ESP fence, a protected
+# attachment can acquire an already-public owner's derivative path. Probe
+# real Apache anonymous response BEFORE the faulty PHP worker finishes.
+esp67_collision_php="/var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-issue-67-collision-gap-ci.php"
+esp67_collision_phase() {
+  docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+    ESP67_COLLISION_PHASE="$1" php "$esp67_collision_php"
+}
+for esp67_collision_mode in vulnerable fenced; do
+  esp67_collision_phase "$esp67_collision_mode" >"$report_root/esp67-collision-${esp67_collision_mode}.log" 2>&1 &
+  esp67_collision_worker=$!
+  esp67_collision_signal="$fixture_root/wordpress/wp-content/uploads/.esp67-collision"
+  esp67_collision_ready=0
+  for attempt in $(seq 1 120); do
+    if [[ -f "$esp67_collision_signal/injected" ]]; then esp67_collision_ready=1; break; fi
+    if ! kill -0 "$esp67_collision_worker" 2>/dev/null; then break; fi
+    sleep 0.2
+  done
+  if (( esp67_collision_ready != 1 )); then
+    cat "$report_root/esp67-collision-${esp67_collision_mode}.log" >&2
+    echo "ESP67 $esp67_collision_mode failed before HTTP witness" >&2
+    exit 1
+  fi
+  esp67_collision_http="$(curl -sS -o "$fixture_root/http-probe-body" -w '%{http_code}' \
+    'http://127.0.0.1:8094/wp-content/uploads/esp31-public-150x150.jpg')"
+  echo "ESP67_COLLISION_HTTP $esp67_collision_mode $esp67_collision_http" | tee -a "$report_root/esp67-collision-${esp67_collision_mode}.log"
+  if [[ "$esp67_collision_mode" == vulnerable ]]; then
+    [[ "$esp67_collision_http" == 200 ]]
+    grep -q ESP31_PUBLIC "$fixture_root/http-probe-body"
+    echo 'ESP67_REAL_WP_PUBLIC_BYPASS: protected new owner missing, anonymous HTTP returned file body'
+  else
+    [[ "$esp67_collision_http" == 503 ]]
+    ! grep -q ESP31_PUBLIC "$fixture_root/http-probe-body"
+    echo 'ESP67_OUT_OF_BAND_FENCE: anonymous HTTP blocked during lost caller transaction'
+  fi
+  docker exec "$container" touch /var/www/html/wp-content/uploads/.esp67-collision/resume
+  if ! wait "$esp67_collision_worker"; then
+    cat "$report_root/esp67-collision-${esp67_collision_mode}.log" >&2
+    exit 1
+  fi
+  cat "$report_root/esp67-collision-${esp67_collision_mode}.log"
+  esp67_collision_phase restore | tee "$report_root/esp67-collision-${esp67_collision_mode}-restored.log"
+  assert_http esp31-public-150x150.jpg 200
+done
+
 # R02: measure fresh independent Apache media requests, including the Core
 # SELECT VERSION() and optional get_option SQL outside the 1-query owner lookup.
 docker exec "$container" mkdir -p /var/www/html/wp-content/mu-plugins
