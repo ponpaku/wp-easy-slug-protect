@@ -273,6 +273,50 @@ try {
     check67($replay===true && $b->affected_rows===0,
         'SQL replay after token retirement cannot modify canonical owner');
 
+
+    // DB-trigger alternative for hosts with CREATE TRIGGER privilege. Unlike
+    // query-filter SQL rewriting, this gate checks the persisted mutation ID
+    // at the database execution boundary. This test runs against BOTH MySQL
+    // 8 and MariaDB 10.11; production rollout is a separate question.
+    change67($a,'TRIGGER_G',true);
+    $trigger_sql="CREATE TRIGGER esp67_trigger_probe
+        BEFORE UPDATE ON esp67_meta_probe
+        FOR EACH ROW BEGIN
+           DECLARE n INT DEFAULT 0;
+           IF NEW.attachment_id=123 THEN
+              SELECT COUNT(*) INTO n FROM esp67_state_probe
+              WHERE attachment_id=123 AND status='dirty'
+                 AND pending_count=1
+                 AND BINARY active_mutations=BINARY '[\"TRIGGER_G\"]'
+              FOR UPDATE;
+              IF n<>1 THEN
+                  SIGNAL SQLSTATE '45000'
+                    SET MESSAGE_TEXT='expired mutation ID refused by trigger';
+              END IF;
+           END IF;
+        END";
+    $a->query($trigger_sql);
+    $a->query("UPDATE esp67_meta_probe
+        SET canonical_value='trigger_valid' WHERE attachment_id=123");
+    $value = $b->query("SELECT canonical_value FROM esp67_meta_probe
+        WHERE attachment_id=123")->fetch_assoc();
+    check67($value['canonical_value']==='trigger_valid',
+        'real DB trigger permits valid ID canonical update without SQL rewriting');
+    change67($a,'TRIGGER_G',false);
+    $denied = false;
+    try {
+        $a->query("UPDATE esp67_meta_probe
+            SET canonical_value='trigger_stale' WHERE attachment_id=123");
+    } catch(mysqli_sql_exception $e) {
+        $denied=($e->getSqlState()==='45000');
+    }
+    $value=$b->query("SELECT canonical_value FROM esp67_meta_probe
+        WHERE attachment_id=123")->fetch_assoc();
+    check67($denied && $value['canonical_value']==='trigger_valid',
+        'real DB trigger refuses stale post-recovery UPDATE at execution time');
+    $a->query("DROP TRIGGER IF EXISTS esp67_trigger_probe");
+    echo "PASS #67 TRIGGER SQL: actual InnoDB write fence on MySQL/MariaDB\n";
+
     echo "RESULT #67: SQL idempotence YES; overlap YES; crash recovery NO; external transaction retry NO\n";
 } finally {
     $clean = db67();
