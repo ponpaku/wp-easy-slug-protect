@@ -65,3 +65,9 @@ WordPressプラグイン向けに残る実装候補は次の3種類。
 全対象のWordPress APIに対する**DB側書込み拒否の保証、同一主系DB、トリガー導入／削除権限、schema migration／rollback、クラッシュ・再接続・SQL遅延・複数ワーカー、局所HTTP自動復旧、負荷試験**のCI受入条件が全件PASSして初めてstrict製品化できる。
 
 **今回選んだ「設計候補」はテーブル2つ＋state列1つを維持する。ただし追加トリガー・WordPressフック再設計・復旧プロトコルは不可欠で、「列1つだけで修正完了」とはしない。**
+
+### DB文字列比較の互換性（追加検証）
+
+[Actions #41438463842](https://github.com/ponpaku/wp-easy-slug-protect/actions/runs/41438463842) の実WordPress＋MySQL 8検証で、試験用トリガーは正常に作成されたが、actor IDを単純な`VARCHAR`で照合すると **`utf8mb4_0900_ai_ci` とWordPress側 `utf8mb4_unicode_520_ci` のcollation不一致**により正当な`add_post_meta()`まで失敗した。これを「安全だから問題ない」とみなすのは可用性要件に反する。
+
+本番のactor-IDは **バイナリ固定長（例：ランダム32バイト）**とし、MySQLセッション変数を`CAST(... AS BINARY)`で比較することで照合規則への依存を排除する方針。修正版の全CRUDテスト結果がPASSするまでは、この改善は**候補**であり実証済みとは呼ばない。
