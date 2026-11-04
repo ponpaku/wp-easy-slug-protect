@@ -878,6 +878,14 @@ docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html
   | tee "$report_root/esp67-crud-trigger-check.log"
 assert_http esp31-public-150x150.jpg 200
 
+# #67 experimental coverage: BEFORE wp_posts INSERT/UPDATE/DELETE and
+# BEFORE wp_postmeta INSERT/UPDATE/DELETE, including by-mid key renames.
+# Test-only gate table/triggers are removed by the PHP fixture.
+docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+  php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-issue-67-write-coverage-trigger-ci.php \
+  | tee "$report_root/esp67-write-coverage-trigger.log"
+assert_http esp31-public-150x150.jpg 200
+
 # #67: distinguish "SQL already holds the InnoDB row" from "SQL is
 # still queued in a TCP relay". Killing PHP releases flock before a delayed
 # packet is forwarded to MySQL. Without SQL-time ticket gating, old Core
