@@ -1144,13 +1144,22 @@ final class ESP_Media_Index {
                         $protection = $value['meta_value'];
                     }
                 }
-                if (!is_string($protection) || strlen($protection) > 191 ||
-                    !is_string($attached) || !self::valid_path($attached)) {
-                    throw new RuntimeException('invalid attachment metadata');
-                }
-                $paths = self::enumerate($attached, $metadata);
-                if (!is_array($paths) || !$paths) {
-                    throw new RuntimeException('invalid derivative metadata');
+                if (!$values) {
+                    // A Core attachment INSERT can COMMIT before any ownership
+                    // meta exists. Zero canonical claims are valid only when
+                    // ALL three owner-bearing meta keys are absent. Every later
+                    // claim must pass the DB trigger and revoke global READY.
+                    $paths = [];
+                    $protection = '';
+                } else {
+                    if (!is_string($protection) || strlen($protection) > 191 ||
+                        !is_string($attached) || !self::valid_path($attached)) {
+                        throw new RuntimeException('partial or invalid attachment metadata');
+                    }
+                    $paths = self::enumerate($attached, $metadata);
+                    if (!is_array($paths) || !$paths) {
+                        throw new RuntimeException('invalid derivative metadata');
+                    }
                 }
             }
             // Stage new rows alongside the old live generation. Never remove
@@ -1438,6 +1447,18 @@ final class ESP_Media_Index {
             } elseif ($row['meta_key'] === self::PROTECTION_META) {
                 $protection = $row['meta_value'];
             }
+        }
+        if (!$meta_rows) {
+            // Audited zero-owner attachment: no file ownership can be derived.
+            // Never apply this rule to an incomplete *nonempty* meta set.
+            $indexed = $wpdb->get_var($wpdb->prepare(
+                "SELECT attachment_id FROM $files WHERE attachment_id=%d LIMIT 1",
+                $id));
+            if ($wpdb->last_error !== '' || $indexed !== null) { return false; }
+            $after = $wpdb->get_row($wpdb->prepare(
+                "SELECT status,revision,pending_count,active_generation FROM $state
+                 WHERE attachment_id=%d", $id), ARRAY_A);
+            return $wpdb->last_error === '' && $before === $after;
         }
         if (!is_string($attached) || !self::valid_path($attached) ||
             !is_string($protection) || strlen($protection) > 191) { return false; }
