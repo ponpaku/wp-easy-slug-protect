@@ -189,6 +189,10 @@ try {
         && $row['meta_value']==='restored',
         'by-mid rename back succeeds with owner actor');
 
+    // Test the DB execution boundary rather than the *existing* PHP prehook.
+    // The production guard is deliberately bypassed in this disposable process
+    // only; no change is made to product code or to other PHP workers.
+    remove_action('pre_post_update',['ESP_Media_Index','guard_post_type_transition'],5);
     // Ordinary post -> attachment promotion is a wp_posts UPDATE, not a
     // postmeta UPDATE. The global actor is necessary before promotion.
     cov67_actor($wpdb,null);
