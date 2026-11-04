@@ -1442,6 +1442,12 @@ print("PASS: R02 independent Apache SQL counts cover strict and legacy resolver 
 PY
 docker exec "$container" rm -f /var/www/html/wp-content/mu-plugins/esp-http-sql-ci.php
 
+# #67 real schema v3 -> v4 migration on an isolated prefix, preserving
+# the live disposable site's two tables and restoring its WP options.
+docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+  php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-issue-67-schema-migration-ci.php \
+  | tee "$report_root/esp67-schema-migration.log"
+
 # R01: a normal post already carrying protection metadata is promoted to an
 # attachment via WordPress Core. A second PHP/MySQL worker and real HTTP probe
 # check the pre-write and post-Cron ownership fences.
