@@ -158,6 +158,38 @@ if (!esp_uninstall_remove_rewrite_safely()) {
 // データベースの削除処理
 global $wpdb;
 
+/**
+ * #67: WordPress Core triggers do not vanish when the plugin is deleted.
+ * Remove precisely ESP's six deterministic trigger names FIRST. If any
+ * removal fails, keep the existing state tables so surviving SQL triggers
+ * cannot reject every future WordPress media write for lack of global state.
+ */
+function esp_uninstall_cleanup_media_index() {
+    global $wpdb;
+    if (!defined('DB_NAME') || !is_string(DB_NAME) || DB_NAME === '' ||
+        !isset($wpdb->prefix) ||
+        !preg_match('/^[A-Za-z0-9_]+$/D', (string)$wpdb->prefix)) {
+        return false;
+    }
+    $base = 'esp67_' . substr(hash('sha256',
+        DB_NAME . "\0" . $wpdb->prefix), 0, 16);
+    foreach (['pi','pu','pd','mi','mu','md'] as $suffix) {
+        $name = $base . '_' . $suffix;
+        if ($wpdb->query("DROP TRIGGER IF EXISTS $name") === false ||
+            ($wpdb->last_error ?? '') !== '') { return false; }
+    }
+    foreach (['esp_media_files', 'esp_media_file_state',
+              'esp_media_files_v1', 'esp_media_file_state_v1'] as $table) {
+        $name = $wpdb->prefix . $table;
+        if ($wpdb->query("DROP TABLE IF EXISTS $name") === false ||
+            ($wpdb->last_error ?? '') !== '') { return false; }
+    }
+    return true;
+}
+if (!esp_uninstall_cleanup_media_index()) {
+    error_log('ESP Uninstall: SQL trigger removal incomplete; media index state is kept to prevent stale trigger failures. Manual DB cleanup may be required.');
+}
+
 // テーブルの削除（存在確認してから削除）
 foreach (ESP_Config::DB_TABLES as $table_name) {
     $table = $wpdb->prefix . $table_name;
@@ -176,6 +208,10 @@ delete_option('esp_media_auth_epoch');
 delete_option('esp_rewrite_policy_version');
 delete_option('esp_rewrite_last_error');
 delete_option('esp_runtime_state');
+delete_option('esp_media_index_v1_schema');
+delete_option('esp_media_index_v1_ready');
+delete_option('esp_media_index_v1_cursor');
+delete_option('esp_media_index_v1_enabled');
 delete_option('esp_runtime_verify_lock');
 delete_option('esp_integrity_last_audit');
 delete_option('esp_integrity_check_progress');
@@ -201,7 +237,8 @@ $cron_hooks = [
     'esp_media_cache_refresh',
     'esp_all_cache_refresh',
     'esp_verify_runtime_once',
-    'esp_update_retry'
+    'esp_update_retry',
+    'esp_media_index_v1_batch'
 ];
 
 foreach ($cron_hooks as $hook) {
