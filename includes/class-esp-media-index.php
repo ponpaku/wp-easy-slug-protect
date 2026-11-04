@@ -674,6 +674,11 @@ final class ESP_Media_Index {
     public static function guard_meta($check, $post_id, $meta_key, $meta_value, $reserve = true) {
         if ($check !== null || !self::relevant($meta_key) || !self::installed()) { return $check; }
         if (get_post_type((int)$post_id) !== 'attachment') { return $check; }
+        // wp_insert_attachment() writes _wp_attached_file before metadata.
+        // A global create token was committed before the first posts INSERT,
+        // so every intermediate Core meta write is already fail-closed. Do
+        // not reject incomplete but normal upload stages as bad local fences.
+        if (self::$global_creation_tickets > 0) { return null; }
         if (self::mark_dirty((int)$post_id)) {
             self::track_local((int)$post_id);
             $cross_directory = false;
@@ -856,7 +861,9 @@ final class ESP_Media_Index {
         return self::failed_pre_fence();
     }
     public static function on_meta_saved($meta_id, $post_id, $meta_key, $meta_value) {
-        if (!self::installed()) { return; }
+        if (!self::installed() || self::$global_creation_tickets > 0) { return; }
+        // All canonical creation writes are covered by state[0] DIRTY; the
+        // next full audit runs only after that global ticket is retired.
         $mid = (is_int($meta_id) || (is_string($meta_id) && ctype_digit($meta_id)))
             ? (int)$meta_id : 0;
         $was_by_mid = self::$by_mid[$mid] ?? null;
