@@ -900,7 +900,7 @@ for attempt in $(seq 1 100); do
   sleep 0.1
 done
 grep -q ESP67_PROXY_READY "$report_root/esp67-delayed-packet-proxy.log"
-for esp67_delayed_case in network-unsafe network-gated network-killed network-trigger; do
+for esp67_delayed_case in network-unsafe network-gated network-killed network-trigger network-invalidate; do
   rm -f "$esp67_hold_marks/packet-received" \
     "$esp67_hold_marks/packet-release" "$esp67_hold_marks/packet-done"
   esp67_flock_phase setup "$esp67_delayed_case" | tee "$report_root/esp67-delayed-${esp67_delayed_case}-setup.log"
@@ -977,7 +977,13 @@ for esp67_delayed_case in network-unsafe network-gated network-killed network-tr
     grep -q 'ESP67_PROXY_LATE_SERVER_REPLY 255' "$report_root/esp67-delayed-packet-proxy.log"
   fi
   esp67_flock_phase network_verify "$esp67_delayed_case" | tee "$report_root/esp67-delayed-${esp67_delayed_case}-verified.log"
-  assert_http esp31-public-150x150.jpg 200
+  if [[ "$esp67_delayed_case" == network-invalidate ]]; then
+    # The SQL COMMITTED; only its co-committed global dirty flag prevents
+    # authorization from the now-stale local owner index.
+    assert_http esp31-public-150x150.jpg 503
+  else
+    assert_http esp31-public-150x150.jpg 200
+  fi
   esp67_flock_phase restore "$esp67_delayed_case" | tee "$report_root/esp67-delayed-${esp67_delayed_case}-restored.log"
   assert_http esp31-public-150x150.jpg 200
 done
