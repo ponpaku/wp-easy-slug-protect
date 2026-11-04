@@ -157,7 +157,7 @@ if cli_schema_error="$(docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 \
 fi
 printf '%s\n' "$cli_schema_error" | grep -q 'schema preparation failed'
 [[ "$(docker exec "$container" php /opt/wp-cli.phar --allow-root --path=/var/www/html \
-  option get esp_media_index_v1_schema)" == "3" ]]
+  option get esp_media_index_v1_schema)" == "4" ]]
 [[ "$(docker exec "$container" php /opt/wp-cli.phar --allow-root --path=/var/www/html \
   option get esp_media_index_v1_ready)" == "1" ]]
 docker exec "$container" rm -f /var/www/html/wp-content/mu-plugins/esp63-schema-failure-mu.php
