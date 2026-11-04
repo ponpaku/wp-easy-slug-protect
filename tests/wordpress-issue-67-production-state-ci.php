@@ -225,8 +225,9 @@ try {
     }
     p67($addedProtection!==false,
         'Core allows protection metadata under verified Apache rewrite policy');
-    p67(p67row(0)['status']==='dirty' &&
-        (int)p67row(0)['pending_count']>0,
+    $snapshot=p67row(0);
+    echo 'ESP67_GLOBAL_PRE_COMPLETION ' . wp_json_encode($snapshot) . "\n";
+    p67($snapshot['status']==='dirty' && (int)$snapshot['pending_count']>0,
         'partially completed attachment never exposes global READY');
     ESP_Media_Index::finish_global_creations();
     p67audit();
