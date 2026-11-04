@@ -1039,11 +1039,17 @@ echo 'PASS: ESP67 aborted no-path attachment can be snapshotted as empty only wh
 # can write AFTER ticket GC and READY publication.
 esp67_hold_marks="$fixture_root/esp67-hold-marks"
 mkdir -p "$esp67_hold_marks"
-python3 -u tests/issue-67-hold-mysql-query-proxy.py 33310 "$esp67_hold_marks" \
+# CI runners can share occupied TCP ports across invocations. Reserve an
+# ephemeral port for this disposable relay, not a fixed global port.
+esp67_hold_port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
+python3 -u tests/issue-67-hold-mysql-query-proxy.py "$esp67_hold_port" "$esp67_hold_marks" \
   >"$report_root/esp67-delayed-packet-proxy.log" 2>&1 &
 esp67_hold_proxy_pid=$!
 for attempt in $(seq 1 100); do
-  if grep -q ESP67_PROXY_READY "$report_root/esp67-delayed-packet-proxy.log"; then break; fi
+  if grep -q ESP67_PROXY_READY "$report_root/esp67-delayed-packet-proxy.log" || {
+  cat "$report_root/esp67-delayed-packet-proxy.log" >&2
+  exit 1
+}; then break; fi
   sleep 0.1
 done
 grep -q ESP67_PROXY_READY "$report_root/esp67-delayed-packet-proxy.log"
@@ -1053,7 +1059,7 @@ for esp67_delayed_case in network-unsafe network-gated network-killed network-tr
   esp67_flock_phase setup "$esp67_delayed_case" | tee "$report_root/esp67-delayed-${esp67_delayed_case}-setup.log"
   docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
     ESP67_FLOCK_PHASE=writer ESP67_FLOCK_SCENARIO="$esp67_delayed_case" \
-    ESP67_FLOCK_PROXY_HOST=host.docker.internal:33310 \
+    ESP67_FLOCK_PROXY_HOST="host.docker.internal:$esp67_hold_port" \
     php "$esp67_flock_php" >"$report_root/esp67-delayed-${esp67_delayed_case}-writer.log" 2>&1 &
   esp67_delayed_worker=$!
   esp67_delayed_prewrite_ready="$fixture_root/wordpress/wp-content/uploads/.esp67-flock/ready"
