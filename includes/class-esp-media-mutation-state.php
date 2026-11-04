@@ -108,6 +108,25 @@ final class ESP_Media_Mutation_State {
             && $wpdb->last_error === '';
     }
 
+    /**
+     * Bind an exactly pre-reserved path metadata value to the SQL session.
+     * Untracked direct SQL must not borrow a valid actor to claim new paths.
+     */
+    public static function expect_path_meta($owner, $key, $value, $serialized = false) {
+        if (!in_array($key, ['_wp_attached_file','_wp_attachment_metadata'], true)) {
+            return true;
+        }
+        global $wpdb;
+        $raw = $serialized ? $value : maybe_serialize($value);
+        if (!is_string($raw)) { return false; }
+        $sql = $wpdb->prepare(
+            'SET @esp_media_expected_owner=%d,
+                 @esp_media_expected_meta_key=%s,
+                 @esp_media_expected_value_sha=%s',
+            (int)$owner, $key, hash('sha256', $raw));
+        return $wpdb->query($sql) !== false && $wpdb->last_error === '';
+    }
+
     /** Called before any canonical WordPress mutation. */
     public static function begin($id) {
         $id = (int)$id;
@@ -241,6 +260,29 @@ final class ESP_Media_Mutation_State {
                    (SELECT 1 FROM $posts WHERE ID=$ref.post_id
                      AND post_type='attachment') THEN "
                     . $check("$ref.post_id") . " END IF;";
+            }
+            if ($event !== 'DELETE') {
+                // A valid token cannot authorize a NEW path value merely
+                // because another mutation has the same owner's token.
+                // The pre-hook stages paths and binds an exact value digest.
+                // Global creation operations already hold global DIRTY.
+                $body .= "IF NEW.meta_key IN
+                  ('_wp_attached_file','_wp_attachment_metadata')
+                  AND EXISTS (SELECT 1 FROM $posts WHERE ID=NEW.post_id
+                    AND post_type='attachment')
+                  AND (SELECT pending_count FROM $state
+                    WHERE attachment_id=0)=0
+                  AND (COALESCE(@esp_media_expected_owner,-1)<>NEW.post_id
+                    OR COALESCE(@esp_media_expected_meta_key,'')<>NEW.meta_key
+                    OR COALESCE(@esp_media_expected_value_sha,'')
+                      <>COALESCE(SHA2(NEW.meta_value,256),''))
+                  THEN UPDATE $state SET status='dirty',revision=revision+1,
+                      audit_cursor=0 WHERE attachment_id=0;
+                  IF ROW_COUNT()<>1 THEN
+                     SIGNAL SQLSTATE '45000'
+                       SET MESSAGE_TEXT='ESP: cannot invalidate unreserved metadata';
+                  END IF;
+                  END IF;";
             }
             $definitions[$name] = "CREATE TRIGGER $name AFTER $event ON $meta
                 FOR EACH ROW BEGIN $body END";
