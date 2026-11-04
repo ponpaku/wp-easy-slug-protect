@@ -59,8 +59,7 @@ try {
     mig67_sql("INSERT INTO $posts(ID,post_type) VALUES(7,'attachment'),(8,'attachment')");
     mig67_sql("INSERT INTO $meta(post_id,meta_key,meta_value)
         VALUES(7,'_wp_attached_file','$path'),
-              (7,'_esp_media_protected_path_id','secret_before'),
-              (8,'_wp_attached_file','esp67-migration-stale-ticket.jpg')");
+              (7,'_esp_media_protected_path_id','secret_before')");
     mig67_sql("INSERT INTO $legacyState
       (attachment_id,status,revision,active_generation,pending_count,audit_cursor)
       VALUES(0,'ready',4,0,0,0),(7,'ready',5,5,0,0),
