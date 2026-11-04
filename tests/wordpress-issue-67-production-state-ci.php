@@ -59,6 +59,13 @@ $write=static function($value)use($wpdb,$meta,$id){
         "UPDATE $meta SET meta_value=%s WHERE post_id=%d AND meta_key=%s",
         $value,$id,'_esp_media_protected_path_id'))!==false,'Core meta SQL committed');
 };
+ // This fixture's earlier WP-CLI driver deliberately leaves the index opt-in
+// OFF. This security integration runs under real strict ON, then restores it.
+$priorIndexEnabled=(string)get_option(ESP_Media_Index::ENABLE_OPTION,'0');
+if ($priorIndexEnabled!=='1') {
+    update_option(ESP_Media_Index::ENABLE_OPTION,'1',false);
+}
+p67(ESP_Media_Index::enabled(),'strict mutation mode enabled for product E2E');
 try {
     p67(ESP_Media_Mutation_State::begin($id) &&
         ESP_Media_Mutation_State::begin($id),'two concurrent tokens registered');
@@ -241,8 +248,12 @@ try {
     @unlink($absoluteUpload);
     p67audit();
 } finally {
-    $wpdb->query('SET @esp_media_mutation_actor=NULL');
-    $write($old);
-    p67audit();
+    try {
+        $wpdb->query('SET @esp_media_mutation_actor=NULL');
+        $write($old);
+        p67audit();
+    } finally {
+        update_option(ESP_Media_Index::ENABLE_OPTION,$priorIndexEnabled,false);
+    }
 }
 echo "ESP67_PRODUCT_STATE_ONLY_IMPLEMENTATION_VERIFIED\n";
