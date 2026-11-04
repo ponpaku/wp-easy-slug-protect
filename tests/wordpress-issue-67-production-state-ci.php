@@ -212,8 +212,19 @@ try {
         'file'=>$relativeUpload,'width'=>150,'height'=>150,'sizes'=>[]
     ],true)!==false,
         'Core allows subsequent derivative metadata under same global creation');
-    p67(add_post_meta($uploadId,'_esp_media_protected_path_id','path_http',true)!==false,
-        'Core allows protection metadata during global creation');
+    // Match the real Apache environment: the authorization-cache pre-hook
+    // refuses protected-path assignment when SERVER_SOFTWARE is unknown.
+    $previousSoftware=$_SERVER['SERVER_SOFTWARE'] ?? null;
+    $_SERVER['SERVER_SOFTWARE']='Apache/2.4';
+    try {
+        $addedProtection=add_post_meta($uploadId,
+            '_esp_media_protected_path_id','path_http',true);
+    } finally {
+        if ($previousSoftware===null) unset($_SERVER['SERVER_SOFTWARE']);
+        else $_SERVER['SERVER_SOFTWARE']=$previousSoftware;
+    }
+    p67($addedProtection!==false,
+        'Core allows protection metadata under verified Apache rewrite policy');
     p67(p67row(0)['status']==='dirty' &&
         (int)p67row(0)['pending_count']>0,
         'partially completed attachment never exposes global READY');
