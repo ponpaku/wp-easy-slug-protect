@@ -2,7 +2,7 @@
 
 **2026-11-04／Draft PR #78。製品コード変更あり、未マージ、strict本番承認前。**
 
-設計正本：[Issue #67 統合仕様](issue-67-design-spec.md)。先行設計実験：[v7 state-only PoC](issue-67-state-only-prototype-v7.md)。
+設計正本：[Issue #67 統合仕様](issue-67-design-spec.md)。先行設計実験：[v7 state-only PoC（PR #77）](https://github.com/ponpaku/wp-easy-slug-protect/blob/test/issue-67-one-column-action-validation/docs/issue-67-state-only-prototype-v7.md)。
 
 ## 実装済み
 
@@ -26,11 +26,11 @@ Resolverはglobal READYに加え、global pending=0、active_mutation_idsが空�
 - `includes/class-esp-media-mutation-state.php`（新規）
 - `tests/wordpress-issue-67-production-state-ci.php`（新規、実WordPress＋実DBトリガー）
 - `tests/security-media-index-mysql.php`（stateのみの2トークン／DB応答消失によるCAS再送）
-- `tests/wordpress-media-index-cli-ci.php`、`tests/wordpress-media-index-f01-ci.php`、`tests/wordpress-issue-67-tx-loss-ci.php`、`tests/issue-63-production-benchmark.php`、`tests/fixtures/esp63-schema-failure-mu.php`、`.github/scripts/test-wordpress-apache-http.sh`（スキーマv4と新global fallbackを反映）
+- `tests/wordpress-media-index-cli-ci.php`、`tests/wordpress-media-index-f01-ci.php`、`tests/issue-63-production-benchmark.php`、`tests/fixtures/esp63-schema-failure-mu.php`、`.github/scripts/test-wordpress-apache-http.sh`（スキーマv4と新global fallbackを反映）
 
 ## 既存PoCと製品CIの分離
 
-旧PR #77の実験には「安全装置を意図的に外し、匿名HTTP200による反例が再現すること」を成功条件にしたシナリオがある。製品用DBトリガーが導入された環境でこれらを同時に動かすと、**安全なHTTP503が返ることで逆に失敗**する。旧PoCは検証専用PR #77のCI証拠として保存し、製品スキーマv4環境のApache実装CIからのみ当該実験群を条件付き除外する。製品の本物の2更新ID・失効actor・欠落actor・未予約パスSQL・新規添付E2Eと、旧F01実2ワーカー、旧Q01実wpdb再接続/ACK消失は引き続き実行する。
+旧PR #77の実験には「安全装置を意図的に外し、匿名HTTP200による反例が再現すること」を成功条件にしたシナリオがある。製品用DBトリガーが導入された環境でこれらを同時に動かすと、**安全なHTTP503が返ることで逆に失敗**する。旧PoCは検証専用PR #77のCI証拠として保存し、PR #78の差分とApache実装CIから当該実験群を削除した。製品の本物の2更新ID・失効actor・欠落actor・未予約パスSQL・新規添付E2Eと、旧F01実2ワーカー、旧Q01実wpdb/ACK消失は引き続き実行する。
 
 この切り分けは**旧PoCの実験成功＝製品の安全性保証**という誤認を避けるためでもある。新しい製品コードのクラッシュ・同時監査・遅延SQLに関する専用検証は別の受入条件として残る。
 
@@ -58,3 +58,9 @@ tests/security-uninstall-index-trigger-test.php とPHP security CI項目を追�
 **本番採用に残す重要条件**：新しい製品実装でのPHP SIGKILL／実tcp遅延SQL／actor再接続／複数ワーカー競合／監査CAS並行書込みの連結試験、旧 `_v1` 表からの実マイグレーション試験、MySQL/MariaDB CREATE TRIGGER権限・既存trigger共存確認、デッドロック時の安全な再試行、部分メタデータの復旧上限とDB外ファイル更新の脅威境界。
 
 性能チューニング、PRマージ、Issueクローズはこの実装作業では行わない。PR #62、PR #77、mainは変更しない。
+
+## AIレビュー用の差分整理
+
+PR #77の歴史的な反例・PoCの個別ファイルと比較文書はPR #78の差分から除外し、#77で保存する。PR #78は製品コード、schema移行、現行の統合・DB回帰テスト、統合仕様のみを対象とする。旧PoCの失敗条件を製品回帰の成功条件として扱わない。
+
+CIに関しては、GitHub App経由での更新後に最新コミットのActionsチェックが生成されていないことを確認している。古いコミットの成功を最新の安全性保証に流用しない。最新HEADの全CIが実行されるまではレビュー受入を未完了とする。
