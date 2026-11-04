@@ -4,8 +4,9 @@
  *
  * One column in the existing media state table, no ticket/gate table.
  * An ACK-lost SQL replay cannot consume a different writer's ticket.
- * POSIX flock is only an orphan-liveness hint on a single shared filesystem;
- * delayed SQL is additionally fenced by the database triggers.
+ * Connection-scoped MySQL named locks establish ticket liveness across PHP
+ * hosts without another SQL table. Reconnect/late SQL is independently fenced
+ * by database triggers that revalidate tokens at actual SQL execution time.
  */
 if (!defined('ABSPATH')) { exit; }
 
@@ -17,37 +18,22 @@ final class ESP_Media_Mutation_State {
         return ESP_Media_Index::state_table();
     }
 
-    private static function lock_path($id) {
+    private static function lock_name($token) {
         global $wpdb;
-        $upload = wp_upload_dir();
-        if (!is_array($upload) || !isset($upload['basedir']) ||
-            !is_string($upload['basedir'])) { return false; }
-        $root = rtrim($upload['basedir'], '/') . '/.esp-media-mutation-locks';
-        if (!is_dir($root) && !wp_mkdir_p($root)) { return false; }
-        // Never delete these names: unlink/recreate would split flock identity.
-        $namespace = (string) DB_NAME . "\0" . (string) $wpdb->prefix . "\0" . $id;
-        return $root . '/' . hash('sha256', $namespace) . '.lock';
+        // DB namespace and blog prefix keep multiple sites independent.
+        return 'esp67_ticket_' . substr(hash('sha256',
+            (string) DB_NAME . "\0" . (string) $wpdb->prefix . "\0" . $token), 0, 48);
     }
 
-    private static function stable_lock($id, $exclusive, $nonblock = false) {
-        $path = self::lock_path($id);
-        if (!is_string($path) || is_link($path)) { return false; }
-        $handle = @fopen($path, 'c');
-        if (!is_resource($handle)) { return false; }
-        $mode = $exclusive ? LOCK_EX : LOCK_SH;
-        if ($nonblock) { $mode |= LOCK_NB; }
-        if (!@flock($handle, $mode)) { fclose($handle); return false; }
-        clearstatcache(true, $path);
-        $by_name = @stat($path);
-        $by_handle = @fstat($handle);
-        if (!is_array($by_name) || !is_array($by_handle) ||
-            $by_name['ino'] !== $by_handle['ino'] ||
-            $by_name['dev'] !== $by_handle['dev'] || is_link($path)) {
-            flock($handle, LOCK_UN);
-            fclose($handle);
-            return false;
-        }
-        return $handle;
+    private static function named_lock($token, $acquire) {
+        global $wpdb;
+        $name = self::lock_name($token);
+        $function = $acquire ? 'GET_LOCK' : 'RELEASE_LOCK';
+        $sql = $acquire
+            ? $wpdb->prepare("SELECT GET_LOCK(%s,0)", $name)
+            : $wpdb->prepare("SELECT RELEASE_LOCK(%s)", $name);
+        $value = $wpdb->get_var($sql);
+        return $wpdb->last_error === '' && (string)$value === '1';
     }
 
     private static function parse_ids($raw) {
@@ -129,14 +115,15 @@ final class ESP_Media_Mutation_State {
         try { $token = bin2hex(random_bytes(16)); }
         catch (\Throwable $e) { return false; }
 
-        if (!isset(self::$locks[$id])) {
-            $lock = self::stable_lock($id, false);
-            if ($lock === false) { return false; }
-            self::$locks[$id] = $lock;
+        // Keep the connection-scoped lock until PHP/DB session termination.
+        // Lost locks after wpdb reconnect only cause a safe global fallback.
+        if (!self::named_lock($token, true)) { return false; }
+        self::$locks[$token] = true;
+        if (!self::change($id, $token, true)) {
+            self::named_lock($token, false);
+            unset(self::$locks[$token]);
+            return false;
         }
-        // Do not release the lock until PHP terminates. A reaper must never
-        // retire the ticket while this PHP request could still issue SQL.
-        if (!self::change($id, $token, true)) { return false; }
         self::$tickets[$id][] = $token;
         if (!self::actor($token)) { return false; }
         return true;
@@ -154,9 +141,8 @@ final class ESP_Media_Mutation_State {
     }
 
     /**
-     * Orphan cleanup. Returns number of state rows recovered, not ticket count.
-     * Never unlink a lock file. On non-shared multi-host storage, this reaper
-     * must not be enabled without an equivalent cluster-wide liveness gate.
+     * Reap only tokens whose DB named lock is demonstrably unheld.
+     * Global SQL fallback fences any late write after token retirement.
      */
     public static function reap($limit = 25) {
         global $wpdb;
@@ -168,27 +154,24 @@ final class ESP_Media_Mutation_State {
         $reaped = 0;
         foreach ($ids as $id) {
             $id = (int)$id;
-            $lock = self::stable_lock($id, true, true);
-            if ($lock === false) { continue; }
-            try {
-                for ($attempt = 0; $attempt < 32; ++$attempt) {
-                    $row = $wpdb->get_row($wpdb->prepare(
-                        "SELECT revision,active_mutation_ids FROM $state
-                         WHERE attachment_id=%d", $id), ARRAY_A);
-                    if (!is_array($row) || $wpdb->last_error !== '') { break; }
-                    $tokens = self::parse_ids($row['active_mutation_ids']);
-                    if ($tokens === false || !$tokens) { break; }
-                    $written = $wpdb->query($wpdb->prepare(
-                        "UPDATE $state SET active_mutation_ids='[]',pending_count=0,
-                         status='dirty',revision=revision+1,audit_cursor=0,changed_at=%d
-                         WHERE attachment_id=%d AND revision=%d",
-                        time(), $id, (int)$row['revision']));
-                    if ($written === 1) { ++$reaped; break; }
-                    if ($wpdb->last_error !== '') { break; }
+            $row = $wpdb->get_row($wpdb->prepare(
+                "SELECT active_mutation_ids FROM $state WHERE attachment_id=%d",
+                $id), ARRAY_A);
+            if (!is_array($row) || $wpdb->last_error !== '') { break; }
+            $tokens = self::parse_ids($row['active_mutation_ids']);
+            if ($tokens === false) { break; }
+            foreach ($tokens as $token) {
+                if (isset(self::$locks[$token])) { continue; }
+                $name = self::lock_name($token);
+                $holder = $wpdb->get_var($wpdb->prepare(
+                    'SELECT IS_USED_LOCK(%s)', $name));
+                if ($wpdb->last_error !== '' || $holder !== null) { continue; }
+                if (!self::named_lock($token, true)) { continue; }
+                try {
+                    if (self::change($id, $token, false)) { ++$reaped; }
+                } finally {
+                    self::named_lock($token, false);
                 }
-            } finally {
-                flock($lock, LOCK_UN);
-                fclose($lock);
             }
         }
         return $reaped;
