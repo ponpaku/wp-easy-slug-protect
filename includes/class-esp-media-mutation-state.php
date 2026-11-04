@@ -104,7 +104,14 @@ final class ESP_Media_Mutation_State {
 
     private static function actor($token) {
         global $wpdb;
-        return $wpdb->query($wpdb->prepare('SET @esp_media_mutation_actor=%s', $token)) !== false
+        // A pre-reserved path proof is valid only for the operation that
+        // staged it. A subsequent ticket on the same PHP/SQL connection
+        // must not inherit the previous operation's owner/value proof.
+        return $wpdb->query($wpdb->prepare(
+            'SET @esp_media_mutation_actor=%s,
+                 @esp_media_expected_owner=NULL,
+                 @esp_media_expected_meta_key=NULL,
+                 @esp_media_expected_value_sha=NULL', $token)) !== false
             && $wpdb->last_error === '';
     }
 
