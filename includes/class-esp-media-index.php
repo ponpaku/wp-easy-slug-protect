@@ -447,6 +447,20 @@ final class ESP_Media_Index {
               audit_cursor=0 WHERE attachment_id=0") !== 1 ||
             $wpdb->last_error !== '') { return false; }
         if (!ESP_Media_Mutation_State::install_triggers()) { return false; }
+        // Schema v3 tracked only an anonymous counter, not operation IDs.
+        // An old crashed writer could leave pending_count>0 forever; the
+        // new reaper cannot identify or release those anonymous tickets.
+        // Retire ONLY anonymous legacy tickets, after all Core SQL triggers
+        // are installed. Any late Core SQL from an old PHP worker will lack
+        // a current actor and co-commit global DIRTY instead of authorizing.
+        $legacy_pending = $wpdb->query($wpdb->prepare(
+            "UPDATE $state SET pending_count=0,active_mutation_ids='[]',
+              status='dirty',revision=revision+1,retry_after=0,changed_at=%d
+              WHERE pending_count>0 AND
+                (active_mutation_ids IS NULL OR active_mutation_ids=''
+                 OR active_mutation_ids='[]')",
+            time()));
+        if ($legacy_pending===false || $wpdb->last_error!=='') { return false; }
         return update_option(self::SCHEMA_OPTION, '4', false) ||
             (string)get_option(self::SCHEMA_OPTION) === '4';
     }
