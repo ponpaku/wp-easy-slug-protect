@@ -134,8 +134,11 @@ try {
        (7,'_wp_attached_file','public.jpg'),
        (7,'_esp_media_protected_path_id','private')");
 
+    // Existing third-party AFTER UPDATE triggers must remain intact.
+    sql67("CREATE TRIGGER other_product_meta_after AFTER UPDATE ON $meta
+      FOR EACH ROW SET @esp67_other_trigger_seen=1");
     check67(ESP_Media_Mutation_State::install_triggers(),
-        'actual six product triggers install on this database');
+        'six product triggers coexist with a pre-existing Core trigger');
     $installed=$wpdb->get_results('SHOW TRIGGERS',ARRAY_A);
     $ours=array_filter($installed,static function($row)use($posts,$meta){
         return strpos($row['Trigger']??'','esp67_')===0 &&
@@ -147,8 +150,9 @@ try {
     check67(ESP_Media_Mutation_State::begin(7),'owner token registered');
     sql67("UPDATE $meta SET meta_value='new_secret'
         WHERE post_id=7 AND meta_key='_esp_media_protected_path_id'");
-    check67(state67(0)['status']==='ready',
-        'local valid token preserves global READY for a protection-only change');
+    check67(state67(0)['status']==='ready' &&
+        (string)$wpdb->get_var('SELECT @esp67_other_trigger_seen')==='1',
+        'local valid token and third-party trigger both execute');
     check67(ESP_Media_Mutation_State::finish(7),'owner token retired');
 
     // Same session, now-stale actor: the canonical UPDATE must commit global
