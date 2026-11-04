@@ -375,6 +375,12 @@ if($phase==='verify'){
     $s=fl67_get($state,$id);
     fl67_check($s['esp67_flock_ids']==='["FLOCK"]'&&$s['status']==='dirty',
         'ticket remains until explicit safe auto-recovery');
+    if($scenario==='hybrid-normal'){
+        $global=$wpdb->get_var("SELECT status FROM $state WHERE attachment_id=0");
+        fl67_check($global==='ready',
+            'valid actor leaves global coverage READY while local owner remains dirty');
+        echo "ESP67_HYBRID_FAST_PATH_NO_GLOBAL_INVALIDATION\n";
+    }
     echo "ESP67_FLOCK_LATE_WRITER_FINISHED\n";exit(0);
 }
 fl67_check($phase==='writer','PHP worker launched');
