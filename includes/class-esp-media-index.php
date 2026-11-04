@@ -663,9 +663,14 @@ final class ESP_Media_Index {
         if (self::mark_dirty((int)$post_id)) {
             self::track_local((int)$post_id);
             $cross_directory = false;
-            if (!$reserve || self::reserve_new_paths(
+            if (!$reserve) { return null; }
+            if (self::reserve_new_paths(
                 (int)$post_id, $meta_key, $meta_value, $cross_directory)) {
-                return null;
+                if (ESP_Media_Mutation_State::expect_path_meta(
+                    (int)$post_id, $meta_key, $meta_value)) {
+                    return null;
+                }
+                return self::failed_pre_fence();
             }
             // Moving an attachment between directories is not a supported
             // atomic operation. Do not guess new derivative filenames or
@@ -810,7 +815,9 @@ final class ESP_Media_Index {
         }
         // Core supplies maybe_serialize(sanitize_meta(...)) to this action.
         // reserve_new_paths() deserializes metadata using maybe_unserialize().
-        if (self::reserve_new_paths($post_id, $meta_key, $stored_value)) { return; }
+        if (self::reserve_new_paths($post_id, $meta_key, $stored_value) &&
+            ESP_Media_Mutation_State::expect_path_meta(
+                $post_id, $meta_key, $stored_value, true)) { return; }
         // Missing/invalid ownership evidence may be repaired on a future
         // audit; until then, never let a READY global index authorize a
         // newly persisted path as if it had no protected owner.
