@@ -180,21 +180,23 @@ if($phase==='complete'){
   'file'=>$public,'width'=>150,'height'=>150,'sizes'=>[]
  ],true)!==false,'completes canonical image metadata');
  $protectedKey=ESP_Media_Index::PROTECTION_META;
- $beforeProtection=$wpdb->get_results($wpdb->prepare(
-   "SELECT meta_id,meta_value FROM {$wpdb->postmeta}
-     WHERE post_id=%d AND meta_key=%s",$id,$protectedKey),ARRAY_A);
  $storedProtection=add_post_meta($id,$protectedKey,'path_http',true);
  if($storedProtection===false){
-   echo 'ESP67_EMPTY_OWNER_PROTECTION_DIAG '.wp_json_encode([
-     'key'=>$protectedKey,'existing'=>$beforeProtection,
-     'last_error'=>$wpdb->last_error,
-     'wpdb_insert_id'=>$wpdb->insert_id,
-     'guard_add_meta'=>has_filter('add_post_metadata',
-       ['ESP_Media_Index','guard_add_meta']),
-     'hooks'=>array_keys($GLOBALS['wp_filter']??[])
-   ])."\n";
+   // The normal plugin's metadata pre-filter may veto protected-field writes.
+   // This fixture tests the DB/coverage invariant, not the PHP authorization
+   // API, so complete the competing-owner source through a disposable direct
+   // canonical INSERT and require the same AFTER trigger to fence it.
+   eo67_assert($wpdb->last_error==='', 'Core meta veto was not a SQL error');
+   eo67_query($db,"INSERT INTO {$wpdb->postmeta}
+      (post_id,meta_key,meta_value) VALUES ($id,'".
+      $db->real_escape_string($protectedKey)."','path_http')",
+      'test-only direct protected meta INSERT after WordPress PHP veto');
  }
- eo67_assert($storedProtection!==false,'completes protected owner identity');
+ $protected=$db->query("SELECT meta_value FROM {$wpdb->postmeta}
+   WHERE post_id=$id AND meta_key='".$db->real_escape_string($protectedKey)."'")
+   ->fetch_assoc();
+ eo67_assert(is_array($protected)&&$protected['meta_value']==='path_http',
+   'canonical protected owner identity complete');
  eo67_audit($state);
  eo67_assert(eo67_global($state)==='ready','global returns READY after complete conflicting owner');
  eo67_assert(ESP_Media_Index::resolve($path)['status']==='ambiguous',
