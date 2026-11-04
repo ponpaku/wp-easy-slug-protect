@@ -199,6 +199,34 @@ try {
         'global creation ticket retired, awaiting audit');
     reset_global67();
 
+    // A valid actor's canonical SQL must lock its state row until commit.
+    // If SELECT COUNT(*) ... FOR UPDATE inside the trigger were only a
+    // snapshot read, a concurrent reaper could retire the ticket between
+    // validation and COMMIT, allowing a stale publication race.
+    check67(ESP_Media_Mutation_State::begin(7),
+        'valid owner actor for state-lock race');
+    sql67('START TRANSACTION');
+    sql67("UPDATE $meta SET meta_value='lock_probe'
+        WHERE post_id=7 AND meta_key='_esp_media_protected_path_id'");
+    $lockPeer=new mysqli($host,$user,$password,$database);
+    $lockPeer->query('SET SESSION innodb_lock_wait_timeout=1');
+    $stateBlocked=false;
+    try {
+        $lockPeer->query("UPDATE $state SET revision=revision+1
+            WHERE attachment_id=7");
+    } catch(mysqli_sql_exception $e) {
+        $stateBlocked=(int)$e->getCode()===1205;
+    }
+    check67($stateBlocked,
+        'real trigger holds owner state row lock until canonical SQL COMMIT');
+    sql67('COMMIT');
+    check67($lockPeer->query("UPDATE $state SET revision=revision+1
+        WHERE attachment_id=7")===true,
+        'state CAS writer proceeds after canonical TX commits');
+    $lockPeer->close();
+    check67(ESP_Media_Mutation_State::finish(7),
+        'state-lock experiment token retires correctly');
+
     // InnoDB publication: trigger update and canonical update cannot be
     // observed in different committed states by a second DB connection.
     $peer=new mysqli($host,$user,$password,$database);
