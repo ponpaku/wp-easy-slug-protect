@@ -17,7 +17,7 @@ $state=ESP_Media_Index::state_table();
 $posts=$wpdb->posts;$meta=$wpdb->postmeta;
 $gate=$wpdb->prefix.'esp67_hybrid_crud_gate_probe';
 $events=$wpdb->prefix.'esp67_hybrid_crud_event_probe';
-$names=[];$ids=[];
+$names=[];$ids=[];$copies=[];
 $key='_esp67_hybrid_crud_probe';
 $marker='ESP67 hybrid crud '.str_replace('.','',(string)microtime(true));
 function hc67_check(bool $ok,string $msg):void {
@@ -64,6 +64,17 @@ try {
   ) ENGINE=InnoDB",'created SQL trigger trace');
  // Disable only the existing index hooks in this disposable PHP process,
  // allowing the SQL-time trigger to be tested without a prior PHP veto.
+ foreach(['add_post_metadata'=>'guard_add_meta',
+          'update_post_metadata'=>'guard_update_meta',
+          'delete_post_metadata'=>'guard_delete_meta',
+          'update_post_metadata_by_mid'=>'guard_by_mid',
+          'delete_post_metadata_by_mid'=>'guard_delete_by_mid'] as $hook=>$guard){
+   remove_filter($hook,['ESP_Media_Index',$guard],5);
+ }
+ remove_action('update_postmeta',['ESP_Media_Index','reserve_sanitized_by_mid'],1);
+ foreach(['added_post_meta','updated_post_meta','deleted_post_meta'] as $hook){
+   remove_action($hook,['ESP_Media_Index','on_meta_saved'],20);
+ }
  remove_action('add_attachment',['ESP_Media_Index','on_attachment_created'],20);
  remove_action('pre_post_update',['ESP_Media_Index','guard_post_type_transition'],5);
  remove_action('delete_attachment',['ESP_Media_Index','on_attachment_deleting'],1);
@@ -128,6 +139,17 @@ try {
  $attached=(int)$attached;$ids[]=$attached;
  hc67_sql($db,"INSERT INTO $gate VALUES($attached,'ACTOR_A')",
    'local actor available for newly created attachment');
+ $uploads=wp_upload_dir();
+ $source=$uploads['basedir'].'/esp31-public-150x150.jpg';
+ $copyName='esp67-hybrid-crud-'.$attached.'.jpg';
+ $copyPath=$uploads['basedir'].'/'.$copyName;
+ hc67_check(copy($source,$copyPath),'test attachment image copied into uploads');
+ $copies[]=$copyPath;
+ hc67_check(add_post_meta($attached,'_wp_attached_file',$copyName,true)!==false,
+   'Core attached-file metadata created with local actor');
+ hc67_check(add_post_meta($attached,'_wp_attachment_metadata',[
+     'file'=>$copyName,'width'=>150,'height'=>150,'sizes'=>[]
+   ],true)!==false,'Core attachment metadata created with local actor');
  $insertEvents=$db->query("SELECT event_name,owner_id,CAST(actor AS CHAR) AS actor,fallback
      FROM $events ORDER BY event_id")->fetch_all(MYSQLI_ASSOC);
  echo 'ESP67_HYBRID_VALID_CREATE_SQL_TRACE '.wp_json_encode($insertEvents)."\n";
@@ -174,6 +196,15 @@ try {
    'post_status'=>'draft'],true);
  hc67_check(!is_wp_error($post)&&(int)$post>0,'ordinary post created');
  $post=(int)$post;$ids[]=$post;
+ $promotedName='esp67-hybrid-promoted-'.$post.'.jpg';
+ $promotedPath=$uploads['basedir'].'/'.$promotedName;
+ hc67_check(copy($source,$promotedPath),'promotion fixture has valid existing image');
+ $copies[]=$promotedPath;
+ hc67_check(add_post_meta($post,'_wp_attached_file',$promotedName,true)!==false,
+    'pre-promotion ordinary post holds attached-file metadata');
+ hc67_check(add_post_meta($post,'_wp_attachment_metadata',[
+    'file'=>$promotedName,'width'=>150,'height'=>150,'sizes'=>[]
+ ],true)!==false,'pre-promotion ordinary post holds canonical image metadata');
  hc67_check((int)wp_update_post(['ID'=>$post,'post_type'=>'attachment',
    'post_mime_type'=>'image/jpeg'],true)===$post,
    'missing actor post-to-attachment promotion succeeds');
@@ -203,6 +234,7 @@ try {
  foreach(array_reverse($ids) as $id) {
    if(get_post($id))wp_delete_post($id,true);
  }
+ foreach($copies as $copy) @unlink($copy);
  for($i=0;$i<120;$i++){
   ESP_Media_Index::run_batch();
   if(hc67_global($db,$state)==='ready')break;
