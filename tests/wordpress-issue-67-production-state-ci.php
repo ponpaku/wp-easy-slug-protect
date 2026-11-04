@@ -103,6 +103,29 @@ try {
     $write($old);
     p67audit();
 
+    // Positive Core path change: the real WordPress metadata pre-hook must
+    // reserve the complete candidate set and bind the exact sanitized value.
+    // A harmless same-directory rename must remain local, not all-site DIRTY.
+    $legitimatePath=get_post_meta($id,'_wp_attached_file',true);
+    p67(is_string($legitimatePath) && $legitimatePath!=='',
+        'original WordPress canonical path for local reservation');
+    p67(update_post_meta($id,'_wp_attached_file',
+        'esp67-product-local-proof.jpg')!==false,
+        'normal WordPress Core path update succeeds under strict index');
+    ESP_Media_Index::finish_noop_writes();
+    p67(p67row(0)['status']==='ready' &&
+        ESP_Media_Index::resolve($public)['status']==='resolved',
+        'Core pre-reserved ownership change keeps unrelated public media READY');
+    p67(ESP_Media_Index::reindex_attachment($id,true),
+        'local Core path change can be independently audited');
+    p67(update_post_meta($id,'_wp_attached_file',$legitimatePath)!==false,
+        'restore actual original Core attached file');
+    ESP_Media_Index::finish_noop_writes();
+    p67(ESP_Media_Index::reindex_attachment($id,true) &&
+        p67row(0)['status']==='ready',
+        'restored Core path remains locally scoped');
+    echo "ESP67_PRODUCT_CORE_PATH_PROOF_LOCAL_READY\n";
+
     // A direct path-changing SQL can execute on the SAME DB session while
     // a legitimate local actor is active. It has not run WordPress's
     // prospective-path reservation hook. Matching actor alone is NOT enough:
