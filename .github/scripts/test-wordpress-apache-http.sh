@@ -1026,7 +1026,9 @@ assert_http esp31-public-150x150.jpg 200
 esp67_empty_phase claim | tee "$report_root/esp67-empty-late-path-claim.log"
 assert_http esp31-public-150x150.jpg 503
 esp67_empty_phase complete | tee "$report_root/esp67-empty-completed-protected-owner.log"
-assert_http esp31-public-150x150.jpg 503
+# Once the canonical owner conflict has been fully audited, denial is a
+# definite permission conflict (403), not an incomplete-index error (503).
+assert_http esp31-public-150x150.jpg 403
 esp67_empty_phase cleanup | tee "$report_root/esp67-empty-restored.log"
 assert_http esp31-public-150x150.jpg 200
 echo 'PASS: ESP67 aborted no-path attachment can be snapshotted as empty only when later DB writes atomically invalidate coverage'
