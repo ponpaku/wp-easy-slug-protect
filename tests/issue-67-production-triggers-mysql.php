@@ -187,6 +187,19 @@ try {
     check67(ESP_Media_Mutation_State::finish(7),'reserved path token retired');
     reset_global67();
 
+    // New valid actor on the same connection MUST clear the previous
+    // session's accepted owner/key/value proof. Replaying that old value
+    // without a new prospective-path reservation must dirty the site.
+    check67(ESP_Media_Mutation_State::begin(7),
+        'second actor on same SQL session starts without inherited proof');
+    sql67("UPDATE $meta SET meta_value='reserved.jpg'
+        WHERE post_id=7 AND meta_key='_wp_attached_file'");
+    check67(state67(0)['status']==='dirty',
+        'old actor path proof cannot authorize another token');
+    check67(ESP_Media_Mutation_State::finish(7),
+        'second actor retired after stale-proof fallback');
+    reset_global67();
+
     // A post->attachment promotion has no postmeta operation to intercept.
     sql67("UPDATE $posts SET post_type='attachment' WHERE ID=8");
     check67(state67(0)['status']==='dirty',
