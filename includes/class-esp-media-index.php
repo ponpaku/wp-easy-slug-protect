@@ -361,6 +361,10 @@ final class ESP_Media_Index {
      * security migration and activation state. Never install during HTTP lookup.
      */
     public static function install_schema() {
+        // A repeated installation request is not a migration. In particular,
+        // never revoke a successfully audited READY snapshot simply because
+        // a helper/test invokes install_schema() again.
+        if (self::installed()) { return true; }
         global $wpdb;
         if (!is_object($wpdb) || empty($wpdb->prefix) ||
             !self::database_support()['supported']) { return false; }
