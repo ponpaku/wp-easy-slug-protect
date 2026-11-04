@@ -34,6 +34,12 @@ Resolverはglobal READYに加え、global pending=0、active_mutation_idsが空�
 
 この切り分けは**旧PoCの実験成功＝製品の安全性保証**という誤認を避けるためでもある。新しい製品コードのクラッシュ・同時監査・遅延SQLに関する専用検証は別の受入条件として残る。
 
+## WordPressライフサイクル
+
+DBトリガーはWordPress Coreの posts/postmeta に付くため、PHPプラグインをアンインストールしても自動では消えない。uninstall.php は本プラグインの6本を厳密な名前で先にDROPし、成功したときだけ索引2表と旧 _v1 表をDROPするよう変更した。DROP TRIGGERに失敗した場合にはstateを残してCore SQLが欠落stateで失敗する事態を避け、手動復旧が必要であることをログに記録する。他プラグインのトリガーは対象にしない。
+
+tests/security-uninstall-index-trigger-test.php とPHP security CI項目を追加。最新版のCI結果はまだ取得できていないため、ここは未実証。無効化だけの運用ではトリガーを維持しており、再有効化時の既存stateを監査する設計である。
+
 ## 追加の受入試験と最新の未確定事項
 
 - tests/issue-67-production-triggers-mysql.php をMySQL8とMariaDB10.11の両方で実行し、製品トリガー6本を確認（CI #41808834596、両DBジョブ成功）。
