@@ -1046,13 +1046,15 @@ python3 -u tests/issue-67-hold-mysql-query-proxy.py "$esp67_hold_port" "$esp67_h
   >"$report_root/esp67-delayed-packet-proxy.log" 2>&1 &
 esp67_hold_proxy_pid=$!
 for attempt in $(seq 1 100); do
-  if grep -q ESP67_PROXY_READY "$report_root/esp67-delayed-packet-proxy.log" || {
-  cat "$report_root/esp67-delayed-packet-proxy.log" >&2
-  exit 1
-}; then break; fi
+  if grep -q ESP67_PROXY_READY "$report_root/esp67-delayed-packet-proxy.log"; then break; fi
+  if ! kill -0 "$esp67_hold_proxy_pid" 2>/dev/null; then break; fi
   sleep 0.1
 done
-grep -q ESP67_PROXY_READY "$report_root/esp67-delayed-packet-proxy.log"
+grep -q ESP67_PROXY_READY "$report_root/esp67-delayed-packet-proxy.log" || {
+  cat "$report_root/esp67-delayed-packet-proxy.log" >&2
+  echo 'ESP67 delayed TCP relay did not become ready' >&2
+  exit 1
+}
 for esp67_delayed_case in network-unsafe network-gated network-killed network-trigger network-invalidate network-hybrid; do
   rm -f "$esp67_hold_marks/packet-received" \
     "$esp67_hold_marks/packet-release" "$esp67_hold_marks/packet-done"
