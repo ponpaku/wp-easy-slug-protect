@@ -21,7 +21,7 @@ register_shutdown_function(static function () use ($probe, &$esp_http_sql_querie
     $count_index_options = 0;
     foreach ($esp_http_sql_queries as $sql) {
         if (preg_match('/^\s*SELECT\b/i', $sql) &&
-            preg_match('/\besp_media_files(?:_v1)?\b/', $sql) === 1) { ++$count_index; }
+            strpos($sql, 'esp_media_files') !== false) { ++$count_index; }
         if (preg_match('/^\s*SELECT\s+VERSION\s*\(\s*\)/i', $sql)) {
             ++$count_version;
         }
