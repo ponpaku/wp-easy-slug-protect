@@ -990,6 +990,17 @@ docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html
   | tee "$report_root/esp67-hybrid-full-crud.log"
 assert_http esp31-public-150x150.jpg 200
 
+# #67 one-column prototype: 6 SQL triggers read the actor ID set from
+# existing wp_esp_media_file_state_v1 rows only; NO auxiliary SQL table.
+# Validate real WordPress local updates, revoked/missing actor fallback, and
+# creation with an initially unknown attachment ID. Column/triggers are
+# disposable and removed after the test.
+docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+  php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-issue-67-state-only-prototype-ci.php \
+  | tee "$report_root/esp67-state-only-prototype.log"
+assert_http esp31-public-150x150.jpg 200
+echo 'PASS: ESP67 existing state table plus one actor-ID column, with zero additional SQL tables'
+
 # #67 design-choice experiment: SIGKILL during attachment creation leaves
 # no path-bearing metadata. Compare existing global audit (stalls) with a
 # SYNTHETIC zero-owner READY snapshot, then deliver a real late path claim.
