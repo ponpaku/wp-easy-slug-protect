@@ -116,8 +116,10 @@ final class ESP_Media_Index {
         foreach (['added_post_meta', 'updated_post_meta', 'deleted_post_meta'] as $hook) {
             add_action($hook, [self::class, 'on_meta_saved'], 20, 4);
         }
-        // wp_insert_post_data fires before Core knows a newly inserted ID.
-        add_filter('wp_insert_post_data', [self::class, 'guard_new_attachment'], 5, 4);
+        // Core uses wp_insert_attachment_data (NOT wp_insert_post_data)
+        // for attachments. This fires before the initial SQL INSERT and
+        // before WordPress returns the assigned attachment ID.
+        add_filter('wp_insert_attachment_data', [self::class, 'guard_new_attachment'], 5, 4);
         add_action('add_attachment', [self::class, 'on_attachment_created'], 20, 1);
         // Existing posts can become attachments without add_attachment or a meta hook.
         add_action('pre_post_update', [self::class, 'guard_post_type_transition'], 5, 2);
