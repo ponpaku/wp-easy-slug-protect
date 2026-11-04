@@ -552,8 +552,9 @@ docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html
 # those triggers correctly turn the old counterexamples into 503 responses.
 # Product schema v4 is instead tested by wordpress-issue-67-production-state-ci.php
 # and the real F01/Q01 multi-worker/ACK-loss suites above.
-if [[ "$(docker exec "$container" php /opt/wp-cli.phar --allow-root --path=/var/www/html \
-  option get esp_media_index_v1_schema)" != "4" ]]; then
+# Inspect the actual installed artifact, not a mutable WordPress option:
+# earlier fault injection intentionally toggles schema values mid-test.
+if [[ ! -f "$fixture_root/wordpress/wp-content/plugins/esp44-custom/includes/class-esp-media-mutation-state.php" ]]; then
 # #67: after an external transaction drops the ESP fence, a protected
 # attachment can acquire an already-public owner's derivative path. Probe
 # real Apache anonymous response BEFORE the faulty PHP worker finishes.
