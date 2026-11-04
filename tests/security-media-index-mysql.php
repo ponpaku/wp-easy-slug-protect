@@ -90,7 +90,8 @@ final class ESP63_DB {
             return false;
         }
         if ($this->fail_state_write &&
-            strpos($sql, 'INSERT INTO esp63_esp_media_file_state') !== false) {
+            (strpos($sql, 'INSERT INTO esp63_esp_media_file_state') !== false ||
+             strpos($sql, 'SET active_mutation_ids=') !== false)) {
             $this->last_error = 'injected index state failure';
             return false;
         }
