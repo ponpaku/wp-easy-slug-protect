@@ -14,7 +14,7 @@ $phase=getenv('ESP67_FLOCK_PHASE');
 $scenario=getenv('ESP67_FLOCK_SCENARIO');
 if(getenv('ESP_ALLOW_DISPOSABLE_DB')!=='1'||!getenv('ESP_WP_ROOT')||
     !in_array($phase,['inode','setup','writer','recover','verify','kill_db','sql_observe','http_verify','network_verify','kill_backend','restore'],true)||
-    !in_array($scenario,['crash','db-loss','inflight','network-unsafe','network-gated','network-killed','network-trigger','trigger-normal','trigger-reconnect'],true))exit(1);
+    !in_array($scenario,['crash','db-loss','inflight','network-unsafe','network-gated','network-killed','network-trigger','network-invalidate','trigger-normal','trigger-reconnect'],true))exit(1);
 define('WP_DISABLE_FATAL_ERROR_HANDLER',true);
 require rtrim(getenv('ESP_WP_ROOT'),'/').'/wp-load.php';
 $_SERVER['SERVER_SOFTWARE']='Apache/2.4';
@@ -113,10 +113,35 @@ if($phase==='setup'){
         fl67_check($created!==false,
             'test-only WP postmeta BEFORE UPDATE trigger installed');
     }
+    if($scenario==='network-invalidate'){
+        // Alternative architecture: allow a late Core SQL to COMMIT, but
+        // atomically invalidate global authorization in the SAME InnoDB TX.
+        // This requires no session actor variable; reconnection is irrelevant.
+        $tr=$wpdb->prefix.'esp67_atomic_global_dirty';
+        $db->query("DROP TRIGGER IF EXISTS `$tr`");
+        $ddl="CREATE TRIGGER `$tr` AFTER UPDATE ON {$wpdb->postmeta}
+            FOR EACH ROW BEGIN
+                IF NEW.post_id=$id AND
+                   (OLD.meta_key='_wp_attachment_metadata'
+                    OR NEW.meta_key='_wp_attachment_metadata') THEN
+                    UPDATE $state SET status='dirty',revision=revision+1,
+                        audit_cursor=0 WHERE attachment_id=0;
+                END IF;
+            END";
+        $created=$db->query($ddl);
+        if(!$created)echo 'ESP67_ATOMIC_INVALIDATION_DDL_ERROR '.$db->error."\n";
+        fl67_check($created!==false,
+            'test-only postmeta AFTER UPDATE global invalidation trigger installed');
+    }
     $db->close();
     echo "ESP67_FLOCK_SETUP\n";exit(0);
 }
 if($phase==='restore'){
+    if($scenario==='network-invalidate'){
+        $db=fl67_db();
+        $db->query("DROP TRIGGER IF EXISTS `{$wpdb->prefix}esp67_atomic_global_dirty`");
+        $db->close();
+    }
     if(in_array($scenario,['network-trigger','trigger-normal','trigger-reconnect'],true)){
         $db=fl67_db();
         $db->query("DROP TRIGGER IF EXISTS `{$wpdb->prefix}esp67_update_ticket_check`");
@@ -131,6 +156,18 @@ if($phase==='restore'){
     }
     ESP_Media_Index::finish_noop_writes();
     fl67_check(ESP_Media_Index::reindex_attachment($id),'final reindex passed');
+    if($scenario==='network-invalidate'){
+        // The global dirty row is not a permanent 503: rebuild canonical
+        // coverage after the test-only late write has been reverted.
+        $recovered=false;
+        for($i=0;$i<120;$i++){
+            ESP_Media_Index::run_batch();
+            if($wpdb->get_var("SELECT status FROM $state
+                WHERE attachment_id=0")==='ready'){$recovered=true;break;}
+        }
+        fl67_check($recovered,
+            'atomic global invalidation eventually returns to READY');
+    }
     $db=fl67_db();
     fl67_check(fl67_get($state,$id)['esp67_flock_ids']==='[]','mutation set cleared');
     $db->query("ALTER TABLE $state DROP COLUMN esp67_flock_ids");
@@ -165,7 +202,17 @@ if($phase==='network_verify'){
         $r['esp67_flock_ids']==='[]'&&(int)$r['pending_count']===0,
         'orphan ticket reclaimed before delayed network packet arrived');
     fl67_check((int)$reserved['n']===0,'old index reservation was discarded');
-    if($scenario==='network-unsafe'){
+    if($scenario==='network-invalidate'){
+        $control=$wpdb->get_row("SELECT status,revision FROM $state
+            WHERE attachment_id=0",ARRAY_A);
+        fl67_check($has,
+            'alternative: delayed genuine WordPress SQL commits instead of rejection');
+        fl67_check(is_array($control)&&$control['status']==='dirty',
+            'late SQL atomically invalidated global coverage in source transaction');
+        fl67_check(ESP_Media_Index::resolve($path)['status']==='error',
+            'global dirty denies old indexed public owner even after Core SQL commits');
+        echo "ESP67_NETWORK_DELAY_ATOMIC_INVALIDATION_SAFE\n";
+    }elseif($scenario==='network-unsafe'){
         fl67_check($has,'UNSAFE: MySQL committed delayed old WP SQL after local lock GC');
         fl67_check(ESP_Media_Index::resolve($path)['status']==='resolved',
             'UNSAFE: strict Resolver still sees old public owner');
@@ -268,7 +315,7 @@ if($phase==='recover'){
     fl67_check(ESP_Media_Index::reindex_attachment($id),
         'rebuild under exclusive filesystem lock from canonical WordPress meta');
     $r=ESP_Media_Index::resolve($path);
-    if(in_array($scenario,['crash','network-unsafe','network-gated','network-killed','network-trigger','trigger-reconnect'],true)){
+    if(in_array($scenario,['crash','network-unsafe','network-gated','network-killed','network-trigger','network-invalidate','trigger-reconnect'],true)){
         fl67_check($r['status']==='resolved'&&
             ($r['protected_path_id']??null)==='',
             'crashed pre-write worker restored old public path');
@@ -355,7 +402,7 @@ $pre=static function($check,$post_id,$meta_key)use(
     return $check;
 };
 add_filter('update_post_metadata',$pre,3,5);
-if(in_array($scenario,['network-unsafe','network-gated','network-killed','network-trigger'],true)){
+if(in_array($scenario,['network-unsafe','network-gated','network-killed','network-trigger','network-invalidate'],true)){
     $endpoint=getenv('ESP67_FLOCK_PROXY_HOST');
     if(!is_string($endpoint)||!str_contains($endpoint,':'))
         throw new RuntimeException('missing disposable network relay');
