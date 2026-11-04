@@ -17,7 +17,7 @@ $cursor_option = 'esp_media_index_v1_cursor';
 $original_schema = get_option($schema_option, '0');
 $original_ready = get_option($ready_option, '0');
 $original_cursor = get_option($cursor_option, 0);
-if ((string)$original_schema !== '3' || (string)$original_ready !== '1') {
+if ((string)$original_schema !== '4' || (string)$original_ready !== '1') {
     throw new RuntimeException('R02 schema test requires an already verified READY fixture');
 }
 
@@ -56,7 +56,7 @@ if ($mode === 'fail') {
     // Real tables remain intact; no ALTER/CREATE or DROP is injected.
     add_filter('query', static function ($sql) use ($wpdb) {
         $prefix = 'SHOW COLUMNS FROM ' . $wpdb->prefix .
-            'esp_media_file_state_v1 LIKE ';
+            'esp_media_file_state LIKE ';
         if (strpos($sql, $prefix) === 0 && strpos($sql, 'retry_after') !== false) {
             return 'SELECT NULL';
         }
