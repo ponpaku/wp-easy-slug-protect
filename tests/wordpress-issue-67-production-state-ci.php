@@ -103,6 +103,37 @@ try {
     $write($old);
     p67audit();
 
+    // A direct path-changing SQL can execute on the SAME DB session while
+    // a legitimate local actor is active. It has not run WordPress's
+    // prospective-path reservation hook. Matching actor alone is NOT enough:
+    // the trigger must globally invalidate before a colliding public path
+    // could be served from the old index.
+    $originalPath=$wpdb->get_var($wpdb->prepare(
+        "SELECT meta_value FROM $meta WHERE post_id=%d
+         AND meta_key='_wp_attached_file' LIMIT 1",$id));
+    p67(is_string($originalPath) && $originalPath!=='',
+        'protected canonical attached path available');
+    p67(ESP_Media_Mutation_State::begin($id),
+        'valid local actor is active during untracked direct SQL');
+    $newPath='esp31-public-150x150.jpg';
+    p67($wpdb->query($wpdb->prepare(
+        "UPDATE $meta SET meta_value=%s WHERE post_id=%d
+         AND meta_key='_wp_attached_file'",$newPath,$id))!==false,
+        'direct unreserved path change committed');
+    p67(p67row(0)['status']==='dirty' &&
+        ESP_Media_Index::resolve($public)['status']==='error',
+        'valid actor alone cannot bypass prospective path reservation');
+    echo "ESP67_PRODUCT_UNRESERVED_ACTOR_GLOBAL_FALLBACK\n";
+    p67($wpdb->query($wpdb->prepare(
+        "UPDATE $meta SET meta_value=%s WHERE post_id=%d
+         AND meta_key='_wp_attached_file'",$originalPath,$id))!==false,
+        'restore original attached path');
+    p67(ESP_Media_Mutation_State::finish($id),
+        'release direct SQL test token');
+    p67audit();
+    p67(ESP_Media_Index::resolve($public)['status']==='resolved',
+        'original published coverage restored after path fallback');
+
     $new=wp_insert_post(['post_type'=>'attachment',
         'post_title'=>'ESP67 product no-owner probe',
         'post_status'=>'inherit','post_mime_type'=>'image/jpeg'],true);
