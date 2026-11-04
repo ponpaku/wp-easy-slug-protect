@@ -36,6 +36,7 @@ final class ESP_Media_Index {
     // could consume another concurrent writer's pending ticket.
     private static $ambiguous_pending = [];
     private static $deferred_noop_finalizer_queued = false;
+    private static $global_creation_tickets = 0;
     private static $database_support = null;
 
     public static function files_table() {
@@ -115,6 +116,8 @@ final class ESP_Media_Index {
         foreach (['added_post_meta', 'updated_post_meta', 'deleted_post_meta'] as $hook) {
             add_action($hook, [self::class, 'on_meta_saved'], 20, 4);
         }
+        // wp_insert_post_data fires before Core knows a newly inserted ID.
+        add_filter('wp_insert_post_data', [self::class, 'guard_new_attachment'], 5, 4);
         add_action('add_attachment', [self::class, 'on_attachment_created'], 20, 1);
         // Existing posts can become attachments without add_attachment or a meta hook.
         add_action('pre_post_update', [self::class, 'guard_post_type_transition'], 5, 2);
@@ -933,7 +936,40 @@ final class ESP_Media_Index {
         }
     }
 
+    /**
+     * A new attachment performs INSERT and an internal UPDATE before the
+     * PHP caller can register a per-ID ticket. Fence the entire creation
+     * against the global state row (ID 0) before the first Core INSERT.
+     */
+    public static function guard_new_attachment($data, $postarr, $raw, $update) {
+        if (!self::installed() || $update || !is_array($data) ||
+            ($data['post_type'] ?? null) !== 'attachment') {
+            return $data;
+        }
+        if (!ESP_Media_Mutation_State::begin(0)) {
+            throw new RuntimeException('ESP media index: cannot fence attachment creation');
+        }
+        ++self::$global_creation_tickets;
+        if (self::$global_creation_tickets === 1) {
+            register_shutdown_function([self::class, 'finish_global_creations']);
+        }
+        return $data;
+    }
+
+    public static function finish_global_creations() {
+        for ($i = 0; $i < self::$global_creation_tickets; ++$i) {
+            if (!ESP_Media_Mutation_State::finish(0)) {
+                error_log('ESP: global attachment creation ticket could not be retired');
+                return;
+            }
+        }
+        self::$global_creation_tickets = 0;
+    }
+
     public static function on_attachment_created($id) {
+        // A newly inserted owner is still covered by its global creation
+        // ticket. Do not replace the session actor before Core's internal SQL.
+        if (self::$global_creation_tickets > 0) { return; }
         if (self::installed() && self::mark_dirty((int)$id)) {
             self::track_local((int)$id);
             if (self::complete_mutation((int)$id)) {
