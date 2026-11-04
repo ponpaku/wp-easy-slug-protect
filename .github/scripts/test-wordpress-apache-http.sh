@@ -856,6 +856,19 @@ esp67_flock_phase restore trigger-normal | tee "$report_root/esp67-trigger-norma
 assert_http esp31-public-150x150.jpg 200
 echo 'PASS: actual WordPress Core UPDATE works with server-side trigger when ticket remains active'
 
+# #67 hybrid: valid actor and ticket must keep GLOBAL READY while the local
+# affected owner stays fenced. The trigger touches global only if actor expired.
+esp67_flock_phase setup hybrid-normal | tee "$report_root/esp67-hybrid-normal-setup.log"
+docker exec "$container" touch /var/www/html/wp-content/uploads/.esp67-flock/resume
+esp67_flock_phase writer hybrid-normal | tee "$report_root/esp67-hybrid-normal-writer.log"
+esp67_flock_phase verify hybrid-normal | tee "$report_root/esp67-hybrid-normal-verify.log"
+assert_http esp31-public-150x150.jpg 503
+esp67_flock_phase recover hybrid-normal | tee "$report_root/esp67-hybrid-normal-recovered.log"
+assert_http esp31-public-150x150.jpg 403
+esp67_flock_phase restore hybrid-normal | tee "$report_root/esp67-hybrid-normal-restored.log"
+assert_http esp31-public-150x150.jpg 200
+echo 'PASS: ESP67 hybrid valid actor keeps global READY and scoped local fence'
+
 # #67: MySQL session variables deliberately fail closed across real
 # WordPress wpdb reconnect. Check the operational cost of trigger identity:
 # a valid operation can return false after an involuntary DB disconnect,
@@ -900,7 +913,7 @@ for attempt in $(seq 1 100); do
   sleep 0.1
 done
 grep -q ESP67_PROXY_READY "$report_root/esp67-delayed-packet-proxy.log"
-for esp67_delayed_case in network-unsafe network-gated network-killed network-trigger network-invalidate; do
+for esp67_delayed_case in network-unsafe network-gated network-killed network-trigger network-invalidate network-hybrid; do
   rm -f "$esp67_hold_marks/packet-received" \
     "$esp67_hold_marks/packet-release" "$esp67_hold_marks/packet-done"
   esp67_flock_phase setup "$esp67_delayed_case" | tee "$report_root/esp67-delayed-${esp67_delayed_case}-setup.log"
@@ -977,7 +990,7 @@ for esp67_delayed_case in network-unsafe network-gated network-killed network-tr
     grep -q 'ESP67_PROXY_LATE_SERVER_REPLY 255' "$report_root/esp67-delayed-packet-proxy.log"
   fi
   esp67_flock_phase network_verify "$esp67_delayed_case" | tee "$report_root/esp67-delayed-${esp67_delayed_case}-verified.log"
-  if [[ "$esp67_delayed_case" == network-invalidate ]]; then
+  if [[ "$esp67_delayed_case" == network-invalidate || "$esp67_delayed_case" == network-hybrid ]]; then
     # The SQL COMMITTED; only its co-committed global dirty flag prevents
     # authorization from the now-stale local owner index.
     assert_http esp31-public-150x150.jpg 503
