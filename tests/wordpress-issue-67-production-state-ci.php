@@ -134,6 +134,26 @@ try {
     p67(ESP_Media_Index::resolve($public)['status']==='resolved',
         'original published coverage restored after path fallback');
 
+    // Conversely, genuine WordPress metadata APIs run the prospective-path
+    // hook and bind the exact sanitized value. Such a normal update must
+    // retain the local-first path and not invalidate unrelated global READY.
+    $oldMetadata=wp_get_attachment_metadata($id,true);
+    p67(is_array($oldMetadata),'canonical image metadata is an array');
+    $updatedMetadata=$oldMetadata;
+    $updatedMetadata['esp67_payload_binding_probe']='ok';
+    p67(wp_update_attachment_metadata($id,$updatedMetadata)!==false,
+        'normal WordPress metadata update with prospective path fence succeeded');
+    ESP_Media_Index::finish_noop_writes();
+    p67(p67row(0)['status']==='ready' &&
+        ESP_Media_Index::reindex_attachment($id,true),
+        'reserved exact metadata update remains local and can rebuild');
+    echo "ESP67_PRODUCT_RESERVED_METADATA_LOCAL_READY\n";
+    p67(wp_update_attachment_metadata($id,$oldMetadata)!==false,
+        'restore original canonical attachment metadata');
+    ESP_Media_Index::finish_noop_writes();
+    p67(ESP_Media_Index::reindex_attachment($id,true),
+        'original metadata indexed after restoration');
+
     $new=wp_insert_post(['post_type'=>'attachment',
         'post_title'=>'ESP67 product no-owner probe',
         'post_status'=>'inherit','post_mime_type'=>'image/jpeg'],true);
