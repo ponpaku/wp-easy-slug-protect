@@ -14,7 +14,7 @@ $phase=getenv('ESP67_FLOCK_PHASE');
 $scenario=getenv('ESP67_FLOCK_SCENARIO');
 if(getenv('ESP_ALLOW_DISPOSABLE_DB')!=='1'||!getenv('ESP_WP_ROOT')||
     !in_array($phase,['inode','setup','writer','recover','verify','kill_db','sql_observe','http_verify','network_verify','kill_backend','restore'],true)||
-    !in_array($scenario,['crash','db-loss','inflight','network-unsafe','network-gated','network-killed','network-trigger','network-invalidate','network-hybrid','hybrid-normal','trigger-normal','trigger-reconnect'],true))exit(1);
+    !in_array($scenario,['crash','db-loss','inflight','network-unsafe','network-gated','network-killed','network-trigger','network-invalidate','network-hybrid','hybrid-normal','hybrid-reconnect','trigger-normal','trigger-reconnect'],true))exit(1);
 define('WP_DISABLE_FATAL_ERROR_HANDLER',true);
 require rtrim(getenv('ESP_WP_ROOT'),'/').'/wp-load.php';
 $_SERVER['SERVER_SOFTWARE']='Apache/2.4';
@@ -113,7 +113,7 @@ if($phase==='setup'){
         fl67_check($created!==false,
             'test-only WP postmeta BEFORE UPDATE trigger installed');
     }
-    if(in_array($scenario,['network-hybrid','hybrid-normal'],true)){
+    if(in_array($scenario,['network-hybrid','hybrid-normal','hybrid-reconnect'],true)){
         // Hybrid: a valid caller's local ticket keeps the fast path; a
         // missing/expired actor NEVER passes silently. Instead the Core SQL
         // and a global fail-closed invalidation COMMIT in the same InnoDB TX.
@@ -166,7 +166,7 @@ if($phase==='setup'){
     echo "ESP67_FLOCK_SETUP\n";exit(0);
 }
 if($phase==='restore'){
-    if(in_array($scenario,['network-hybrid','hybrid-normal'],true)){
+    if(in_array($scenario,['network-hybrid','hybrid-normal','hybrid-reconnect'],true)){
         $db=fl67_db();
         $db->query("DROP TRIGGER IF EXISTS `{$wpdb->prefix}esp67_hybrid_global_fallback`");
         $db->close();
@@ -190,7 +190,7 @@ if($phase==='restore'){
     }
     ESP_Media_Index::finish_noop_writes();
     fl67_check(ESP_Media_Index::reindex_attachment($id),'final reindex passed');
-    if(in_array($scenario,['network-invalidate','network-hybrid'],true)){
+    if(in_array($scenario,['network-invalidate','network-hybrid','hybrid-reconnect'],true)){
         // The global dirty row is not a permanent 503: rebuild canonical
         // coverage after the test-only late write has been reverted.
         $recovered=false;
@@ -350,6 +350,15 @@ if($phase==='recover'){
     finally{$db->close();}
     fl67_check(ESP_Media_Index::reindex_attachment($id),
         'rebuild under exclusive filesystem lock from canonical WordPress meta');
+    if($scenario==='hybrid-reconnect'){
+        $control=$wpdb->get_row("SELECT status FROM $state WHERE attachment_id=0",ARRAY_A);
+        fl67_check(is_array($control)&&$control['status']==='dirty',
+            'real wpdb reconnect committed canonical SQL and co-committed global dirty');
+        fl67_check(ESP_Media_Index::resolve($path)['status']==='error',
+            'global dirty blocks stale public index after actual reconnect');
+        echo "ESP67_HYBRID_RECONNECT_FAIL_CLOSED\n";
+        flock($lock,LOCK_UN);fclose($lock);exit(0);
+    }
     $r=ESP_Media_Index::resolve($path);
     if(in_array($scenario,['crash','network-unsafe','network-gated','network-killed','network-trigger','network-invalidate','network-hybrid','trigger-reconnect'],true)){
         fl67_check($r['status']==='resolved'&&
@@ -375,6 +384,11 @@ if($phase==='verify'){
     $s=fl67_get($state,$id);
     fl67_check($s['esp67_flock_ids']==='["FLOCK"]'&&$s['status']==='dirty',
         'ticket remains until explicit safe auto-recovery');
+    if($scenario==='hybrid-reconnect'){
+        $global=$wpdb->get_var("SELECT status FROM $state WHERE attachment_id=0");
+        fl67_check($global==='dirty', 'reconnected wpdb Core SQL forced atomic global invalidation');
+        echo "ESP67_HYBRID_RECONNECT_ATOMIC_DIRTY\n";
+    }
     if($scenario==='hybrid-normal'){
         $global=$wpdb->get_var("SELECT status FROM $state WHERE attachment_id=0");
         fl67_check($global==='ready',
@@ -418,7 +432,7 @@ $pre=static function($check,$post_id,$meta_key)use(
         $db->commit();
     }catch(Throwable $e){$db->rollback();throw $e;}
     finally{$db->close();}
-    if(in_array($scenario,['trigger-normal','network-trigger','trigger-reconnect','hybrid-normal','network-hybrid'],true)){
+    if(in_array($scenario,['trigger-normal','network-trigger','trigger-reconnect','hybrid-normal','network-hybrid','hybrid-reconnect'],true)){
         // Bind a per-writer identity on the VERY SAME backend connection
         // that will run Core's SQL. A wpdb reconnect drops this session var,
         // so reconnect replay fails closed unless explicitly re-registered.
@@ -426,7 +440,7 @@ $pre=static function($check,$post_id,$meta_key)use(
         fl67_check($wpdb->query("SET @esp67_wp_actor='FLOCK'")!==false,
             'real WordPress DB session carries actor ID for trigger');
     }
-    if($scenario==='trigger-reconnect'){
+    if(in_array($scenario,['trigger-reconnect','hybrid-reconnect'],true)){
         // A real WordPress Core reconnect loses MySQL session variables.
         // The trigger must reject the replay; observe user-visible failure.
         $backend=(int)$wpdb->get_var('SELECT CONNECTION_ID()');
