@@ -34,11 +34,20 @@ Resolverはglobal READYに加え、global pending=0、active_mutation_idsが空�
 
 この切り分けは**旧PoCの実験成功＝製品の安全性保証**という誤認を避けるためでもある。新しい製品コードのクラッシュ・同時監査・遅延SQLに関する専用検証は別の受入条件として残る。
 
+## 追加の受入試験と最新の未確定事項
+
+- tests/issue-67-production-triggers-mysql.php をMySQL8とMariaDB10.11の両方で実行し、製品トリガー6本を確認（CI #41808834596、両DBジョブ成功）。
+- tests/wordpress-issue-67-production-state-ci.php で、WordPress Coreの正規メタ変更は局所READY維持、未予約パス直接SQLはglobal DIRTYを確認（CI #41809259944、当該個別テスト成功）。
+- 実WordPressの旧 _v1 から新規名称への隔離移行でrename・データ保持・stateの列追加・旧READY失効まで成功。ただし照合順序の混在でトリガー比較に失敗したため、製品コードをバイト単位の比較に変更。修正後の移行完走は未検証。
+- 旧v3の匿名pending_countが残る恒久停滞を避けるため、6トリガー設置後に限りIDのない旧pendingを回収する処理と試験を追加。最終CI未検証。
+- 製品トリガーのSELECT COUNT(*) FOR UPDATEが正本SQLのCOMMITまでstate行を施錠することを確認する2接続試験をMySQL/MariaDBに追加。実行結果は未取得。
+- Apache全回帰は未成功。旧PoCの脆弱なHTTP200反例は製品CIと分離済み。PR #78はDraftで維持し、性能調整・マージを行わない。
+
 ## 検証済み／未完了の区別
 
 実WordPress製品テストで、stateへの2つの本人ID、片方のみの冪等解放、有効actorでの局所READY維持、失効actor・消失actorの同一TX global DIRTY、**有効actorでも未予約のパスSQLはglobal DIRTY**、新規添付のID未確定状態と所有パス0件のREADY監査を確認した。
 
-ただし、全レガシー障害注入スイートと新実装を結合した全CI成功は**最終確定前**。従来は未検知だった直接SQLが新しいトリガーで全体失効するため、古いテストは局所再索引のみでなく全体監査も必要になる。MariaDB上で**この新しい6トリガーそのもの**を動かした証拠もまだない（CIのmariadb-issue67ジョブは旧設計試験）。
+ただし、全レガシー障害注入スイートと新実装を結合した全CI成功は**最終確定前**。従来は未検知だった直接SQLが新しいトリガーで全体失効するため、古いテストは局所再索引のみでなく全体監査も必要になる。**製品版6トリガーはMySQL 8／MariaDB 10.11両方のCIで実行成功**（actor照合、未予約パスの全体失効、同一TXでのdirtyとROLLBACK、新規添付、global欠落時のSQL拒否）。旧PoCだけの確認ではない。
 
 **本番採用に残す重要条件**：新しい製品実装でのPHP SIGKILL／実tcp遅延SQL／actor再接続／複数ワーカー競合／監査CAS並行書込みの連結試験、旧 `_v1` 表からの実マイグレーション試験、MySQL/MariaDB CREATE TRIGGER権限・既存trigger共存確認、デッドロック時の安全な再試行、部分メタデータの復旧上限とDB外ファイル更新の脅威境界。
 
