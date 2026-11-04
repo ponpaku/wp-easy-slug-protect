@@ -958,7 +958,7 @@ final class ESP_Media_Index {
      * against the global state row (ID 0) before the first Core INSERT.
      */
     public static function guard_new_attachment($data, $postarr, $raw, $update) {
-        if (!self::installed() || $update || !is_array($data) ||
+        if (!self::installed() || !self::enabled() || $update || !is_array($data) ||
             ($data['post_type'] ?? null) !== 'attachment') {
             return $data;
         }
