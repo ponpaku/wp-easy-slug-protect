@@ -124,6 +124,15 @@ docker exec "$container" php /opt/wp-cli.phar --allow-root --path=/var/www/html 
     esp media-index status | python3 -c 'import json,sys; x=json.load(sys.stdin); assert x["installed"] is True and x["ready"] is True and x["enabled"] is False, x'
 echo "PASS: real WP-CLI status/build resumes AJAX work and preserves strict OFF"
 
+# #67 actual production code (not the older disposable PoC): verify no
+# extra table, two concurrent operation IDs, SQL-time fallback, and audited
+# zero-owner creation before the historical fault-injection suites.
+docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+  php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-issue-67-production-state-ci.php \
+  | tee "$report_root/esp67-production-state.log"
+assert_http esp31-public-150x150.jpg 200
+echo 'PASS: ESP67 production state-only mutation tickets and SQL-time triggers'
+
 # R02: real WordPress + MySQL, with a disposable MU plugin that marks the
 # schema uninstalled for this worker and makes verification fail after dbDelta.
 # An acquired scan lock is not a schema failure and must remain retryable.
