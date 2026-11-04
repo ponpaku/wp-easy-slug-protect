@@ -943,7 +943,7 @@ done
   echo 'ESP67 writer never held the canonical postmeta row' >&2
   exit 1
 }
-touch "$esp67_dl_root/release-reaper"
+docker exec "$container" touch /var/www/html/wp-content/uploads/.esp67-hybrid-dl/release-reaper
 if ! wait "$esp67_dl_reaper_pid"; then
   cat "$report_root/esp67-hybrid-deadlock-reaper.log" >&2
   exit 1
