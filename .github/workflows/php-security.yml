@@ -50,6 +50,8 @@ jobs:
         run: php tests/security-litespeed-password-test.php
       - name: Test safe uninstall Rewrite cleanup
         run: php tests/security-uninstall-rewrite-test.php
+      - name: Test SQL trigger and index cleanup on uninstall
+        run: php tests/security-uninstall-index-trigger-test.php
       - name: Test failure of authorization cache rebuilds
         run: php tests/security-cache-failclosed-test.php
       - name: Test generation-tagged caches
