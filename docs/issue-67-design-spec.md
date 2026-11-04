@@ -1,12 +1,12 @@
 # Issue #67 — メディア所有権索引の安全な更新：設計・動作仕様（統合案）
 
-**2026-11-04／設計仕様案。検証済みの事実と製品実装時の必須条件を区別する。**
+**2026-11-04／製品実装PR #78の設計正本。現行コードは実装済み、CI全件通過・製品採用判断は未完了。**
 
 ## 0. 決定事項と現在地
 
 **基本設計**：既存のファイル所有権索引と状態管理の**2テーブルだけ**を維持する。新規のgate、ticket、event、mutation専用テーブルは追加しない。更新処理の識別子は既存のstateテーブルに**1列追加**して保持する。WordPress正本変更をDB側のトリガーでも監視する。通常は添付単位の局所フェンス、正規性の確認できない更新だけ全体の索引を無効化する「hybrid local-first + atomic global fallback」を採用候補とする。
 
-**テーブル名**（ユーザー合意の命名方針。まだ製品コードでは変更していない）：
+**テーブル名**（製品コードに反映済み、旧名称からの移行は検証中）：
 - `{$wpdb->prefix}esp_media_files`（旧：`{$wpdb->prefix}esp_media_files_v1`）
 - `{$wpdb->prefix}esp_media_file_state`（旧：`{$wpdb->prefix}esp_media_file_state_v1`）
 
@@ -33,7 +33,7 @@
 | `esp_media_file_state` | 添付ごとの更新状態と全体coverageを管理する | `attachment_id`、`status`、`revision`、`active_generation`、`pending_count`、`retry_after`、`failure_count`、`audit_cursor`、**新規：`active_mutation_ids`** |
 
 - 上記のテーブル名にWordPressのサイトprefixを付ける。列名 `active_mutation_ids` は製品仕様案。PoCでの試験列名は `esp67_proto_actor_ids` であり、製品列とは区別する。
-- `active_mutation_ids` は更新操作単位の一意なID集合。JSON文字列相当の形式を候補とするが、**JSON型・LONGTEXT型・整合性制約はDB互換性確認後に決定**する。
+- `active_mutation_ids` は更新操作単位の一意なID集合を `LONGTEXT` にJSON配列として保存する。製品コードで実装済み。DBの特殊JSON型を要求しない。
 - `attachment_id > 0` の行は特定添付の状態。**`attachment_id=0` は全体coverage行**であり、新規添付作成のようなID未確定操作のglobal更新IDも保持する。
 - `pending_count` を残す場合、その値は有効な更新ID集合と整合させる。更新IDの登録・解除を**集合の冪等操作**として実施し、同じ登録／解除SQLの再送で他の処理の件数を増減させない。従来の単純な `pending_count±1` を安全性の唯一の根拠にしない。
 - `revision` と `active_generation` は、過去の監査結果や古いファイル所有世代が再公開されないための制御に用いる。更新ID集合の中身は匿名認可結果としてキャッシュしない。
@@ -77,13 +77,13 @@
 ## 7. クラッシュ後の復旧・監査
 
 1. PHPが死亡してもstateの更新IDは残り、索引はDIRTYのまま。**経過時間だけでIDを削除しない**。
-2. 実行中プロセスやDBセッションの有無を安全に判断できる仕組み（単一ホストなら永続inodeのflock等を候補）で、所有者がいないと確認したIDだけ冪等に回収する。マルチホスト／DB proxyでは同じ確認方式が使えると仮定しない。
+2. 同一DBのセッション単位の `GET_LOCK` と `IS_USED_LOCK` で更新IDの生存を確認し、持ち主がいないIDだけを冪等に回収する。DB接続が切れてPHPだけが存続していても、遅延SQLは実行時トリガーの失効判定でglobal DIRTYにする。DB proxyや異なるDBクラスタでは別途受入試験が必要。
 3. 遅延SQLはID回収後に届いてもDBトリガーがglobal dirtyへ落とす。SQLが実行中・未確定の場合は、誤ってREADYを公開しない。
 4. 正本のposts／postmetaとfilesの所有関係を再構築・照合し、更新ID無し・必要な所有者coverage完備・監査revision一致を条件にREADYをCAS公開する。監査途中の新しい正本変更が勝てば古いREADY公開は失敗する必要がある。
 5. **所有パスなし（no-claim）**：添付行は存在するが、`_wp_attached_file`、`_wp_attachment_metadata`、`_esp_media_protected_path_id`の所有根拠がなく、対応する所有パスも0件と厳密に確認できる場合のみ、ゼロ所有世代として監査済み扱いにする案。後から正本に所有パスが発生すれば、DBトリガーが同一TXで全体DIRTYへ切替える。
 6. **部分的なメタデータ**：いずれか一部だけある添付、重複や壊れたメタデータを**無条件にno-claim扱いしない**。安全に分類できない間はfail-closed＋診断／修復対象とする。
 
-**注意**：no-claimのREADY再公開はv6で試験専用SQLを使って成立性を確認した段階。本番用の監査CAS・並行書込みとの競合を含む完成実装は未検証。
+**注意**：所有パスなしの監査はPR #78製品コードに組込済みで個別実WordPressテスト成功。並行監査・更新競合の全条件での安全性は未検証。
 
 ## 8. スキーマ命名・更新・非対応環境
 
@@ -107,19 +107,19 @@
 | 部分メタデータからの安全な自動復旧 | **未確定** |
 | 変更前にすべての旧／新パスをフェンスできるか | **全経路では未検証** |
 | 新PoCのMariaDB、権限不足、複数PHPホスト、移行 | **未検証／要製品仕様確定** |
-| `_v1`なしのテーブル名へのコード変更・移行 | **設計合意のみ。未実装** |
+| `_v1`なしのテーブル名へのコード変更・移行 | **製品コード実装済み**。旧スキーマからの移行テストは修正後CI未確認 |
 
 **安全性の受入条件**：変更後に古い公開索引から保護対象を誤配信しないこと、他ワーカーの更新IDを削除しないこと、正常なREADY公開に正本再監査・更新ID空・revision一致が必要なこと、未対応環境でstrictを誤って有効化しないこと。
 
-**範囲外（現段階）**：パフォーマンスチューニング、管理画面、製品コード統合、PRマージ。設計の成否を左右する条件の確認を優先する。
+**範囲外（現段階）**：パフォーマンスチューニング、管理画面、PRマージ。製品コードはPR #78に実装済み。最終CIと安全性検証は残る。
 
 ## 10. 根拠・成果物
 
-- [v7：state 1列・追加テーブル0の仮実装](issue-67-state-only-prototype-v7.md)
-- [v6：新規添付の作成中断とno-claim](issue-67-architecture-recovery-v6.md)
-- [v5：Core再接続、デッドロック、新規添付多段SQL](issue-67-architecture-recovery-v5.md)
-- [v4：hard-denyとatomic global fallbackの比較](issue-67-architecture-recovery-v4.md)
+- [v7：state 1列・追加テーブル0の仮実装（検証専用PR #77）](https://github.com/ponpaku/wp-easy-slug-protect/blob/test/issue-67-one-column-action-validation/docs/issue-67-state-only-prototype-v7.md)
+- [v6：新規添付の作成中断とno-claim（検証専用PR #77）](https://github.com/ponpaku/wp-easy-slug-protect/blob/test/issue-67-one-column-action-validation/docs/issue-67-architecture-recovery-v6.md)
+- [v5：Core再接続、デッドロック、新規添付多段SQL（検証専用PR #77）](https://github.com/ponpaku/wp-easy-slug-protect/blob/test/issue-67-one-column-action-validation/docs/issue-67-architecture-recovery-v5.md)
+- [v4：hard-denyとatomic global fallbackの比較（検証専用PR #77）](https://github.com/ponpaku/wp-easy-slug-protect/blob/test/issue-67-one-column-action-validation/docs/issue-67-architecture-recovery-v4.md)
 - [検証用Draft PR #77](https://github.com/ponpaku/wp-easy-slug-protect/pull/77)
 - [Issue #67](https://github.com/ponpaku/wp-easy-slug-protect/issues/67)
 
-**この文書は設計の統合版であって実装完了宣言ではない。** 2026-11-04時点で製品本体、main、PR #62は変更していない。
+**この文書は設計の統合版であり、PR #78の製品コードは実装済み。マージや本番採用の承認ではない。** main、PR #62、PR #77は変更していない。
