@@ -982,6 +982,14 @@ docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html
   | tee "$report_root/esp67-write-coverage-trigger.log"
 assert_http esp31-public-150x150.jpg 200
 
+# #67 hybrid SQL-time fallback for wp_posts INSERT/UPDATE/DELETE and
+# wp_postmeta INSERT/UPDATE/DELETE (including by-mid OLD/NEW key changes).
+# Unlike hard-deny, invalid actor operations COMMIT with global dirty.
+docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+  php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-issue-67-hybrid-crud-ci.php \
+  | tee "$report_root/esp67-hybrid-full-crud.log"
+assert_http esp31-public-150x150.jpg 200
+
 # #67: distinguish "SQL already holds the InnoDB row" from "SQL is
 # still queued in a TCP relay". Killing PHP releases flock before a delayed
 # packet is forwarded to MySQL. Without SQL-time ticket gating, old Core
