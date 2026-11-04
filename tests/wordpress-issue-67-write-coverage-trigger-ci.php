@@ -160,6 +160,12 @@ try {
     cov67_check(cov67_title($db,$wpdb->posts,$attachment)===$marker.' updated',
         'attachment UPDATE with owner actor succeeds');
 
+    // The unguarded meta row is created FIRST. Core deletes meta rows
+    // one by one before its final wp_posts DELETE, so a late SQL-time denial
+    // can leave a partially changed attachment even if the protected row stays.
+    $unguarded = add_post_meta($attachment,'_esp67_coverage_untracked','prior',false);
+    cov67_check(is_numeric($unguarded) && (int)$unguarded>0,
+        'unprotected metadata fixture created before guarded metadata');
     $mid = add_post_meta($attachment,'_esp67_coverage_probe','old',false);
     cov67_check(is_numeric($mid) && (int)$mid>0,
         'Core metadata INSERT with valid owner actor succeeds');
@@ -221,12 +227,18 @@ try {
     $after=(int)$db->query("SELECT COUNT(*) AS n FROM {$wpdb->postmeta}
         WHERE post_id=$attachment")->fetch_assoc()['n'];
     $stillPresent=cov67_title($db,$wpdb->posts,$attachment)!==null;
+    $unguardedStillExists=cov67_meta($db,$wpdb->postmeta,(int)$unguarded)!==null;
+    $guardedStillExists=cov67_meta($db,$wpdb->postmeta,$mid)!==null;
     echo 'ESP67_COVERAGE_DENIED_DELETE ' . wp_json_encode([
         'core_return'=>is_object($deleteReturn)?get_class($deleteReturn):$deleteReturn,
         'post_still_present'=>$stillPresent,
         'metadata_rows_before'=>$before,'metadata_rows_after'=>$after,
+        'unguarded_meta_still_present'=>$unguardedStillExists,
+        'guarded_meta_still_present'=>$guardedStillExists,
         'partial_metadata_change'=>$before!==$after
     ]) . "\n";
+    cov67_check($guardedStillExists,
+        'invalid actor did not remove the guarded metadata row');
     cov67_check($stillPresent, 'missing actor prevents wp_posts DELETE');
     if($before!==$after) {
         echo "ESP67_COVERAGE_PARTIAL_DELETE_SIDE_EFFECT_OBSERVED\n";
