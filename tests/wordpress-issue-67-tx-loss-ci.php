@@ -140,6 +140,17 @@ try {
     if (!ESP_Media_Index::reindex_attachment($id)) {
         throw new RuntimeException('Q01 cleanup could not reindex protected fixture');
     }
+    // The production SQL-time fallback can atomically revoke GLOBAL READY
+    // after wpdb reconnect. Local owner reindex alone does not restore global
+    // coverage; an independent full audit must certify the new epoch.
+    for ($attempt=0; $attempt<130; ++$attempt) {
+        ESP_Media_Index::run_batch();
+        $global=$wpdb->get_var("SELECT status FROM $state WHERE attachment_id=0");
+        if ($global==='ready') { break; }
+    }
+    if ($global!=='ready') {
+        throw new RuntimeException('Q01 cleanup global audit did not recover');
+    }
     $after_meta = get_post_meta($id, $key, true);
     $after_path = ESP_Media_Index::resolve(
         wp_upload_dir()['basedir'] . '/esp31-protected.jpg');
