@@ -47,6 +47,7 @@ if ($phase === 'seed') {
         'missing healthy attachment generation');
     update_option('esp_test_cli_healthy_generation', [(int)$healthy, (int)$healthy_generation], false);
 
+    $seeded = [];
     for ($i = 0; $i < 203; ++$i) {
         $id = wp_insert_attachment([
             'post_title' => $prefix . sprintf('%03d', $i),
@@ -58,17 +59,40 @@ if ($phase === 'seed') {
         $file = 'esp-cli-fixture/attachment-' . $id . '.jpg';
         esp_cli_assert(add_post_meta((int)$id, '_wp_attached_file', $file, true) !== false,
             'failed to save canonical attachment path');
-        ESP_Media_Index::finish_noop_writes(); // Model per-attachment request completion in this long-lived fixture.
-        // Only fixture rows, not production. Two are intentionally ineligible.
-        if ($i >= 201) {
-            $set = $i === 201
-                ? "pending_count=1,retry_after=0"
-                : $wpdb->prepare("pending_count=0,retry_after=%d", time() + 3600);
-            $updated = $wpdb->query($wpdb->prepare(
-                "UPDATE $state SET $set WHERE attachment_id=%d AND status='dirty'", $id));
-            esp_cli_assert($updated === 1 && $wpdb->last_error === '',
-                'cannot seed pending/backoff row');
+        // One logical attachment-creation operation per test iteration.
+        // The production design reserves global state row 0 before ID
+        // creation; retire it when this simulated request finishes.
+        ESP_Media_Index::finish_noop_writes();
+        ESP_Media_Index::finish_global_creations();
+        esp_cli_assert(ESP_Media_Index::reindex_attachment((int)$id),
+            'cannot index seeded owner before the deferred-repair scenario');
+        $seeded[] = (int)$id;
+    }
+    // Complete initial global audit before simulating the F01 READY+DIRTY
+    // repair queue; otherwise the new-attachment global tickets correctly
+    // keep the site fail-closed and invalidate this historical fixture.
+    for ($attempt = 0; $attempt < 130; ++$attempt) {
+        ESP_Media_Index::run_batch();
+        if (ESP_Media_Index::ready() &&
+            $wpdb->get_var("SELECT status FROM $state WHERE attachment_id=0")==='ready') {
+            break;
         }
+    }
+    esp_cli_assert($wpdb->get_var("SELECT status FROM $state WHERE attachment_id=0")==='ready',
+        'bootstrap must finish after all new attachment creation tickets');
+    // All 203 are now indexed, then 201 are queued for eligible repair and
+    // 2 are deferred (pending vs retry_backoff) with GLOBAL still READY.
+    foreach ($seeded as $i => $id) {
+        $set = $i === 201
+            ? "pending_count=1,retry_after=0"
+            : ($i === 202
+                ? $wpdb->prepare("pending_count=0,retry_after=%d",time()+3600)
+                : "pending_count=0,retry_after=0");
+        $updated=$wpdb->query($wpdb->prepare(
+            "UPDATE $state SET status='dirty',revision=revision+1,$set
+             WHERE attachment_id=%d AND status='ready'",$id));
+        esp_cli_assert($updated===1 && $wpdb->last_error==='',
+            'cannot seed test-only eligible/deferred index owner');
     }
     $eligible = (int)$wpdb->get_var($wpdb->prepare(
         "SELECT COUNT(*) FROM $state s JOIN {$wpdb->posts} p ON p.ID=s.attachment_id
