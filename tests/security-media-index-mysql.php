@@ -164,6 +164,7 @@ function get_option($name, $default = false) {
 }
 function update_option($name, $value, $autoload = null) { $GLOBALS['options'][$name] = $value; return true; }
 function wp_json_encode($value) { return json_encode($value); }
+function maybe_serialize($value) { return is_array($value) || is_object($value) ? serialize($value) : $value; }
 function maybe_unserialize($raw) {
     $data = @unserialize($raw, ['allowed_classes' => false]);
     return $data === false && $raw !== 'b:0;' ? $raw : $data;
