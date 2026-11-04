@@ -990,6 +990,47 @@ docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html
   | tee "$report_root/esp67-hybrid-full-crud.log"
 assert_http esp31-public-150x150.jpg 200
 
+# #67 design-choice experiment: SIGKILL during attachment creation leaves
+# no path-bearing metadata. Compare existing global audit (stalls) with a
+# SYNTHETIC zero-owner READY snapshot, then deliver a real late path claim.
+# DB triggers must co-commit global dirty before an old public 200 is possible.
+esp67_empty_php="/var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-issue-67-empty-owner-abort-ci.php"
+esp67_empty_phase() {
+  docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+    ESP67_EMPTY_OWNER_PHASE="$1" php "$esp67_empty_php"
+}
+esp67_empty_phase install | tee "$report_root/esp67-empty-install.log"
+esp67_empty_phase writer > "$report_root/esp67-empty-writer.log" 2>&1 &
+esp67_empty_worker=$!
+esp67_empty_dir="$fixture_root/wordpress/wp-content/uploads/.esp67-empty-owner"
+for attempt in $(seq 1 120); do
+  if [[ -f "$esp67_empty_dir/created" ]]; then break; fi
+  if ! kill -0 "$esp67_empty_worker" 2>/dev/null; then break; fi
+  sleep 0.1
+done
+[[ -f "$esp67_empty_dir/created" ]] || {
+  cat "$report_root/esp67-empty-writer.log" >&2
+  echo 'ESP67 synthetic incomplete attachment was not created' >&2
+  exit 1
+}
+esp67_empty_pid="$(cat "$esp67_empty_dir/pid")"
+docker exec "$container" kill -KILL "$esp67_empty_pid"
+if wait "$esp67_empty_worker"; then
+  echo 'ESP67 expected forced death of incomplete attachment PHP worker' >&2
+  exit 1
+fi
+esp67_empty_phase inspect | tee "$report_root/esp67-empty-existing-policy.log"
+assert_http esp31-public-150x150.jpg 503
+esp67_empty_phase snapshot | tee "$report_root/esp67-empty-zero-owner-snapshot.log"
+assert_http esp31-public-150x150.jpg 200
+esp67_empty_phase claim | tee "$report_root/esp67-empty-late-path-claim.log"
+assert_http esp31-public-150x150.jpg 503
+esp67_empty_phase complete | tee "$report_root/esp67-empty-completed-protected-owner.log"
+assert_http esp31-public-150x150.jpg 503
+esp67_empty_phase cleanup | tee "$report_root/esp67-empty-restored.log"
+assert_http esp31-public-150x150.jpg 200
+echo 'PASS: ESP67 aborted no-path attachment can be snapshotted as empty only when later DB writes atomically invalidate coverage'
+
 # #67: distinguish "SQL already holds the InnoDB row" from "SQL is
 # still queued in a TCP relay". Killing PHP releases flock before a delayed
 # packet is forwarded to MySQL. Without SQL-time ticket gating, old Core
