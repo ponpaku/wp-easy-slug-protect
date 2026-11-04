@@ -179,8 +179,22 @@ if($phase==='complete'){
  eo67_assert(add_post_meta($id,'_wp_attachment_metadata',[
   'file'=>$public,'width'=>150,'height'=>150,'sizes'=>[]
  ],true)!==false,'completes canonical image metadata');
- eo67_assert(add_post_meta($id,ESP_Media_Index::PROTECTION_META,
-    'path_http',true)!==false,'completes protected owner identity');
+ $protectedKey=ESP_Media_Index::PROTECTION_META;
+ $beforeProtection=$wpdb->get_results($wpdb->prepare(
+   "SELECT meta_id,meta_value FROM {$wpdb->postmeta}
+     WHERE post_id=%d AND meta_key=%s",$id,$protectedKey),ARRAY_A);
+ $storedProtection=add_post_meta($id,$protectedKey,'path_http',true);
+ if($storedProtection===false){
+   echo 'ESP67_EMPTY_OWNER_PROTECTION_DIAG '.wp_json_encode([
+     'key'=>$protectedKey,'existing'=>$beforeProtection,
+     'last_error'=>$wpdb->last_error,
+     'wpdb_insert_id'=>$wpdb->insert_id,
+     'guard_add_meta'=>has_filter('add_post_metadata',
+       ['ESP_Media_Index','guard_add_meta']),
+     'hooks'=>array_keys($GLOBALS['wp_filter']??[])
+   ])."\n";
+ }
+ eo67_assert($storedProtection!==false,'completes protected owner identity');
  eo67_audit($state);
  eo67_assert(eo67_global($state)==='ready','global returns READY after complete conflicting owner');
  eo67_assert(ESP_Media_Index::resolve($path)['status']==='ambiguous',
