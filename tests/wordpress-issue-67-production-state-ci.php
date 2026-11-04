@@ -192,6 +192,42 @@ try {
     echo "ESP67_PRODUCT_EMPTY_OWNER_READY\n";
     wp_delete_attachment($new,true);
     p67audit();
+
+    // A real new image does not have _wp_attachment_metadata when Core
+    // first writes _wp_attached_file. This intermediate partial state is
+    // safe only because the global creation ticket is already DIRTY.
+    $uploadId=wp_insert_post(['post_type'=>'attachment',
+        'post_title'=>'ESP67 staged image creation',
+        'post_status'=>'inherit','post_mime_type'=>'image/jpeg'],true);
+    p67(!is_wp_error($uploadId)&&(int)$uploadId>0,
+        'Core staged attachment INSERT completed');
+    $uploadId=(int)$uploadId;
+    $uploadRoot=wp_upload_dir()['basedir'];
+    $relativeUpload='esp67-staged-upload-'.$uploadId.'.jpg';
+    $absoluteUpload=$uploadRoot.'/'.$relativeUpload;
+    p67(copy($public,$absoluteUpload),'staged image file copied in disposable uploads');
+    p67(add_post_meta($uploadId,'_wp_attached_file',$relativeUpload,true)!==false,
+        'Core allows first attached path before metadata is available');
+    p67(add_post_meta($uploadId,'_wp_attachment_metadata',[
+        'file'=>$relativeUpload,'width'=>150,'height'=>150,'sizes'=>[]
+    ],true)!==false,
+        'Core allows subsequent derivative metadata under same global creation');
+    p67(add_post_meta($uploadId,'_esp_media_protected_path_id','path_http',true)!==false,
+        'Core allows protection metadata during global creation');
+    p67(p67row(0)['status']==='dirty' &&
+        (int)p67row(0)['pending_count']>0,
+        'partially completed attachment never exposes global READY');
+    ESP_Media_Index::finish_global_creations();
+    p67audit();
+    $uploaded=ESP_Media_Index::resolve($absoluteUpload);
+    p67($uploaded['status']==='resolved' &&
+        $uploaded['protected_path_id']==='path_http' &&
+        ESP_Media_Index::resolve($public)['status']==='resolved',
+        'completed staged attachment is protected after full audit');
+    echo "ESP67_PRODUCT_STAGED_UPLOAD_GLOBAL_SAFE\n";
+    wp_delete_attachment($uploadId,true);
+    @unlink($absoluteUpload);
+    p67audit();
 } finally {
     $wpdb->query('SET @esp_media_mutation_actor=NULL');
     $write($old);
