@@ -56,13 +56,15 @@ try {
          post_id bigint(20) unsigned NOT NULL,
          meta_key varchar(191) NOT NULL,
          meta_value longtext NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
-    mig67_sql("INSERT INTO $posts(ID,post_type) VALUES(7,'attachment')");
+    mig67_sql("INSERT INTO $posts(ID,post_type) VALUES(7,'attachment'),(8,'attachment')");
     mig67_sql("INSERT INTO $meta(post_id,meta_key,meta_value)
         VALUES(7,'_wp_attached_file','$path'),
-              (7,'_esp_media_protected_path_id','secret_before')");
+              (7,'_esp_media_protected_path_id','secret_before'),
+              (8,'_wp_attached_file','esp67-migration-stale-ticket.jpg')");
     mig67_sql("INSERT INTO $legacyState
       (attachment_id,status,revision,active_generation,pending_count,audit_cursor)
-      VALUES(0,'ready',4,0,0,0),(7,'ready',5,5,0,0)");
+      VALUES(0,'ready',4,0,0,0),(7,'ready',5,5,0,0),
+            (8,'dirty',3,0,1,0)");
     $hash=hash('sha256',$path);
     mig67_sql("INSERT INTO $legacyFiles
       (path_hash,file_path,attachment_id,generation,protected_path_id)
@@ -83,6 +85,12 @@ try {
         "SHOW COLUMNS FROM $newState LIKE %s",'active_mutation_ids'));
     mig67_ok($found==='active_mutation_ids',
         'migration adds exactly one state mutation ID column');
+    $legacyOwner=$wpdb->get_row("SELECT status,pending_count,active_mutation_ids
+        FROM $newState WHERE attachment_id=8",ARRAY_A);
+    mig67_ok($legacyOwner['status']==='dirty' &&
+        (int)$legacyOwner['pending_count']===0 &&
+        $legacyOwner['active_mutation_ids']==='[]',
+        'unidentifiable legacy crashed tickets are retired after triggers install');
     $oldExists=$wpdb->get_var($wpdb->prepare(
         'SHOW TABLES LIKE %s',$wpdb->esc_like($legacyState)));
     $oldFiles=$wpdb->get_var($wpdb->prepare(
@@ -110,8 +118,9 @@ try {
         if($global==='ready')break;
     }
     mig67_ok($global==='ready' &&
-        ESP_Media_Index::resolve($absolute)['protected_path_id']==='secret_after',
-        'fresh canonical audit publishes migrated protection after DB write');
+        ESP_Media_Index::resolve($absolute)['protected_path_id']==='secret_after' &&
+        $wpdb->get_var("SELECT status FROM $newState WHERE attachment_id=8")==='ready',
+        'fresh canonical audit publishes migrated protection and recovers legacy orphan');
     echo "ESP67_PRODUCT_LEGACY_TABLE_MIGRATION_VERIFIED\n";
 } finally {
     $wpdb->prefix=$oldPrefix;
