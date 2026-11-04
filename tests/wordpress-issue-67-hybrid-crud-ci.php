@@ -16,6 +16,7 @@ $db=new mysqli(DB_HOST,DB_USER,DB_PASSWORD,DB_NAME);
 $state=ESP_Media_Index::state_table();
 $posts=$wpdb->posts;$meta=$wpdb->postmeta;
 $gate=$wpdb->prefix.'esp67_hybrid_crud_gate_probe';
+$events=$wpdb->prefix.'esp67_hybrid_crud_event_probe';
 $names=[];$ids=[];
 $key='_esp67_hybrid_crud_probe';
 $marker='ESP67 hybrid crud '.str_replace('.','',(string)microtime(true));
@@ -54,6 +55,13 @@ try {
  hc67_sql($db,"CREATE TABLE $gate(owner_id BIGINT UNSIGNED PRIMARY KEY,
  actor VARBINARY(80) NOT NULL) ENGINE=InnoDB",'created disposable gate');
  hc67_sql($db,"INSERT INTO $gate VALUES(0,'ACTOR_A')",'global actor ready');
+ hc67_sql($db,"CREATE TABLE $events (
+   event_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+   event_name VARCHAR(48) NOT NULL,
+   owner_id BIGINT UNSIGNED NOT NULL,
+   actor VARBINARY(80) NULL,
+   fallback TINYINT NOT NULL
+  ) ENGINE=InnoDB",'created SQL trigger trace');
  // Disable only the existing index hooks in this disposable PHP process,
  // allowing the SQL-time trigger to be tested without a prior PHP veto.
  remove_action('add_attachment',['ESP_Media_Index','on_attachment_created'],20);
@@ -76,6 +84,9 @@ try {
     IF $condition THEN
       SELECT COUNT(*) INTO n FROM $gate WHERE owner_id=$owner
         AND actor=CAST(@esp67_hybrid_crud_actor AS BINARY) FOR UPDATE;
+      INSERT INTO $events (event_name,owner_id,actor,fallback)
+        VALUES ('POSTS_$event',$owner,CAST(@esp67_hybrid_crud_actor AS BINARY),
+          IF(n<>1,1,0));
       IF n<>1 THEN
         UPDATE $state SET status='dirty',revision=revision+1,
           audit_cursor=0 WHERE attachment_id=0;
@@ -96,6 +107,9 @@ try {
      (SELECT 1 FROM $posts WHERE ID=$ref.post_id AND post_type='attachment') THEN
       SELECT COUNT(*) INTO n FROM $gate WHERE owner_id=$ref.post_id
         AND actor=CAST(@esp67_hybrid_crud_actor AS BINARY) FOR UPDATE;
+      INSERT INTO $events (event_name,owner_id,actor,fallback)
+        VALUES ('META_$event',$ref.post_id,CAST(@esp67_hybrid_crud_actor AS BINARY),
+          IF(n<>1,1,0));
       IF n<>1 THEN
         UPDATE $state SET status='dirty',revision=revision+1,
           audit_cursor=0 WHERE attachment_id=0;
@@ -114,8 +128,18 @@ try {
  $attached=(int)$attached;$ids[]=$attached;
  hc67_sql($db,"INSERT INTO $gate VALUES($attached,'ACTOR_A')",
    'local actor available for newly created attachment');
- hc67_check(hc67_global($db,$state)==='ready',
-   'valid attachment INSERT preserves global READY');
+ $insertEvents=$db->query("SELECT event_name,owner_id,CAST(actor AS CHAR) AS actor,fallback
+     FROM $events ORDER BY event_id")->fetch_all(MYSQLI_ASSOC);
+ echo 'ESP67_HYBRID_VALID_CREATE_SQL_TRACE '.wp_json_encode($insertEvents)."\n";
+ if(hc67_global($db,$state)!=='ready'){
+   echo "ESP67_HYBRID_VALID_CREATE_GLOBAL_FALLBACK\n";
+   hc67_check(count(array_filter($insertEvents,
+       static fn($e)=>(int)$e['fallback']===1))>0,
+       'valid Core attachment create had an extra unregistered write requiring fallback');
+   hc67_audit($db,$state);
+ }else{
+   echo "ESP67_HYBRID_VALID_CREATE_GLOBAL_READY\n";
+ }
  $mid=add_post_meta($attached,$key,'before',true);
  hc67_check(is_numeric($mid) && (int)$mid>0,'valid Core metadata INSERT succeeds');
  $mid=(int)$mid;
@@ -174,6 +198,7 @@ try {
 } finally {
  foreach(array_reverse($names) as $n)$db->query("DROP TRIGGER IF EXISTS $n");
  $db->query("DROP TABLE IF EXISTS $gate");
+ $db->query("DROP TABLE IF EXISTS $events");
  $wpdb->suppress_errors($previous);
  foreach(array_reverse($ids) as $id) {
    if(get_post($id))wp_delete_post($id,true);
