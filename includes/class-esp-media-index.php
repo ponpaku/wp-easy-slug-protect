@@ -1,5 +1,6 @@
 <?php
 if (!defined('ABSPATH')) { exit; }
+require_once __DIR__ . '/class-esp-media-mutation-state.php';
 
 /**
  * Issue #63: derived WordPress attachment file ownership / protection index.
@@ -39,11 +40,11 @@ final class ESP_Media_Index {
 
     public static function files_table() {
         global $wpdb;
-        return $wpdb->prefix . 'esp_media_files_v1';
+        return $wpdb->prefix . 'esp_media_files';
     }
     public static function state_table() {
         global $wpdb;
-        return $wpdb->prefix . 'esp_media_file_state_v1';
+        return $wpdb->prefix . 'esp_media_file_state';
     }
     private static function table($table) {
         if (!is_string($table) || !preg_match('/^[a-zA-Z0-9_]+$/D', $table)) {
@@ -58,7 +59,7 @@ final class ESP_Media_Index {
         return (string)get_option(self::READY_OPTION, '0') === '1';
     }
     private static function installed() {
-        return (string)get_option(self::SCHEMA_OPTION, '0') === '3';
+        return (string)get_option(self::SCHEMA_OPTION, '0') === '4';
     }
 
 
@@ -368,6 +369,29 @@ final class ESP_Media_Index {
         }
         $files = self::table(self::files_table());
         $state = self::table(self::state_table());
+        // Reuse the *same two* old tables rather than creating new v2 tables.
+        // READY was already revoked above; an interrupted rename remains
+        // fail-closed until schema and triggers can be installed.
+        foreach ([
+            $wpdb->prefix . 'esp_media_files_v1' => $files,
+            $wpdb->prefix . 'esp_media_file_state_v1' => $state,
+        ] as $legacy => $current) {
+            $old = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s',
+                $wpdb->esc_like($legacy)));
+            $new = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s',
+                $wpdb->esc_like($current)));
+            if ($wpdb->last_error !== '') { return false; }
+            if ($old === $legacy && $new === $current) {
+                // Never guess between two divergent index generations.
+                error_log('ESP: ambiguous legacy and current media index tables');
+                return false;
+            }
+            if ($old === $legacy && $new !== $current &&
+                ($wpdb->query("RENAME TABLE $legacy TO $current") === false ||
+                $wpdb->last_error !== '')) {
+                return false;
+            }
+        }
         require_once ABSPATH . 'wp-admin/includes/upgrade.php';
         $charset = $wpdb->get_charset_collate();
         dbDelta("CREATE TABLE $files (
@@ -390,6 +414,7 @@ final class ESP_Media_Index {
             retry_after bigint(20) unsigned NOT NULL DEFAULT 0,
             failure_count int(11) unsigned NOT NULL DEFAULT 0,
             audit_cursor bigint(20) unsigned NOT NULL DEFAULT 0,
+            active_mutation_ids longtext NULL,
             PRIMARY KEY  (attachment_id),
             KEY status (status),
             KEY retry_queue (status,pending_count,retry_after,changed_at)
@@ -400,7 +425,8 @@ final class ESP_Media_Index {
         }
         // dbDelta may report a partial upgrade without throwing. Verify
         // the specific columns required by the retry/ownership contract.
-        foreach (['retry_after', 'failure_count', 'audit_cursor'] as $column) {
+        foreach (['retry_after', 'failure_count', 'audit_cursor',
+                  'active_mutation_ids'] as $column) {
             $row = $wpdb->get_var($wpdb->prepare(
                 "SHOW COLUMNS FROM $state LIKE %s", $column));
             if ($wpdb->last_error !== '' || $row !== $column) { return false; }
@@ -409,8 +435,13 @@ final class ESP_Media_Index {
             (attachment_id,status,revision,audit_cursor) VALUES (0,'dirty',1,0)") === false) {
             return false;
         }
-        return update_option(self::SCHEMA_OPTION, '3', false) ||
-            (string)get_option(self::SCHEMA_OPTION) === '3';
+        // Do not publish a previously audited READY epoch after migration.
+        if ($wpdb->query("UPDATE $state SET status='dirty',revision=revision+1,
+              audit_cursor=0 WHERE attachment_id=0") !== 1 ||
+            $wpdb->last_error !== '') { return false; }
+        if (!ESP_Media_Mutation_State::install_triggers()) { return false; }
+        return update_option(self::SCHEMA_OPTION, '4', false) ||
+            (string)get_option(self::SCHEMA_OPTION) === '4';
     }
 
     /** WordPress metadata paths are relative to the uploads root. */
@@ -983,53 +1014,14 @@ final class ESP_Media_Index {
             }
         }
     }
+    /** Each WordPress operation owns a durable idempotent mutation ID. */
     private static function mark_dirty($id) {
-        global $wpdb;
         if ($id <= 0) { return false; }
-        $table = self::table(self::state_table());
-        $sql = $wpdb->prepare("INSERT INTO $table
-          (attachment_id,status,revision,pending_count,changed_at)
-          VALUES (%d,'dirty',1,1,%d)
-          ON DUPLICATE KEY UPDATE status='dirty',
-          revision=revision+1, pending_count=pending_count+1,
-          retry_after=0, failure_count=0, changed_at=VALUES(changed_at)",
-          $id, time());
-        return $wpdb->query($sql) !== false && $wpdb->last_error === '';
+        return ESP_Media_Mutation_State::begin((int)$id);
     }
     private static function complete_mutation($id) {
-        global $wpdb;
-        if ($id <= 0 || isset(self::$ambiguous_pending[$id])) { return false; }
-        $state = self::table(self::state_table());
-        // This is also used for post-hooks where another plugin bypassed the
-        // corresponding pre-hook: reindex rather than trusting old data.
-        $row = $wpdb->get_row($wpdb->prepare(
-            "SELECT status,pending_count FROM $state WHERE attachment_id=%d", $id), ARRAY_A);
-        if ($wpdb->last_error !== '') { return false; }
-        if (!$row) {
-            if (!self::mark_dirty($id)) { return false; }
-        } else if ((int)$row['pending_count'] === 0) {
-            if (!self::mark_dirty($id)) { return false; }
-        }
-        $decremented = $wpdb->query($wpdb->prepare(
-            "UPDATE $state SET pending_count=pending_count-1
-             WHERE attachment_id=%d AND pending_count>0", $id));
-        // The result is about THIS decrement, not whether other concurrent
-        // writers still have pending operations. In particular there is no
-        // separate SELECT whose failure could disguise a successful decrement.
-        if ($decremented !== 1 || $wpdb->last_error !== '') {
-            // The server may have committed this UPDATE and lost the reply.
-            // Repeating it is NOT idempotent. Leave the state dirty and
-            // fail closed; durable ticket-level recovery is Q01 follow-up.
-            self::$ambiguous_pending[$id] = true;
-            error_log('ESP: Ambiguous media index pending decrement; no automatic retry for ' . $id);
-            return false;
-        }
-        // Never START/COMMIT a transaction inside a WordPress metadata hook.
-        // A caller may have an open transaction; the dirty marker participates
-        // in that transaction and becomes visible atomically with the metadata.
-        // The independent Cron worker rebuilds only after it can read the
-        // committed dirty marker (and pending_count = 0).
-        return true;
+        if ($id <= 0) { return false; }
+        return ESP_Media_Mutation_State::finish((int)$id);
     }
 
     /**
@@ -1143,7 +1135,8 @@ final class ESP_Media_Index {
                 "UPDATE $state SET status='ready',active_generation=%d,changed_at=%d,
                  failure_count=0,retry_after=0
                  WHERE attachment_id=%d AND revision=%d
-                   AND pending_count=0 AND status='dirty'",
+                   AND pending_count=0 AND IFNULL(active_mutation_ids,'[]')='[]'
+                   AND status='dirty'",
                 $revision, time(), $id, $revision));
             if ($published !== 1) {
                 throw new RuntimeException('stale revision or publish failure');
@@ -1495,6 +1488,9 @@ final class ESP_Media_Index {
             error_log('ESP: Media index schema install failed');
             return 'schema_failed';
         }
+        // Reclaim only truly orphaned IDs (DB named-lock liveness gate).
+        // Delayed canonical SQL after reaping triggers atomic global dirty.
+        ESP_Media_Mutation_State::reap();
         // First remove orphans. Individual corrupt attachments can be retried
         // later, but a DB outage or failed orphan purge must halt the cycle.
         if (!self::reconcile_orphans(false)) { return; }
@@ -1550,7 +1546,8 @@ final class ESP_Media_Index {
             // makes this stale worker's result unusable.
             $written = $wpdb->query($wpdb->prepare(
                 "UPDATE $state SET status='ready',audit_cursor=0,changed_at=%d
-                 WHERE attachment_id=0 AND revision=%d AND audit_cursor=%d",
+                 WHERE attachment_id=0 AND revision=%d AND audit_cursor=%d
+                   AND pending_count=0 AND IFNULL(active_mutation_ids,'[]')='[]'",
                 time(), $epoch, $cursor));
             if ($written === false || $wpdb->last_error !== '') { return; }
             $fresh = $wpdb->get_row("SELECT revision,status FROM $state
