@@ -1,3 +1,6 @@
+> **2026-11-04 追加更新：後続の [設計判断 v5](issue-67-architecture-recovery-v5.md) を優先してください。**
+> v4のhybrid案に対して、実wpdb再接続・InnoDBデッドロック・postmeta/posts主要CRUDの追加試験を実施しました。新規attachmentのCore内追加UPDATEで局所ID登録前にglobal dirtyへfallbackする点、およびメタデータ未完成時の全体503継続可能性が新たなP0です。製品実装・全経路保証は未完です。
+
 # Issue #67 — 書込み時DBゲートの再評価 v4：hard-deny と transactional invalidation
 
 **2026-11-04／状態：検証用Draft PR #77の追加実験。製品未実装・本番未承認。**
