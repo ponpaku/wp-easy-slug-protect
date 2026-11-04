@@ -28,6 +28,12 @@ Resolverはglobal READYに加え、global pending=0、active_mutation_idsが空�
 - `tests/security-media-index-mysql.php`（stateのみの2トークン／DB応答消失によるCAS再送）
 - `tests/wordpress-media-index-cli-ci.php`、`tests/wordpress-media-index-f01-ci.php`、`tests/wordpress-issue-67-tx-loss-ci.php`、`tests/issue-63-production-benchmark.php`、`tests/fixtures/esp63-schema-failure-mu.php`、`.github/scripts/test-wordpress-apache-http.sh`（スキーマv4と新global fallbackを反映）
 
+## 既存PoCと製品CIの分離
+
+旧PR #77の実験には「安全装置を意図的に外し、匿名HTTP200による反例が再現すること」を成功条件にしたシナリオがある。製品用DBトリガーが導入された環境でこれらを同時に動かすと、**安全なHTTP503が返ることで逆に失敗**する。旧PoCは検証専用PR #77のCI証拠として保存し、製品スキーマv4環境のApache実装CIからのみ当該実験群を条件付き除外する。製品の本物の2更新ID・失効actor・欠落actor・未予約パスSQL・新規添付E2Eと、旧F01実2ワーカー、旧Q01実wpdb再接続/ACK消失は引き続き実行する。
+
+この切り分けは**旧PoCの実験成功＝製品の安全性保証**という誤認を避けるためでもある。新しい製品コードのクラッシュ・同時監査・遅延SQLに関する専用検証は別の受入条件として残る。
+
 ## 検証済み／未完了の区別
 
 実WordPress製品テストで、stateへの2つの本人ID、片方のみの冪等解放、有効actorでの局所READY維持、失効actor・消失actorの同一TX global DIRTY、**有効actorでも未予約のパスSQLはglobal DIRTY**、新規添付のID未確定状態と所有パス0件のREADY監査を確認した。
