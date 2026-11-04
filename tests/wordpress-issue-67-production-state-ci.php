@@ -245,6 +245,11 @@ try {
         'completed staged attachment is protected after full audit');
     echo "ESP67_PRODUCT_STAGED_UPLOAD_GLOBAL_SAFE\n";
     wp_delete_attachment($uploadId,true);
+    // This CLI fixture executes many request-equivalent Core mutations in
+    // one process. Deletion-related prehooks normally retire their no-op
+    // tickets at PHP shutdown; explicitly end this logical request before
+    // asking the auditor to publish global READY.
+    ESP_Media_Index::finish_noop_writes();
     @unlink($absoluteUpload);
     p67audit();
 } finally {
