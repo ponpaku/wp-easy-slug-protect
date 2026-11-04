@@ -176,4 +176,86 @@ final class ESP_Media_Mutation_State {
         }
         return $reaped;
     }
+    /**
+     * Install DB-time authorization coverage. A missing/expired PHP token can
+     * never cause a successful canonical SQL COMMIT with stale global READY.
+     *
+     * No gate table: every trigger reads the existing state table only.
+     * Must finish before bootstrap / migrated indexes can be marked READY.
+     */
+    public static function install_triggers() {
+        global $wpdb;
+        $state = self::table();
+        $posts = $wpdb->posts;
+        $meta = $wpdb->postmeta;
+        $namespace = (string) DB_NAME . "\0" . (string)$wpdb->prefix;
+        $prefix = 'esp67_' . substr(hash('sha256', $namespace), 0, 16);
+        $check = static function($owner) use($state) {
+            return "SELECT COUNT(*) INTO esp_actor_ok FROM $state
+              WHERE attachment_id=$owner AND status='dirty' AND pending_count>0
+                AND @esp_media_mutation_actor IS NOT NULL
+                AND CHAR_LENGTH(@esp_media_mutation_actor)=32
+                AND LOCATE(CONCAT('\"',@esp_media_mutation_actor,'\"'),
+                  IFNULL(active_mutation_ids,'[]'))>0 FOR UPDATE;
+              IF esp_actor_ok=0 AND $owner<>0 THEN
+                SELECT COUNT(*) INTO esp_actor_ok FROM $state
+                  WHERE attachment_id=0 AND status='dirty' AND pending_count>0
+                    AND @esp_media_mutation_actor IS NOT NULL
+                    AND CHAR_LENGTH(@esp_media_mutation_actor)=32
+                    AND LOCATE(CONCAT('\"',@esp_media_mutation_actor,'\"'),
+                      IFNULL(active_mutation_ids,'[]'))>0 FOR UPDATE;
+              END IF;
+              IF esp_actor_ok=0 THEN
+                UPDATE $state SET status='dirty',revision=revision+1,
+                  audit_cursor=0 WHERE attachment_id=0;
+                IF ROW_COUNT()<>1 THEN
+                  SIGNAL SQLSTATE '45000'
+                    SET MESSAGE_TEXT='ESP: missing global coverage state';
+                END IF;
+              END IF;";
+        };
+        $keys = "('_wp_attached_file','_wp_attachment_metadata',
+          '_esp_media_protected_path_id')";
+        $definitions = [];
+        foreach (['INSERT','UPDATE','DELETE'] as $event) {
+            $name = $prefix . '_p' . strtolower(substr($event,0,1));
+            $body = 'DECLARE esp_actor_ok INT DEFAULT 0;';
+            if ($event === 'INSERT') {
+                $body .= "IF NEW.post_type='attachment' THEN " . $check('0') . " END IF;";
+            } elseif ($event === 'DELETE') {
+                $body .= "IF OLD.post_type='attachment' THEN " . $check('OLD.ID') . " END IF;";
+            } else {
+                $body .= "IF OLD.post_type='attachment' OR
+                   NEW.post_type='attachment' THEN " . $check('NEW.ID') . " END IF;";
+            }
+            $definitions[$name] = "CREATE TRIGGER $name AFTER $event ON $posts
+                FOR EACH ROW BEGIN $body END";
+        }
+        foreach (['INSERT','UPDATE','DELETE'] as $event) {
+            $name = $prefix . '_m' . strtolower(substr($event,0,1));
+            $body = 'DECLARE esp_actor_ok INT DEFAULT 0;';
+            $refs = $event === 'UPDATE' ? ['OLD','NEW'] :
+                [$event === 'DELETE' ? 'OLD' : 'NEW'];
+            foreach ($refs as $ref) {
+                $body .= "IF $ref.meta_key IN $keys AND EXISTS
+                   (SELECT 1 FROM $posts WHERE ID=$ref.post_id
+                     AND post_type='attachment') THEN "
+                    . $check("$ref.post_id") . " END IF;";
+            }
+            $definitions[$name] = "CREATE TRIGGER $name AFTER $event ON $meta
+                FOR EACH ROW BEGIN $body END";
+        }
+        foreach ($definitions as $name => $ddl) {
+            // Called only during schema upgrade when authorization is globally
+            // revoked. Reinstallation must not retain a partial older gate.
+            $wpdb->query("DROP TRIGGER IF EXISTS $name");
+            if ($wpdb->last_error !== '' ||
+                $wpdb->query($ddl) === false || $wpdb->last_error !== '') {
+                error_log('ESP: Media mutation trigger installation failed: ' . $name);
+                return false;
+            }
+        }
+        return true;
+    }
+
 }
