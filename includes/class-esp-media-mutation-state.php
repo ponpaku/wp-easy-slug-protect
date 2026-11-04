@@ -273,9 +273,10 @@ final class ESP_Media_Mutation_State {
                   AND (SELECT pending_count FROM $state
                     WHERE attachment_id=0)=0
                   AND (COALESCE(@esp_media_expected_owner,-1)<>NEW.post_id
-                    OR COALESCE(@esp_media_expected_meta_key,'')<>NEW.meta_key
-                    OR COALESCE(@esp_media_expected_value_sha,'')
-                      <>COALESCE(SHA2(NEW.meta_value,256),''))
+                    OR CAST(COALESCE(@esp_media_expected_meta_key,'') AS BINARY)
+                       <>CAST(NEW.meta_key AS BINARY)
+                    OR CAST(COALESCE(@esp_media_expected_value_sha,'') AS BINARY)
+                       <>CAST(COALESCE(SHA2(NEW.meta_value,256),'') AS BINARY))
                   THEN UPDATE $state SET status='dirty',revision=revision+1,
                       audit_cursor=0 WHERE attachment_id=0;
                   IF ROW_COUNT()<>1 THEN
