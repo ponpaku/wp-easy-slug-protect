@@ -896,6 +896,75 @@ esp67_flock_phase restore hybrid-reconnect | tee "$report_root/esp67-hybrid-reco
 assert_http esp31-public-150x150.jpg 200
 echo 'PASS: ESP67 real wpdb reconnect atomically invalidates global coverage and recovers'
 
+# #67: deterministic lock-order counterexample. A reaper holding state0
+# waits on a WordPress Core postmeta row, while an AFTER UPDATE trigger
+# holds that postmeta row and waits on state0. Both use real InnoDB.
+esp67_dl_php="/var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-issue-67-hybrid-deadlock-ci.php"
+esp67_dl_phase() {
+  docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html \
+    ESP67_HYBRID_DL_PHASE="$1" php "$esp67_dl_php"
+}
+esp67_dl_phase setup | tee "$report_root/esp67-hybrid-deadlock-setup.log"
+esp67_dl_phase reaper > "$report_root/esp67-hybrid-deadlock-reaper.log" 2>&1 &
+esp67_dl_reaper_pid=$!
+esp67_dl_root="$fixture_root/wordpress/wp-content/uploads/.esp67-hybrid-dl"
+for attempt in $(seq 1 200); do
+  if [[ -f "$esp67_dl_root/state-locked" ]]; then break; fi
+  if ! kill -0 "$esp67_dl_reaper_pid" 2>/dev/null; then break; fi
+  sleep 0.1
+done
+[[ -f "$esp67_dl_root/state-locked" ]] || {
+  cat "$report_root/esp67-hybrid-deadlock-reaper.log" >&2
+  echo 'ESP67 reaper failed to lock global state' >&2
+  exit 1
+}
+esp67_dl_phase writer > "$report_root/esp67-hybrid-deadlock-writer.log" 2>&1 &
+esp67_dl_writer_pid=$!
+for attempt in $(seq 1 200); do
+  if [[ -f "$esp67_dl_root/writer-entered" ]]; then break; fi
+  if ! kill -0 "$esp67_dl_writer_pid" 2>/dev/null; then break; fi
+  sleep 0.1
+done
+[[ -f "$esp67_dl_root/writer-entered" ]] || {
+  cat "$report_root/esp67-hybrid-deadlock-writer.log" >&2
+  echo 'ESP67 WordPress Core writer failed to start' >&2
+  exit 1
+}
+esp67_dl_row_locked=0
+for attempt in $(seq 1 90); do
+  if esp67_dl_phase observe > "$report_root/esp67-hybrid-deadlock-observe.log"; then
+    esp67_dl_row_locked=1; break
+  fi
+  if ! kill -0 "$esp67_dl_writer_pid" 2>/dev/null; then break; fi
+  sleep 0.1
+done
+(( esp67_dl_row_locked == 1 )) || {
+  cat "$report_root/esp67-hybrid-deadlock-writer.log" >&2
+  echo 'ESP67 writer never held the canonical postmeta row' >&2
+  exit 1
+}
+touch "$esp67_dl_root/release-reaper"
+if ! wait "$esp67_dl_reaper_pid"; then
+  cat "$report_root/esp67-hybrid-deadlock-reaper.log" >&2
+  exit 1
+fi
+if ! wait "$esp67_dl_writer_pid"; then
+  cat "$report_root/esp67-hybrid-deadlock-writer.log" >&2
+  exit 1
+fi
+cat "$report_root/esp67-hybrid-deadlock-reaper.log"
+cat "$report_root/esp67-hybrid-deadlock-writer.log"
+esp67_dl_phase verify | tee "$report_root/esp67-hybrid-deadlock-verify.log"
+if grep -q ESP67_HYBRID_DL_CORE_COMMITTED_GLOBAL_DIRTY \
+  "$report_root/esp67-hybrid-deadlock-verify.log"; then
+  assert_http esp31-public-150x150.jpg 503
+else
+  assert_http esp31-public-150x150.jpg 200
+fi
+esp67_dl_phase cleanup | tee "$report_root/esp67-hybrid-deadlock-cleanup.log"
+assert_http esp31-public-150x150.jpg 200
+echo 'PASS: ESP67 InnoDB inverse state/postmeta lock order deterministically deadlocks with safe rollback or global dirty'
+
 # #67: actual WordPress Core INSERT/UPDATE/DELETE can all be checked at
 # the MySQL execution boundary by three scoped per-writer DB triggers.
 # Demonstrate valid paths and missing/revoked actor failure without modifying
