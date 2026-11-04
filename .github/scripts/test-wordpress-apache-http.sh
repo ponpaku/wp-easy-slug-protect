@@ -544,6 +544,16 @@ docker exec "$container" env ESP_ALLOW_DISPOSABLE_DB=1 ESP_WP_ROOT=/var/www/html
   php /var/www/html/wp-content/plugins/esp44-custom/tests/wordpress-issue-67-tx-loss-ci.php \
   | tee "$report_root/q01-wpdb-transaction-reconnect.log"
 
+# The following historical #67 experiments deliberately construct vulnerable
+# states (e.g. expecting anonymous HTTP 200 after an untracked Core SQL), and
+# use isolated disposable gates in place of the production SQL triggers.
+# They remain executable in their original PR #77 / schema v3 test branch,
+# but are logically incompatible with the installed schema v4 triggers:
+# those triggers correctly turn the old counterexamples into 503 responses.
+# Product schema v4 is instead tested by wordpress-issue-67-production-state-ci.php
+# and the real F01/Q01 multi-worker/ACK-loss suites above.
+if [[ "$(docker exec "$container" php /opt/wp-cli.phar --allow-root --path=/var/www/html \
+  option get esp_media_index_v1_schema)" != "4" ]]; then
 # #67: after an external transaction drops the ESP fence, a protected
 # attachment can acquire an already-public owner's derivative path. Probe
 # real Apache anonymous response BEFORE the faulty PHP worker finishes.
@@ -1368,6 +1378,10 @@ cmp -s "$fixture_root/http-probe-body" "$fixture_root/wordpress/wp-content/uploa
 echo 'ESP67_UNSAFE_AUTO_GC_P0: named-lock loss did not mean PHP was dead'
 esp67_gc_phase restore | tee "$report_root/esp67-gc-restored.log"
 assert_http esp31-public-150x150.jpg 200
+
+else
+  echo 'SKIP: legacy #67 vulnerable synthetic counterexamples require the schema-v3 disposable PoC without production triggers; see Draft PR #77 CI'
+fi
 
 # R02: measure fresh independent Apache media requests, including the Core
 # SELECT VERSION() and optional get_option SQL outside the 1-query owner lookup.
