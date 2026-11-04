@@ -882,6 +882,20 @@ esp67_flock_phase restore trigger-reconnect | tee "$report_root/esp67-trigger-re
 assert_http esp31-public-150x150.jpg 200
 echo 'PASS: WordPress wpdb reconnect under trigger safely refuses untagged SQL and automatically recovers'
 
+# #67 hybrid reconnect: Core's actual wpdb reconnect loses its session actor,
+# but the server-side trigger should co-commit global dirty with the retried
+# canonical SQL instead of hard-denying the operation.
+esp67_flock_phase setup hybrid-reconnect | tee "$report_root/esp67-hybrid-reconnect-setup.log"
+docker exec "$container" touch /var/www/html/wp-content/uploads/.esp67-flock/resume
+esp67_flock_phase writer hybrid-reconnect | tee "$report_root/esp67-hybrid-reconnect-writer.log"
+esp67_flock_phase verify hybrid-reconnect | tee "$report_root/esp67-hybrid-reconnect-verify.log"
+assert_http esp31-public-150x150.jpg 503
+esp67_flock_phase recover hybrid-reconnect | tee "$report_root/esp67-hybrid-reconnect-recovered.log"
+assert_http esp31-public-150x150.jpg 503
+esp67_flock_phase restore hybrid-reconnect | tee "$report_root/esp67-hybrid-reconnect-restored.log"
+assert_http esp31-public-150x150.jpg 200
+echo 'PASS: ESP67 real wpdb reconnect atomically invalidates global coverage and recovers'
+
 # #67: actual WordPress Core INSERT/UPDATE/DELETE can all be checked at
 # the MySQL execution boundary by three scoped per-writer DB triggers.
 # Demonstrate valid paths and missing/revoked actor failure without modifying
