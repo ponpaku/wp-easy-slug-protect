@@ -55,7 +55,7 @@ if ($phase === 'failure') {
     // must throw BEFORE wp_posts changes.
     $intercepted = 0;
     $fail_guard = function ($sql) use (&$intercepted) {
-        if (strpos($sql, 'esp_media_files_v1') !== false &&
+        if (strpos($sql, 'esp_media_files') !== false &&
             strpos($sql, 'INSERT INTO ') !== false) {
             ++$intercepted;
             return 'R01_INTENTIONALLY_INVALID_GLOBAL_FENCE_SQL';

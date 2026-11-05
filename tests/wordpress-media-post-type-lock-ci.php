@@ -84,8 +84,7 @@ function esp_type_lock_transition($id, $to_type, $strict, $failure = '') {
             return 'R02_INJECT_FAILED_GLOBAL_INVALIDATION';
         }
         if ($failure === 'pending' &&
-            strpos($sql, "INSERT INTO $state") !== false &&
-            strpos($sql, 'ON DUPLICATE KEY UPDATE') !== false) {
+            strpos($sql, "UPDATE $state SET active_mutation_ids=") !== false) {
             ++$blocked_writes;
             return 'R02_INJECT_FAILED_PENDING_FENCE';
         }

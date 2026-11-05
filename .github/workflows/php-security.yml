@@ -50,6 +50,8 @@ jobs:
         run: php tests/security-litespeed-password-test.php
       - name: Test safe uninstall Rewrite cleanup
         run: php tests/security-uninstall-rewrite-test.php
+      - name: Test SQL trigger and index cleanup on uninstall
+        run: php tests/security-uninstall-index-trigger-test.php
       - name: Test failure of authorization cache rebuilds
         run: php tests/security-cache-failclosed-test.php
       - name: Test generation-tagged caches
@@ -94,6 +96,20 @@ jobs:
           ESP_TEST_DB_PASSWORD: test-password
           ESP_TEST_DB_NAME: esp_test
         run: php tests/security-media-index-mysql.php
+      - name: Issue 67 one-column mutation set real MySQL feasibility and counterexample
+        env:
+          ESP_TEST_DB_HOST: 127.0.0.1
+          ESP_TEST_DB_USER: root
+          ESP_TEST_DB_PASSWORD: test-password
+          ESP_TEST_DB_NAME: esp_test
+        run: php tests/issue-67-one-column-mysql.php
+      - name: Issue 67 production SQL triggers and atomic fallback on MySQL 8
+        env:
+          ESP_TEST_DB_HOST: 127.0.0.1
+          ESP_TEST_DB_USER: root
+          ESP_TEST_DB_PASSWORD: test-password
+          ESP_TEST_DB_NAME: esp_test
+        run: php tests/issue-67-production-triggers-mysql.php
       - name: Verify migration lock ownership across MySQL sessions
         env:
           ESP_TEST_DB_HOST: 127.0.0.1
@@ -101,6 +117,42 @@ jobs:
           ESP_TEST_DB_PASSWORD: test-password
           ESP_TEST_DB_NAME: esp_test
         run: php tests/security-verification-mysql-lock-test.php
+  mariadb-issue67:
+    runs-on: ubuntu-latest
+    services:
+      mariadb:
+        image: mariadb:10.11
+        env:
+          MARIADB_ROOT_PASSWORD: test-password
+          MARIADB_DATABASE: esp_test
+        ports:
+          - 3307:3306
+        options: >-
+          --health-cmd="mariadb-admin ping -h 127.0.0.1 -ptest-password"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mysqli
+          coverage: none
+      - name: Issue 67 candidate set-CAS and lock/transaction counterexample on MariaDB 10.11
+        env:
+          ESP_TEST_DB_HOST: 127.0.0.1:3307
+          ESP_TEST_DB_USER: root
+          ESP_TEST_DB_PASSWORD: test-password
+          ESP_TEST_DB_NAME: esp_test
+        run: php tests/issue-67-one-column-mysql.php
+      - name: Issue 67 production SQL triggers and atomic fallback on MariaDB 10.11
+        env:
+          ESP_TEST_DB_HOST: 127.0.0.1:3307
+          ESP_TEST_DB_USER: root
+          ESP_TEST_DB_PASSWORD: test-password
+          ESP_TEST_DB_NAME: esp_test
+        run: php tests/issue-67-production-triggers-mysql.php
   wordpress-integration:
     runs-on: ubuntu-latest
     services:

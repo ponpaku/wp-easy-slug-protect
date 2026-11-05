@@ -120,6 +120,17 @@ if ($phase === 'restore') {
     wp_cache_delete($id, 'post_meta');
     f01_require(ESP_Media_Index::reindex_attachment($id),
         'rebuild after both workers finish failed');
+    // Direct SQL to duplicate/remove canonical protection metadata now
+    // correctly invalidates global coverage through the production trigger.
+    // The historical fixture must perform a full WordPress audit before
+    // expecting public delivery again; local-only repair is insufficient.
+    for ($i=0;$i<120;$i++) {
+        ESP_Media_Index::run_batch();
+        $global=$wpdb->get_var("SELECT status FROM $state WHERE attachment_id=0");
+        if ($global==='ready') { break; }
+    }
+    f01_require($global==='ready',
+        'direct fixture SQL requires global coverage reaudit');
     $path = ESP_Media_Index::resolve($uploads['basedir'] . '/' . $relative);
     f01_require($path['status'] === 'resolved' &&
         $path['protected_path_id'] === 'path_http', 'protected canonical owner did not recover');

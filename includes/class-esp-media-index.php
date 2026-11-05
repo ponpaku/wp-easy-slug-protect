@@ -1,5 +1,6 @@
 <?php
 if (!defined('ABSPATH')) { exit; }
+require_once __DIR__ . '/class-esp-media-mutation-state.php';
 
 /**
  * Issue #63: derived WordPress attachment file ownership / protection index.
@@ -35,15 +36,16 @@ final class ESP_Media_Index {
     // could consume another concurrent writer's pending ticket.
     private static $ambiguous_pending = [];
     private static $deferred_noop_finalizer_queued = false;
+    private static $global_creation_tickets = 0;
     private static $database_support = null;
 
     public static function files_table() {
         global $wpdb;
-        return $wpdb->prefix . 'esp_media_files_v1';
+        return $wpdb->prefix . 'esp_media_files';
     }
     public static function state_table() {
         global $wpdb;
-        return $wpdb->prefix . 'esp_media_file_state_v1';
+        return $wpdb->prefix . 'esp_media_file_state';
     }
     private static function table($table) {
         if (!is_string($table) || !preg_match('/^[a-zA-Z0-9_]+$/D', $table)) {
@@ -58,7 +60,7 @@ final class ESP_Media_Index {
         return (string)get_option(self::READY_OPTION, '0') === '1';
     }
     private static function installed() {
-        return (string)get_option(self::SCHEMA_OPTION, '0') === '3';
+        return (string)get_option(self::SCHEMA_OPTION, '0') === '4';
     }
 
 
@@ -114,6 +116,10 @@ final class ESP_Media_Index {
         foreach (['added_post_meta', 'updated_post_meta', 'deleted_post_meta'] as $hook) {
             add_action($hook, [self::class, 'on_meta_saved'], 20, 4);
         }
+        // Core uses wp_insert_attachment_data (NOT wp_insert_post_data)
+        // for attachments. This fires before the initial SQL INSERT and
+        // before WordPress returns the assigned attachment ID.
+        add_filter('wp_insert_attachment_data', [self::class, 'guard_new_attachment'], 5, 4);
         add_action('add_attachment', [self::class, 'on_attachment_created'], 20, 1);
         // Existing posts can become attachments without add_attachment or a meta hook.
         add_action('pre_post_update', [self::class, 'guard_post_type_transition'], 5, 2);
@@ -357,6 +363,10 @@ final class ESP_Media_Index {
      * security migration and activation state. Never install during HTTP lookup.
      */
     public static function install_schema() {
+        // A repeated installation request is not a migration. In particular,
+        // never revoke a successfully audited READY snapshot simply because
+        // a helper/test invokes install_schema() again.
+        if (self::installed()) { return self::database_support()['supported']; }
         global $wpdb;
         if (!is_object($wpdb) || empty($wpdb->prefix) ||
             !self::database_support()['supported']) { return false; }
@@ -368,6 +378,29 @@ final class ESP_Media_Index {
         }
         $files = self::table(self::files_table());
         $state = self::table(self::state_table());
+        // Reuse the *same two* old tables rather than creating new v2 tables.
+        // READY was already revoked above; an interrupted rename remains
+        // fail-closed until schema and triggers can be installed.
+        foreach ([
+            $wpdb->prefix . 'esp_media_files_v1' => $files,
+            $wpdb->prefix . 'esp_media_file_state_v1' => $state,
+        ] as $legacy => $current) {
+            $old = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s',
+                $wpdb->esc_like($legacy)));
+            $new = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s',
+                $wpdb->esc_like($current)));
+            if ($wpdb->last_error !== '') { return false; }
+            if ($old === $legacy && $new === $current) {
+                // Never guess between two divergent index generations.
+                error_log('ESP: ambiguous legacy and current media index tables');
+                return false;
+            }
+            if ($old === $legacy && $new !== $current &&
+                ($wpdb->query("RENAME TABLE $legacy TO $current") === false ||
+                $wpdb->last_error !== '')) {
+                return false;
+            }
+        }
         require_once ABSPATH . 'wp-admin/includes/upgrade.php';
         $charset = $wpdb->get_charset_collate();
         dbDelta("CREATE TABLE $files (
@@ -390,6 +423,7 @@ final class ESP_Media_Index {
             retry_after bigint(20) unsigned NOT NULL DEFAULT 0,
             failure_count int(11) unsigned NOT NULL DEFAULT 0,
             audit_cursor bigint(20) unsigned NOT NULL DEFAULT 0,
+            active_mutation_ids longtext NULL,
             PRIMARY KEY  (attachment_id),
             KEY status (status),
             KEY retry_queue (status,pending_count,retry_after,changed_at)
@@ -400,7 +434,8 @@ final class ESP_Media_Index {
         }
         // dbDelta may report a partial upgrade without throwing. Verify
         // the specific columns required by the retry/ownership contract.
-        foreach (['retry_after', 'failure_count', 'audit_cursor'] as $column) {
+        foreach (['retry_after', 'failure_count', 'audit_cursor',
+                  'active_mutation_ids'] as $column) {
             $row = $wpdb->get_var($wpdb->prepare(
                 "SHOW COLUMNS FROM $state LIKE %s", $column));
             if ($wpdb->last_error !== '' || $row !== $column) { return false; }
@@ -409,8 +444,27 @@ final class ESP_Media_Index {
             (attachment_id,status,revision,audit_cursor) VALUES (0,'dirty',1,0)") === false) {
             return false;
         }
-        return update_option(self::SCHEMA_OPTION, '3', false) ||
-            (string)get_option(self::SCHEMA_OPTION) === '3';
+        // Do not publish a previously audited READY epoch after migration.
+        if ($wpdb->query("UPDATE $state SET status='dirty',revision=revision+1,
+              audit_cursor=0 WHERE attachment_id=0") !== 1 ||
+            $wpdb->last_error !== '') { return false; }
+        if (!ESP_Media_Mutation_State::install_triggers()) { return false; }
+        // Schema v3 tracked only an anonymous counter, not operation IDs.
+        // An old crashed writer could leave pending_count>0 forever; the
+        // new reaper cannot identify or release those anonymous tickets.
+        // Retire ONLY anonymous legacy tickets, after all Core SQL triggers
+        // are installed. Any late Core SQL from an old PHP worker will lack
+        // a current actor and co-commit global DIRTY instead of authorizing.
+        $legacy_pending = $wpdb->query($wpdb->prepare(
+            "UPDATE $state SET pending_count=0,active_mutation_ids='[]',
+              status='dirty',revision=revision+1,retry_after=0,changed_at=%d
+              WHERE pending_count>0 AND
+                (active_mutation_ids IS NULL OR active_mutation_ids=''
+                 OR active_mutation_ids='[]')",
+            time()));
+        if ($legacy_pending===false || $wpdb->last_error!=='') { return false; }
+        return update_option(self::SCHEMA_OPTION, '4', false) ||
+            (string)get_option(self::SCHEMA_OPTION) === '4';
     }
 
     /** WordPress metadata paths are relative to the uploads root. */
@@ -532,7 +586,9 @@ final class ESP_Media_Index {
         // a second post-ID lookup or trusting an unverified cached permission.
         $sql = $wpdb->prepare("SELECT f.file_path, f.attachment_id, f.generation,
                 f.protected_path_id, s.status, s.pending_count, s.active_generation,
-                c.status AS coverage_status, p.post_type AS live_post_type,
+                c.status AS coverage_status,c.pending_count AS coverage_pending,
+                c.active_mutation_ids AS coverage_actor_ids,
+                p.post_type AS live_post_type,
                 pm.meta_value AS live_protected_path
             FROM $files f
             LEFT JOIN $state s ON s.attachment_id=f.attachment_id
@@ -553,6 +609,9 @@ final class ESP_Media_Index {
                          $row['generation'], $row['active_generation']) ||
                 !array_key_exists('live_protected_path', $row) ||
                 ($row['coverage_status'] ?? null) !== 'ready' ||
+                !isset($row['coverage_pending']) ||
+                (int)$row['coverage_pending'] !== 0 ||
+                !in_array($row['coverage_actor_ids'] ?? null, [null, '[]'], true) ||
                 ($row['live_post_type'] ?? null) !== 'attachment' ||
                 !hash_equals((string)$row['file_path'], $relative) ||
                 !ctype_digit((string)$row['attachment_id']) ||
@@ -617,12 +676,22 @@ final class ESP_Media_Index {
     public static function guard_meta($check, $post_id, $meta_key, $meta_value, $reserve = true) {
         if ($check !== null || !self::relevant($meta_key) || !self::installed()) { return $check; }
         if (get_post_type((int)$post_id) !== 'attachment') { return $check; }
+        // wp_insert_attachment() writes _wp_attached_file before metadata.
+        // A global create token was committed before the first posts INSERT,
+        // so every intermediate Core meta write is already fail-closed. Do
+        // not reject incomplete but normal upload stages as bad local fences.
+        if (self::$global_creation_tickets > 0) { return null; }
         if (self::mark_dirty((int)$post_id)) {
             self::track_local((int)$post_id);
             $cross_directory = false;
-            if (!$reserve || self::reserve_new_paths(
+            if (!$reserve) { return null; }
+            if (self::reserve_new_paths(
                 (int)$post_id, $meta_key, $meta_value, $cross_directory)) {
-                return null;
+                if (ESP_Media_Mutation_State::expect_path_meta(
+                    (int)$post_id, $meta_key, $meta_value)) {
+                    return null;
+                }
+                return self::failed_pre_fence();
             }
             // Moving an attachment between directories is not a supported
             // atomic operation. Do not guess new derivative filenames or
@@ -767,7 +836,9 @@ final class ESP_Media_Index {
         }
         // Core supplies maybe_serialize(sanitize_meta(...)) to this action.
         // reserve_new_paths() deserializes metadata using maybe_unserialize().
-        if (self::reserve_new_paths($post_id, $meta_key, $stored_value)) { return; }
+        if (self::reserve_new_paths($post_id, $meta_key, $stored_value) &&
+            ESP_Media_Mutation_State::expect_path_meta(
+                $post_id, $meta_key, $stored_value, true)) { return; }
         // Missing/invalid ownership evidence may be repaired on a future
         // audit; until then, never let a READY global index authorize a
         // newly persisted path as if it had no protected owner.
@@ -792,7 +863,9 @@ final class ESP_Media_Index {
         return self::failed_pre_fence();
     }
     public static function on_meta_saved($meta_id, $post_id, $meta_key, $meta_value) {
-        if (!self::installed()) { return; }
+        if (!self::installed() || self::$global_creation_tickets > 0) { return; }
+        // All canonical creation writes are covered by state[0] DIRTY; the
+        // next full audit runs only after that global ticket is retired.
         $mid = (is_int($meta_id) || (is_string($meta_id) && ctype_digit($meta_id)))
             ? (int)$meta_id : 0;
         $was_by_mid = self::$by_mid[$mid] ?? null;
@@ -902,7 +975,40 @@ final class ESP_Media_Index {
         }
     }
 
+    /**
+     * A new attachment performs INSERT and an internal UPDATE before the
+     * PHP caller can register a per-ID ticket. Fence the entire creation
+     * against the global state row (ID 0) before the first Core INSERT.
+     */
+    public static function guard_new_attachment($data, $postarr, $raw, $update) {
+        if (!self::installed() || !self::enabled() || $update || !is_array($data) ||
+            ($data['post_type'] ?? null) !== 'attachment') {
+            return $data;
+        }
+        if (!ESP_Media_Mutation_State::begin(0)) {
+            throw new RuntimeException('ESP media index: cannot fence attachment creation');
+        }
+        ++self::$global_creation_tickets;
+        if (self::$global_creation_tickets === 1) {
+            register_shutdown_function([self::class, 'finish_global_creations']);
+        }
+        return $data;
+    }
+
+    public static function finish_global_creations() {
+        for ($i = 0; $i < self::$global_creation_tickets; ++$i) {
+            if (!ESP_Media_Mutation_State::finish(0)) {
+                error_log('ESP: global attachment creation ticket could not be retired');
+                return;
+            }
+        }
+        self::$global_creation_tickets = 0;
+    }
+
     public static function on_attachment_created($id) {
+        // A newly inserted owner is still covered by its global creation
+        // ticket. Do not replace the session actor before Core's internal SQL.
+        if (self::$global_creation_tickets > 0) { return; }
         if (self::installed() && self::mark_dirty((int)$id)) {
             self::track_local((int)$id);
             if (self::complete_mutation((int)$id)) {
@@ -983,53 +1089,14 @@ final class ESP_Media_Index {
             }
         }
     }
+    /** Each WordPress operation owns a durable idempotent mutation ID. */
     private static function mark_dirty($id) {
-        global $wpdb;
         if ($id <= 0) { return false; }
-        $table = self::table(self::state_table());
-        $sql = $wpdb->prepare("INSERT INTO $table
-          (attachment_id,status,revision,pending_count,changed_at)
-          VALUES (%d,'dirty',1,1,%d)
-          ON DUPLICATE KEY UPDATE status='dirty',
-          revision=revision+1, pending_count=pending_count+1,
-          retry_after=0, failure_count=0, changed_at=VALUES(changed_at)",
-          $id, time());
-        return $wpdb->query($sql) !== false && $wpdb->last_error === '';
+        return ESP_Media_Mutation_State::begin((int)$id);
     }
     private static function complete_mutation($id) {
-        global $wpdb;
-        if ($id <= 0 || isset(self::$ambiguous_pending[$id])) { return false; }
-        $state = self::table(self::state_table());
-        // This is also used for post-hooks where another plugin bypassed the
-        // corresponding pre-hook: reindex rather than trusting old data.
-        $row = $wpdb->get_row($wpdb->prepare(
-            "SELECT status,pending_count FROM $state WHERE attachment_id=%d", $id), ARRAY_A);
-        if ($wpdb->last_error !== '') { return false; }
-        if (!$row) {
-            if (!self::mark_dirty($id)) { return false; }
-        } else if ((int)$row['pending_count'] === 0) {
-            if (!self::mark_dirty($id)) { return false; }
-        }
-        $decremented = $wpdb->query($wpdb->prepare(
-            "UPDATE $state SET pending_count=pending_count-1
-             WHERE attachment_id=%d AND pending_count>0", $id));
-        // The result is about THIS decrement, not whether other concurrent
-        // writers still have pending operations. In particular there is no
-        // separate SELECT whose failure could disguise a successful decrement.
-        if ($decremented !== 1 || $wpdb->last_error !== '') {
-            // The server may have committed this UPDATE and lost the reply.
-            // Repeating it is NOT idempotent. Leave the state dirty and
-            // fail closed; durable ticket-level recovery is Q01 follow-up.
-            self::$ambiguous_pending[$id] = true;
-            error_log('ESP: Ambiguous media index pending decrement; no automatic retry for ' . $id);
-            return false;
-        }
-        // Never START/COMMIT a transaction inside a WordPress metadata hook.
-        // A caller may have an open transaction; the dirty marker participates
-        // in that transaction and becomes visible atomically with the metadata.
-        // The independent Cron worker rebuilds only after it can read the
-        // committed dirty marker (and pending_count = 0).
-        return true;
+        if ($id <= 0) { return false; }
+        return ESP_Media_Mutation_State::finish((int)$id);
     }
 
     /**
@@ -1116,13 +1183,22 @@ final class ESP_Media_Index {
                         $protection = $value['meta_value'];
                     }
                 }
-                if (!is_string($protection) || strlen($protection) > 191 ||
-                    !is_string($attached) || !self::valid_path($attached)) {
-                    throw new RuntimeException('invalid attachment metadata');
-                }
-                $paths = self::enumerate($attached, $metadata);
-                if (!is_array($paths) || !$paths) {
-                    throw new RuntimeException('invalid derivative metadata');
+                if (!$values) {
+                    // A Core attachment INSERT can COMMIT before any ownership
+                    // meta exists. Zero canonical claims are valid only when
+                    // ALL three owner-bearing meta keys are absent. Every later
+                    // claim must pass the DB trigger and revoke global READY.
+                    $paths = [];
+                    $protection = '';
+                } else {
+                    if (!is_string($protection) || strlen($protection) > 191 ||
+                        !is_string($attached) || !self::valid_path($attached)) {
+                        throw new RuntimeException('partial or invalid attachment metadata');
+                    }
+                    $paths = self::enumerate($attached, $metadata);
+                    if (!is_array($paths) || !$paths) {
+                        throw new RuntimeException('invalid derivative metadata');
+                    }
                 }
             }
             // Stage new rows alongside the old live generation. Never remove
@@ -1143,7 +1219,8 @@ final class ESP_Media_Index {
                 "UPDATE $state SET status='ready',active_generation=%d,changed_at=%d,
                  failure_count=0,retry_after=0
                  WHERE attachment_id=%d AND revision=%d
-                   AND pending_count=0 AND status='dirty'",
+                   AND pending_count=0 AND IFNULL(active_mutation_ids,'[]')='[]'
+                   AND status='dirty'",
                 $revision, time(), $id, $revision));
             if ($published !== 1) {
                 throw new RuntimeException('stale revision or publish failure');
@@ -1410,6 +1487,18 @@ final class ESP_Media_Index {
                 $protection = $row['meta_value'];
             }
         }
+        if (!$meta_rows) {
+            // Audited zero-owner attachment: no file ownership can be derived.
+            // Never apply this rule to an incomplete *nonempty* meta set.
+            $indexed = $wpdb->get_var($wpdb->prepare(
+                "SELECT attachment_id FROM $files WHERE attachment_id=%d LIMIT 1",
+                $id));
+            if ($wpdb->last_error !== '' || $indexed !== null) { return false; }
+            $after = $wpdb->get_row($wpdb->prepare(
+                "SELECT status,revision,pending_count,active_generation FROM $state
+                 WHERE attachment_id=%d", $id), ARRAY_A);
+            return $wpdb->last_error === '' && $before === $after;
+        }
         if (!is_string($attached) || !self::valid_path($attached) ||
             !is_string($protection) || strlen($protection) > 191) { return false; }
         $paths = self::enumerate($attached, $meta);
@@ -1495,6 +1584,9 @@ final class ESP_Media_Index {
             error_log('ESP: Media index schema install failed');
             return 'schema_failed';
         }
+        // Reclaim only truly orphaned IDs (DB named-lock liveness gate).
+        // Delayed canonical SQL after reaping triggers atomic global dirty.
+        ESP_Media_Mutation_State::reap();
         // First remove orphans. Individual corrupt attachments can be retried
         // later, but a DB outage or failed orphan purge must halt the cycle.
         if (!self::reconcile_orphans(false)) { return; }
@@ -1550,7 +1642,8 @@ final class ESP_Media_Index {
             // makes this stale worker's result unusable.
             $written = $wpdb->query($wpdb->prepare(
                 "UPDATE $state SET status='ready',audit_cursor=0,changed_at=%d
-                 WHERE attachment_id=0 AND revision=%d AND audit_cursor=%d",
+                 WHERE attachment_id=0 AND revision=%d AND audit_cursor=%d
+                   AND pending_count=0 AND IFNULL(active_mutation_ids,'[]')='[]'",
                 time(), $epoch, $cursor));
             if ($written === false || $wpdb->last_error !== '') { return; }
             $fresh = $wpdb->get_row("SELECT revision,status FROM $state

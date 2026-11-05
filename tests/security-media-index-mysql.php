@@ -4,6 +4,7 @@ declare(strict_types=1);
 define('ABSPATH', __DIR__ . '/');
 define('ARRAY_A', 'ARRAY_A');
 define('ESP_VERSION', 'test');
+define('DB_NAME', getenv('ESP_TEST_DB_NAME') ?: 'esp_test');
 class ESP_Protection_State { const RUNTIME_STATE_OPTION = 'esp_test_runtime'; }
 require dirname(__DIR__) . '/includes/class-esp-media-index.php';
 
@@ -73,7 +74,7 @@ final class ESP63_DB {
     public function query($sql) {
         $this->last_error = '';
         if ($this->lose_pending_decrement_ack_once &&
-            strpos($sql, 'SET pending_count=pending_count-1') !== false) {
+            strpos($sql, 'SET active_mutation_ids=') !== false) {
             $this->lose_pending_decrement_ack_once = false;
             $result = $this->db->query($sql);
             if ($result === false || $this->db->affected_rows !== 1) {
@@ -83,18 +84,19 @@ final class ESP63_DB {
             return false;
         }
         if ($this->fail_pending_decrement_once &&
-            strpos($sql, 'SET pending_count=pending_count-1') !== false) {
+            strpos($sql, 'SET active_mutation_ids=') !== false) {
             $this->fail_pending_decrement_once = false;
             $this->last_error = 'injected pending completion failure';
             return false;
         }
         if ($this->fail_state_write &&
-            strpos($sql, 'INSERT INTO esp63_esp_media_file_state_v1') !== false) {
+            (strpos($sql, 'INSERT INTO esp63_esp_media_file_state') !== false ||
+             strpos($sql, 'SET active_mutation_ids=') !== false)) {
             $this->last_error = 'injected index state failure';
             return false;
         }
         if ($this->fail_cleanup &&
-            strpos($sql, 'DELETE FROM esp63_esp_media_files_v1') !== false &&
+            strpos($sql, 'DELETE FROM esp63_esp_media_files') !== false &&
             strpos($sql, 'generation<') !== false) {
             $this->last_error = 'injected post-publication cleanup failure';
             return false;
@@ -105,7 +107,7 @@ final class ESP63_DB {
             return false;
         }
         if ($this->before_cleanup !== null &&
-            strpos($sql, 'DELETE FROM esp63_esp_media_files_v1') !== false &&
+            strpos($sql, 'DELETE FROM esp63_esp_media_files') !== false &&
             strpos($sql, 'generation<') !== false) {
             $callback = $this->before_cleanup;
             $this->before_cleanup = null;
@@ -152,7 +154,7 @@ $db->query("SET SESSION sql_mode = 'STRICT_ALL_TABLES'");
 $wpdb = new ESP63_DB($db);
 $GLOBALS['wpdb'] = $wpdb;
 $options = [
-    ESP_Media_Index::SCHEMA_OPTION => '3',
+    ESP_Media_Index::SCHEMA_OPTION => '4',
     ESP_Protection_State::RUNTIME_STATE_OPTION => ['state'=>'READY', 'version'=>ESP_VERSION],
     ESP_Media_Index::READY_OPTION => '1',
     ESP_Media_Index::ENABLE_OPTION => '1',
@@ -161,6 +163,8 @@ function get_option($name, $default = false) {
     return array_key_exists($name, $GLOBALS['options']) ? $GLOBALS['options'][$name] : $default;
 }
 function update_option($name, $value, $autoload = null) { $GLOBALS['options'][$name] = $value; return true; }
+function wp_json_encode($value) { return json_encode($value); }
+function maybe_serialize($value) { return is_array($value) || is_object($value) ? serialize($value) : $value; }
 function maybe_unserialize($raw) {
     $data = @unserialize($raw, ['allowed_classes' => false]);
     return $data === false && $raw !== 'b:0;' ? $raw : $data;
@@ -217,6 +221,7 @@ try {
         retry_after BIGINT UNSIGNED NOT NULL DEFAULT 0,
         failure_count INT UNSIGNED NOT NULL DEFAULT 0,
         audit_cursor BIGINT UNSIGNED NOT NULL DEFAULT 0,
+        active_mutation_ids LONGTEXT NULL,
         KEY status (status),
         KEY retry_queue (status,pending_count,retry_after,changed_at)
     ) ENGINE=InnoDB");
@@ -1364,42 +1369,37 @@ try {
         echo 'ESP63_BUILD_REPORT ' . json_encode($report, JSON_UNESCAPED_SLASHES) . "\n";
     }
 
-    // Q01 containment: the server applied A's decrement but PHP received
-    // an error. Never execute it again in shutdown or it could consume B's
-    // outstanding ticket. Recovering the stuck owner requires an independent
-    // durable per-mutation record, not a blind counter reset.
+    // Q01 regression: a committed token-CAS retirement loses its ACK.
+    // The retry must observe its own token already gone and MUST NOT consume
+    // another operation's token. Both per-request operations can then finish
+    // exactly once; no orphan pending counter remains after an ACK loss.
     $ambiguous_id = 740;
     esp63_sql("INSERT INTO esp63_posts(ID,post_type) VALUES ($ambiguous_id,'attachment')");
-    esp63_sql("INSERT INTO esp63_postmeta(post_id,meta_key,meta_value) VALUES
+    esp63_sql("INSERT INTO esp63_postmeta (post_id,meta_key,meta_value) VALUES
         ($ambiguous_id,'_wp_attached_file','2026/10/uncertain-740.jpg'),
         ($ambiguous_id,'_esp_media_protected_path_id','secret_pending')");
     esp63_assert(ESP_Media_Index::reindex_attachment($ambiguous_id),
-        'Q01 ACK-loss fixture initially ready');
+        'Q01 state-only ACK-loss fixture initially ready');
     esp63_assert(ESP_Media_Index::guard_meta(null, $ambiguous_id,
         '_esp_media_protected_path_id','secret_pending') === null &&
         ESP_Media_Index::guard_meta(null, $ambiguous_id,
         '_esp_media_protected_path_id','secret_pending') === null,
-        'Q01 two independent pending writers fenced');
+        'Q01 two independent state-only tokens reserved');
+    $tokensBefore = json_decode((string)$wpdb->get_var(
+        "SELECT active_mutation_ids FROM $state WHERE attachment_id=$ambiguous_id"),true);
+    esp63_assert(is_array($tokensBefore) && count($tokensBefore)===2 &&
+        $tokensBefore[0] !== $tokensBefore[1],
+        'Q01 state has two distinct owned mutation identities');
     $wpdb->lose_pending_decrement_ack_once = true;
-    ESP_Media_Index::on_meta_saved(741,$ambiguous_id,
-        '_esp_media_protected_path_id','secret_pending');
-    $before_finalization = (int)$wpdb->get_var(
-        "SELECT pending_count FROM $state WHERE attachment_id=$ambiguous_id");
-    esp63_assert($before_finalization === 2,
-        'post-hook must not decrement before request shutdown');
     ESP_Media_Index::finish_noop_writes();
-    $remaining_before_shutdown = (int)$wpdb->get_var(
-        "SELECT pending_count FROM $state WHERE attachment_id=$ambiguous_id");
-    esp63_assert($remaining_before_shutdown === 1,
-        'Q01 A decremented in MySQL but acknowledgment was lost');
-    ESP_Media_Index::finish_noop_writes();
-    $remaining_after_shutdown = (int)$wpdb->get_var(
-        "SELECT pending_count FROM $state WHERE attachment_id=$ambiguous_id");
-    esp63_assert($remaining_after_shutdown === 1 &&
-        !ESP_Media_Index::reindex_attachment($ambiguous_id),
-        'Q01 shutdown cannot steal concurrent B pending ticket or publish READY');
-    // This disposable fixture is intentionally not made READY; real
-    // recovery remains an unresolved P0 requiring durable ticket identities.
+    $tokensAfter = json_decode((string)$wpdb->get_var(
+        "SELECT active_mutation_ids FROM $state WHERE attachment_id=$ambiguous_id"),true);
+    esp63_assert(is_array($tokensAfter) && !$tokensAfter &&
+        (int)$wpdb->get_var("SELECT pending_count FROM $state
+            WHERE attachment_id=$ambiguous_id")===0,
+        'Q01 a lost ACK on token CAS cannot double-decrement other tickets');
+    esp63_assert(ESP_Media_Index::reindex_attachment($ambiguous_id),
+        'Q01 audit can safely publish after both tokens retire');
     esp63_sql("DELETE FROM $files WHERE attachment_id=$ambiguous_id");
     esp63_sql("DELETE FROM $state WHERE attachment_id=$ambiguous_id");
     esp63_sql("DELETE FROM esp63_postmeta WHERE post_id=$ambiguous_id");

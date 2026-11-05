@@ -42,7 +42,7 @@ require dirname(__DIR__) . '/includes/class-esp-media-index.php';
 function get_option($name, $default = false) {
     if ($name === ESP_Media_Index::SCHEMA_OPTION ||
         $name === ESP_Media_Index::READY_OPTION ||
-        $name === ESP_Media_Index::ENABLE_OPTION) { return $name === ESP_Media_Index::SCHEMA_OPTION ? '3' : '1'; }
+        $name === ESP_Media_Index::ENABLE_OPTION) { return $name === ESP_Media_Index::SCHEMA_OPTION ? '4' : '1'; }
     return $default;
 }
 
@@ -135,8 +135,8 @@ function esp63_seed(mysqli $mysqli, int $size): float {
     esp63_run_sql($mysqli, 'TRUNCATE TABLE esp63_postmeta');
     esp63_run_sql($mysqli, 'TRUNCATE TABLE esp63_posts');
     esp63_run_sql($mysqli, 'TRUNCATE TABLE esp63_media_index');
-    esp63_run_sql($mysqli, 'TRUNCATE TABLE esp63_esp_media_files_v1');
-    esp63_run_sql($mysqli, 'TRUNCATE TABLE esp63_esp_media_file_state_v1');
+    esp63_run_sql($mysqli, 'TRUNCATE TABLE esp63_esp_media_files');
+    esp63_run_sql($mysqli, 'TRUNCATE TABLE esp63_esp_media_file_state');
     $batch_posts = []; $batch_meta = []; $batch_idx = [];
     for ($id = 1; $id <= $size; $id++) {
         $name = esp63_name($id);
@@ -166,13 +166,13 @@ function esp63_seed(mysqli $mysqli, int $size): float {
     // Clone the synthetic corpus into the production schema, preserving each
     // attachment's protection ID and a per-owner ready state. This excludes
     // the real WordPress backfill lifecycle and isolates indexed lookup speed.
-    esp63_run_sql($mysqli, 'INSERT INTO esp63_esp_media_files_v1
+    esp63_run_sql($mysqli, 'INSERT INTO esp63_esp_media_files
         (path_hash,file_path,attachment_id,generation,protected_path_id)
         SELECT path_hash,file_path,attachment_id,1,protected_path_id FROM esp63_media_index');
-    esp63_run_sql($mysqli, "INSERT INTO esp63_esp_media_file_state_v1
+    esp63_run_sql($mysqli, "INSERT INTO esp63_esp_media_file_state
         (attachment_id,status,revision,active_generation,pending_count,changed_at)
         SELECT ID,'ready',1,1,0,0 FROM esp63_posts");
-    esp63_run_sql($mysqli, "INSERT INTO esp63_esp_media_file_state_v1
+    esp63_run_sql($mysqli, "INSERT INTO esp63_esp_media_file_state
         (attachment_id,status,revision,audit_cursor) VALUES (0,'ready',1,0)");
     return microtime(true) - $start;
 }
@@ -200,8 +200,8 @@ function esp63_measure(callable $lookup, array $targets, int $iterations,
 }
 try {
     esp63_run_sql($mysqli, 'DROP TABLE IF EXISTS esp63_media_index');
-    esp63_run_sql($mysqli, 'DROP TABLE IF EXISTS esp63_esp_media_files_v1');
-    esp63_run_sql($mysqli, 'DROP TABLE IF EXISTS esp63_esp_media_file_state_v1');
+    esp63_run_sql($mysqli, 'DROP TABLE IF EXISTS esp63_esp_media_files');
+    esp63_run_sql($mysqli, 'DROP TABLE IF EXISTS esp63_esp_media_file_state');
     esp63_run_sql($mysqli, 'DROP TABLE IF EXISTS esp63_postmeta');
     esp63_run_sql($mysqli, 'DROP TABLE IF EXISTS esp63_posts');
     esp63_run_sql($mysqli, 'CREATE TABLE esp63_posts (
@@ -216,7 +216,7 @@ try {
         KEY post_id (post_id), KEY meta_key (meta_key(191))
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
     esp63_run_sql($mysqli, ESP63_Media_Index_Prototype::schema_sql('esp63_media_index'));
-    esp63_run_sql($mysqli, "CREATE TABLE esp63_esp_media_files_v1 (
+    esp63_run_sql($mysqli, "CREATE TABLE esp63_esp_media_files (
         path_hash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
         file_path TEXT NOT NULL, attachment_id BIGINT UNSIGNED NOT NULL,
         generation BIGINT UNSIGNED NOT NULL DEFAULT 0,
@@ -224,7 +224,7 @@ try {
         PRIMARY KEY (path_hash,attachment_id,generation),KEY attachment_id (attachment_id),
         KEY protected_path_id (protected_path_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
-    esp63_run_sql($mysqli, "CREATE TABLE esp63_esp_media_file_state_v1 (
+    esp63_run_sql($mysqli, "CREATE TABLE esp63_esp_media_file_state (
         attachment_id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
         status VARCHAR(16) NOT NULL DEFAULT 'dirty',
         revision BIGINT UNSIGNED NOT NULL DEFAULT 0,
@@ -234,6 +234,7 @@ try {
         retry_after BIGINT UNSIGNED NOT NULL DEFAULT 0,
         failure_count INT UNSIGNED NOT NULL DEFAULT 0,
         audit_cursor BIGINT UNSIGNED NOT NULL DEFAULT 0,
+        active_mutation_ids LONGTEXT NULL,
         KEY status (status),
         KEY retry_queue (status,pending_count,retry_after,changed_at)
     ) ENGINE=InnoDB");
@@ -247,7 +248,7 @@ try {
         // Refresh InnoDB persistent stats before reporting table size. Prior
         // values were stale/default (163840 bytes) and must not be interpreted.
         foreach (['esp63_posts', 'esp63_postmeta', 'esp63_media_index',
-                  'esp63_esp_media_files_v1', 'esp63_esp_media_file_state_v1'] as $table) {
+                  'esp63_esp_media_files', 'esp63_esp_media_file_state'] as $table) {
             $mysqli->query('ANALYZE TABLE ' . $table);
         }
         $targets = [];
@@ -299,7 +300,7 @@ try {
         $production_index_bytes = (int)$mysqli->query("SELECT
             COALESCE(SUM(data_length+index_length),0) AS bytes
             FROM information_schema.tables WHERE table_schema=DATABASE()
-            AND table_name IN ('esp63_esp_media_files_v1','esp63_esp_media_file_state_v1')")
+            AND table_name IN ('esp63_esp_media_files','esp63_esp_media_file_state')")
             ->fetch_assoc()['bytes'];
         $count_row = $mysqli->query('SELECT COUNT(*) AS n FROM esp63_media_index')->fetch_assoc();
         if ((int)$count_row['n'] !== $size * 5) {
