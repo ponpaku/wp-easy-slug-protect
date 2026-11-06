@@ -164,6 +164,9 @@ class ESP_Setup {
         wp_clear_scheduled_hook('esp_all_cache_refresh');
         wp_clear_scheduled_hook('esp_verify_runtime_once');
         wp_clear_scheduled_hook('esp_update_retry');
+        if (class_exists('ESP_Media_Index')) {
+            ESP_Media_Index::unschedule();
+        }
         
         // キャッシュのクリア
         delete_transient('esp_protected_posts');

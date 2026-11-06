@@ -3,6 +3,8 @@
 import sys
 import http.cookiejar
 import re
+import os
+import json
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -29,6 +31,35 @@ def check(ok, label):
         raise AssertionError(label)
     print('PASS:', label)
 
+def check_generated_media(c, filename, expected_status, marker=None, pdf=False):
+    check(isinstance(filename, str) and filename.startswith(('esp42-', 'esp31-protected-')) and
+          filename.endswith(('.jpg', '.pdf')) and '/' not in filename,
+          'fixture file name is strictly inside disposable uploads')
+    status, body, headers = request(c, '/wp-content/uploads/' + filename)
+    check(status == expected_status, 'generated file HTTP status: ' + filename)
+    if expected_status == 200:
+        if pdf:
+            check(body.startswith(b'%PDF'), 'WordPress PDF document bytes: ' + filename)
+        else:
+            check(body.startswith(b'\xff\xd8') and body.endswith(b'\xff\xd9'),
+                  'WordPress JPEG preview bytes: ' + filename)
+        if marker:
+            check(marker.encode() in body, 'fixture marker: ' + filename)
+        check('no-store' in headers.get('Cache-Control', '').lower(),
+              'generated protected file no-store: ' + filename)
+    else:
+        check(b'%PDF' not in body and (not marker or marker.encode() not in body),
+              'protected generated file bytes not leaked: ' + filename)
+
+fixture_path = os.environ.get('ESP42_PDF_MANIFEST')
+generated = None
+if fixture_path:
+    with open(fixture_path, encoding='utf-8') as handle:
+        generated = json.load(handle)
+    check(set(generated.keys()) == {'pdf_original', 'pdf_full', 'pdf_thumb',
+                                    'image_unique', 'gif_poster_unique'},
+          'real core PDF/unique-name fixture has all expected files')
+
 anon = client()
 if '--unready' in sys.argv:
     for path, secret in [('/esp44-secret/', b'ESP44_SECRET_PAGE'), ('/wp-content/uploads/esp44-protected.txt', b'ESP44_PROTECTED_MEDIA'), ('/wp-json/wp/v2/pages', b'ESP44_SECRET_PAGE'), ('/feed/', b'ESP44_SECRET_PAGE')]:
@@ -49,13 +80,24 @@ check(status == 200 and public_jpeg.startswith(b'\xff\xd8') and
 check('public' in jpeg_headers.get('Cache-Control', '').lower() and
       'no-store' not in jpeg_headers.get('Cache-Control', '').lower(),
       'public JPEG retains long-lived public cache policy')
+status, thumbnail, thumbnail_headers = request(anon, '/wp-content/uploads/esp31-public-150x150.jpg')
+check(status == 200 and b'ESP42_PUBLIC_THUMB' in thumbnail and
+      'public' in thumbnail_headers.get('Cache-Control', '').lower(),
+      'WordPress standard public JPEG thumbnail stays available')
 check('no-store' not in public_headers.get('Cache-Control', '').lower(),
       'public media is not forced into protected no-store cache policy')
 for path, secret in [('/esp44-secret/', b'ESP44_SECRET_PAGE'),
                      ('/wp-content/uploads/esp44-protected.txt', b'ESP44_PROTECTED_MEDIA'),
-                     ('/wp-content/uploads/esp31-protected.jpg', b'ESP31_PROTECTED_JPEG')]:
+                     ('/wp-content/uploads/esp31-protected.jpg', b'ESP31_PROTECTED_JPEG'),
+                     ('/wp-content/uploads/esp31-protected-150x150.jpg', b'ESP42_PROTECTED_THUMB')]:
     status, body, _ = request(anon, path)
     check(status in (302, 403) and secret not in body, 'anonymous protected URL returns no secret bytes: ' + path)
+if generated:
+    for name, marker in [('pdf_original', None), ('pdf_full', None),
+                         ('pdf_thumb', None), ('image_unique', 'ESP42_NUMBERED_IMAGE'),
+                         ('gif_poster_unique', 'ESP42_NUMBERED_GIF_POSTER')]:
+        check_generated_media(anon, generated[name], 302, marker)
+
 for remember in (False, True):
     c = client()
     status, form, _ = request(c, '/esp44-login/')
@@ -96,6 +138,16 @@ for remember in (False, True):
     check(status == 206 and jpeg_range == jpeg[:4] and
           'no-store' in headers.get('Cache-Control', '').lower(),
           'protected JPEG Range serves expected bytes without caching')
+    status, thumb_body, thumb_headers = request(c, '/wp-content/uploads/esp31-protected-150x150.jpg')
+    check(status == 200 and b'ESP42_PROTECTED_THUMB' in thumb_body and
+          'no-store' in thumb_headers.get('Cache-Control', '').lower(),
+          'WordPress standard protected thumbnail inherits exact attachment authorization')
+    if generated:
+        for name, marker in [('pdf_original', None), ('pdf_full', None),
+                             ('pdf_thumb', None), ('image_unique', 'ESP42_NUMBERED_IMAGE'),
+                             ('gif_poster_unique', 'ESP42_NUMBERED_GIF_POSTER')]:
+            check_generated_media(c, generated[name], 200, marker,
+                                  pdf=name == 'pdf_original')
     logout_nonce = re.search(rb'name="esp_nonce" value="([^"]+)"', body).group(1).decode()
     request(c, '/', {'esp_action': 'logout', 'esp_nonce': logout_nonce, 'esp_logout_path_id': 'path_http', 'redirect_to': '/'})
     status, media, logout_headers = request(c, '/wp-content/uploads/esp44-protected.txt')
@@ -107,4 +159,15 @@ for remember in (False, True):
           'logout denies the same protected JPEG URL without leaking image bytes')
     check('no-store' in headers.get('Cache-Control', '').lower(),
           'protected JPEG logout denial cannot be cached')
+    status, thumb_after_logout, _ = request(c, '/wp-content/uploads/esp31-protected-150x150.jpg')
+    check(status in (302, 403) and b'ESP42_PROTECTED_THUMB' not in thumb_after_logout,
+          'logout revokes access to WordPress standard protected JPEG thumbnail')
+    if generated:
+        for name, marker in [('pdf_original', None), ('pdf_full', None),
+                             ('pdf_thumb', None), ('image_unique', 'ESP42_NUMBERED_IMAGE'),
+                             ('gif_poster_unique', 'ESP42_NUMBERED_GIF_POSTER')]:
+            status, leaked_body, _ = request(c, '/wp-content/uploads/' + generated[name])
+            check(status in (302, 403) and b'%PDF' not in leaked_body and
+                  (not marker or marker.encode() not in leaked_body),
+                  'logout revokes generated protected media: ' + generated[name])
 print('All real Apache HTTP checks passed.')
