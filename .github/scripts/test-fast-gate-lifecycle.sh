@@ -16,6 +16,11 @@ cleanup() {
         docker logs "$container" >"$report_root/apache.log" 2>&1 || true
         docker rm -f "$container" >/dev/null 2>&1 || true
     fi
+    # Apache workers use www-data, but the checkout/fixture belongs to
+    # the GitHub runner. Restore ownership after the isolated HTTP test.
+    if [[ -d "$root" ]]; then
+        sudo chown -R "$(id -u):$(id -g)" "$root" >/dev/null 2>&1 || true
+    fi
     rm -rf "$root"
     return "$rc"
 }
@@ -152,8 +157,8 @@ RewriteRule . /index.php [L]
 HTACCESS
 wp config set DB_HOST host.docker.internal --type=constant
 sudo chown -R 33:33 "$ESP_WP_ROOT/wp-content/esp-fast-gate-v2"
-docker build -q -f tests/fixtures/fast-gate-apache.Dockerfile \
-    -t esp-fast-gate-apache-ci . >"$report_root/apache-build.log"
+docker build --progress=plain -f tests/fixtures/fast-gate-apache.Dockerfile \
+    -t esp-fast-gate-apache-ci . 2>&1 | tee "$report_root/apache-build.log"
 docker run --detach --rm --name "$container" \
     --add-host=host.docker.internal:host-gateway \
     --publish 127.0.0.1:8096:80 \
