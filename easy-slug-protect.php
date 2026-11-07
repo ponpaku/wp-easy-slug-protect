@@ -68,6 +68,9 @@ class Easy_Slug_Protect {
         require_once ESP_PATH . 'includes/class-esp-media-deriver.php';
         require_once ESP_PATH . 'includes/class-esp-media-file-resolver.php';
         require_once ESP_PATH . 'includes/class-esp-media-index.php';
+        require_once ESP_PATH . 'includes/class-esp-fast-gate-token.php';
+        require_once ESP_PATH . 'includes/class-esp-fast-gate-store.php';
+        require_once ESP_PATH . 'includes/class-esp-fast-gate-wp.php';
         require_once ESP_PATH . 'includes/class-esp-media-protection.php';
 
         // 管理画面クラスの読み込み
@@ -83,6 +86,8 @@ class Easy_Slug_Protect {
         // #63 is an independent, opt-in derived index. Its writes are guarded
         // before WordPress metadata mutations, even in wp-admin and REST.
         ESP_Media_Index::register();
+        // Fast Gate v2 is inert until explicitly activated after review.
+        ESP_Fast_Gate_WP::register();
         // WordPressの通常のメタデータ更新は、まず失効できるか確認する。
         // 失効できないときに更新してしまうと次リクエストに旧認可が残り得る。
         foreach (['add_post_metadata', 'update_post_metadata'] as $hook) {

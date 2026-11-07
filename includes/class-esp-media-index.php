@@ -617,6 +617,10 @@ final class ESP_Media_Index {
     public static function guard_meta($check, $post_id, $meta_key, $meta_value, $reserve = true) {
         if ($check !== null || !self::relevant($meta_key) || !self::installed()) { return $check; }
         if (get_post_type((int)$post_id) !== 'attachment') { return $check; }
+        if (class_exists('ESP_Fast_Gate_WP') &&
+            !ESP_Fast_Gate_WP::fence_media_change((int)$post_id, $meta_key, $meta_value)) {
+            return false;
+        }
         if (self::mark_dirty((int)$post_id)) {
             self::track_local((int)$post_id);
             $cross_directory = false;
@@ -705,6 +709,8 @@ final class ESP_Media_Index {
      */
     /** Revoke global coverage and start a NEW audit epoch atomically. */
     private static function invalidate_global() {
+        if (class_exists('ESP_Fast_Gate_WP') &&
+            !ESP_Fast_Gate_WP::halt_if_active()) { return false; }
         global $wpdb;
         $state = self::table(self::state_table());
         $changed = $wpdb->query(
@@ -734,6 +740,10 @@ final class ESP_Media_Index {
         if (!self::relevant($old->meta_key) && !self::relevant($meta_key)) { return $check; }
         // Ordinary post meta must never poison the attachment index.
         if (get_post_type((int)$old->post_id) !== 'attachment') { return $check; }
+        if (class_exists('ESP_Fast_Gate_WP') &&
+            !ESP_Fast_Gate_WP::fence_media_change((int)$old->post_id)) {
+            return false;
+        }
         if (self::mark_dirty((int)$old->post_id)) {
             self::$by_mid[(int)$meta_id] = (int)$old->post_id;
             self::track_local((int)$old->post_id);
@@ -767,6 +777,10 @@ final class ESP_Media_Index {
         }
         // Core supplies maybe_serialize(sanitize_meta(...)) to this action.
         // reserve_new_paths() deserializes metadata using maybe_unserialize().
+        if (class_exists('ESP_Fast_Gate_WP') &&
+            !ESP_Fast_Gate_WP::fence_media_change($post_id, $meta_key, $stored_value)) {
+            throw new RuntimeException('ESP fast gate: cannot fence sanitized by-mid update');
+        }
         if (self::reserve_new_paths($post_id, $meta_key, $stored_value)) { return; }
         // Missing/invalid ownership evidence may be repaired on a future
         // audit; until then, never let a READY global index authorize a
@@ -785,6 +799,10 @@ final class ESP_Media_Index {
         }
         if (!self::relevant($old->meta_key)) { return $check; }
         if (get_post_type((int)$old->post_id) !== 'attachment') { return $check; }
+        if (class_exists('ESP_Fast_Gate_WP') &&
+            !ESP_Fast_Gate_WP::fence_media_change((int)$old->post_id)) {
+            return false;
+        }
         if (self::mark_dirty((int)$old->post_id)) {
             self::track_local((int)$old->post_id);
             return null;
@@ -803,6 +821,12 @@ final class ESP_Media_Index {
         // tickets only at request shutdown, not once per metadata row.
         $id = (int)$post_id;
         if (empty(self::$local_pending[$id])) {
+            // An unexpected post-hook has no pre-commit SQLite fence.
+            // Stop standalone serving before processing untracked mutation.
+            if (class_exists('ESP_Fast_Gate_WP') &&
+                !ESP_Fast_Gate_WP::halt_if_active()) {
+                throw new RuntimeException('ESP fast gate: untracked media mutation cannot be fenced');
+            }
             // A post-hook without our pre-hook must still invalidate old
             // indexed authorization without consuming another worker's ticket.
             if (!self::mark_dirty($id)) {
@@ -871,6 +895,10 @@ final class ESP_Media_Index {
             ($old_type !== 'attachment' && $new_type !== 'attachment')) {
             return;
         }
+        if (class_exists('ESP_Fast_Gate_WP') &&
+            !ESP_Fast_Gate_WP::fence_media_change((int)$id)) {
+            throw new RuntimeException('ESP fast gate: cannot fence attachment type transition');
+        }
         // Serialize the transition's pending ticket and path reservation with
         // orphan purge/reindex. Never hold the named lock across Core's UPDATE.
         $namespace = self::lock_namespace();
@@ -912,6 +940,10 @@ final class ESP_Media_Index {
     }
     public static function on_attachment_deleting($id) {
         if (!self::installed()) { return; }
+        if (class_exists('ESP_Fast_Gate_WP') &&
+            !ESP_Fast_Gate_WP::fence_media_change((int)$id)) {
+            throw new RuntimeException('ESP fast gate: cannot fence attachment deletion');
+        }
         if (!self::mark_dirty((int)$id)) {
             // No cancellable WordPress action here. Record the deletion even
             // when we have to fall back to global invalidation. Recovery
@@ -1152,6 +1184,9 @@ final class ESP_Media_Index {
             // authorization failures; persist a bounded retry instead of
             // silently accumulating obsolete generations forever.
             self::cleanup_obsolete_generations($id, $revision);
+            if (class_exists('ESP_Fast_Gate_WP')) {
+                do_action('esp_media_index_published', $id);
+            }
             return true;
         } catch (\Throwable $e) {
             // Never undo another plugin's transaction. The committed dirty
@@ -1276,8 +1311,13 @@ final class ESP_Media_Index {
                 "DELETE FROM $files WHERE attachment_id=%d", $id)) === false) {
                 return false;
             }
-            return $wpdb->query($wpdb->prepare(
-                "DELETE FROM $state WHERE attachment_id=%d AND pending_count=0", $id)) !== false;
+            $deleted = $wpdb->query($wpdb->prepare(
+                "DELETE FROM $state WHERE attachment_id=%d AND pending_count=0", $id));
+            if ($deleted === false || $wpdb->last_error !== '') { return false; }
+            if (class_exists('ESP_Fast_Gate_WP')) {
+                do_action('esp_media_index_published', $id);
+            }
+            return true;
         } finally {
             $wpdb->get_var($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $lock_name));
         }
