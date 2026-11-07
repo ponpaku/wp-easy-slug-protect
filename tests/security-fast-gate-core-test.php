@@ -173,6 +173,12 @@ try {
     fg_assert($db->set_ready(true) && !$db->serving(),
         'ready never enables serving');
     fg_assert($db->set_serving(true), 'explicit serving');
+    // Legacy checks use the currently observed path revisions; the separate
+    // cross-owner race below deliberately submits an OLD snapshot.
+    $publish_current = function ($id, $epoch, $policies, $owned) use (&$db) {
+        return $db->publish_owner($id, $epoch, $policies, $owned,
+            $db->path_epochs(array_keys($policies)));
+    };
     fg_assert($db->fence_owner(11, ['2026/11/b.jpg']), 'old+new fence');
     fg_assert($db->get_media('2026/11/a.jpg') === null, 'old owner fenced');
     fg_assert($db->get_media('2026/11/b.jpg') === null,
@@ -186,17 +192,17 @@ try {
     fg_assert($db->pending_owners() === [11], 'bounded pending queue');
     $epoch = $db->owner_epoch(11);
     fg_assert($epoch === 1, 'epoch increment');
-    fg_assert(!$db->publish_owner(11, 0, [
+    fg_assert(!$publish_current(11, 0, [
         '2026/11/a.jpg'=>['policy'=>'deny','path_id'=>''],
         '2026/11/b.jpg'=>['policy'=>'deny','path_id'=>'']
     ], ['2026/11/a.jpg']), 'stale worker cannot un-fence');
     fg_assert($db->fence_owner(11, ['2026/11/c.jpg']), 'second change');
-    fg_assert(!$db->publish_owner(11, 1, [
+    fg_assert(!$publish_current(11, 1, [
         '2026/11/a.jpg'=>['policy'=>'deny','path_id'=>''],
         '2026/11/b.jpg'=>['policy'=>'deny','path_id'=>''],
         '2026/11/c.jpg'=>['policy'=>'deny','path_id'=>''],
     ], ['2026/11/a.jpg']), 'old snapshot cannot retire newer fence');
-    fg_assert($db->publish_owner(11, 2, [
+    fg_assert($publish_current(11, 2, [
         '2026/11/a.jpg'=>['policy'=>'protected','path_id'=>$path],
         '2026/11/b.jpg'=>['policy'=>'deny','path_id'=>''],
         '2026/11/c.jpg'=>['policy'=>'deny','path_id'=>''],
@@ -206,6 +212,53 @@ try {
     fg_assert($db->get_media('2026/11/b.jpg')['policy'] === 'deny',
         'collision remains denied');
     fg_assert($db->pending_owners() === [], 'fence cleared after publication');
+
+    // R01 regression: two different owners touch ONE media path. Owner B
+    // reads public; A later publishes protected. B's old public must never
+    // overwrite A or clear the last deny fence.
+    $shared = '2026/11/shared.jpg';
+    fg_assert($db->replace_catalog([
+        $shared => ['policy'=>'public','path_id'=>''],
+    ], [
+        31 => [$shared],
+        32 => [$shared],
+    ]), 'shared-owner catalog setup');
+    fg_assert($db->set_ready(true) && !$db->serving(),
+        'replacement catalog cannot activate serving');
+    fg_assert($db->set_serving(true), 'enable isolated R01 test');
+    fg_assert($db->fence_owner(32, [$shared]), 'B pre-fence');
+    $b_epoch = $db->owner_epoch(32);
+    $b_paths = $db->path_epochs([$shared]); // B reads OLD public policy.
+    fg_assert($db->fence_owner(31, [$shared]), 'A pre-fence');
+    $a_epoch = $db->owner_epoch(31);
+    $a_paths = $db->path_epochs([$shared]);
+    fg_assert($db->publish_owner(31, $a_epoch, [
+        $shared => ['policy'=>'protected','path_id'=>$path],
+    ], [$shared], $a_paths), 'A publishes new protected policy');
+    fg_assert(!$db->publish_owner(32, $b_epoch, [
+        $shared => ['policy'=>'public','path_id'=>''],
+    ], [], $b_paths), 'B stale public publish rejected across owners');
+    fg_assert($db->get_media($shared) === null,
+        'B stale fence persists after failed publish');
+    fg_assert($db->pending_owners() === [32],
+        'failed stale worker remains retryable');
+    $b_fresh = $db->path_epochs([$shared]);
+    fg_assert($db->publish_owner(32, $b_epoch, [
+        $shared => ['policy'=>'protected','path_id'=>$path],
+    ], [], $b_fresh), 'B publishes canonical protected after retry');
+    fg_assert($db->get_media($shared)['policy'] === 'protected',
+        'shared file not accidentally republished as public');
+
+    // Also reject an old snapshot after a DIFFERENT owner merely fences the
+    // path, even if it has not yet published the new protection.
+    fg_assert($db->fence_owner(32, [$shared]), 'B second fence');
+    $prior = $db->path_epochs([$shared]);
+    fg_assert($db->fence_owner(31, [$shared]), 'A new pending mutation');
+    fg_assert(!$db->publish_owner(32, $db->owner_epoch(32), [
+        $shared => ['policy'=>'public','path_id'=>''],
+    ], [], $prior), 'cross-owner pre-fence invalidates stale snapshot');
+    fg_assert($db->get_media($shared) === null,
+        'pending A and B both fail closed');
     fg_assert($db->set_serving(false) && !$db->serving(), 'OFF halts gate');
 
     fg_assert($db->replace_media([

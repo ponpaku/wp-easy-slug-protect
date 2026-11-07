@@ -68,12 +68,10 @@ final class ESP_Fast_Gate_WP {
                 return $old;
             }
         }
-        // Nginx will retain the original WordPress media delivery.
-        $software = (string)($_SERVER['SERVER_SOFTWARE'] ?? '');
-        if ((string)$new === '1' &&
-            (!preg_match('/Apache|LiteSpeed/i', $software))) {
-            return $old;
-        }
+        // Draft only: no verified Rewrite installation/rollback exists yet.
+        // SERVER_SOFTWARE alone must never enable the hooks that can block
+        // ordinary WordPress logout or media writes without a usable ledger.
+        if ((string)$new === '1') { return $old; }
         return $new;
     }
 
@@ -399,6 +397,11 @@ final class ESP_Fast_Gate_WP {
             $id));
         if (!is_array($current) || $wpdb->last_error !== '') { return false; }
         $paths = array_unique(array_merge($before, $current));
+        // Snapshot shared file generations BEFORE reading current MySQL
+        // protection. A different attachment's fence/publish invalidates
+        // this snapshot and cannot later be overwritten by our old result.
+        $path_epochs = $db->path_epochs($paths);
+        if ($path_epochs === null) { return false; }
         $uploads = wp_upload_dir(null, false);
         $root = realpath($uploads['basedir'] ?? '');
         $settings = ESP_Option::get_current_setting('path');
@@ -423,7 +426,7 @@ final class ESP_Fast_Gate_WP {
                 : ['policy'=>($path_id === '' ? 'public' : 'protected'),
                    'path_id'=>$path_id];
         }
-        return $db->publish_owner($id, $epoch, $policies, $current);
+        return $db->publish_owner($id, $epoch, $policies, $current, $path_epochs);
     }
 
     /**

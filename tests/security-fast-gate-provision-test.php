@@ -49,10 +49,16 @@ try {
     esp_provision_assert(!ESP_Fast_Gate_WP::provision(), 'no silent key rotation');
     $_SERVER['SERVER_SOFTWARE'] = 'nginx/1.26';
     esp_provision_assert(ESP_Fast_Gate_WP::before_active_change('1', '0') === '0',
-        'Nginx Fast Gate is unsupported');
+        'Nginx Fast Gate remains disabled');
     $_SERVER['SERVER_SOFTWARE'] = 'Apache/2.4';
-    esp_provision_assert(ESP_Fast_Gate_WP::before_active_change('1', '0') === '1',
-        'Apache remains eligible for future verified activation');
+    esp_provision_assert(ESP_Fast_Gate_WP::before_active_change('1', '0') === '0',
+        'Apache cannot enable incomplete gate without verified activation');
+    $_SERVER['SERVER_SOFTWARE'] = 'LiteSpeed';
+    esp_provision_assert(ESP_Fast_Gate_WP::before_active_change('1', '0') === '0',
+        'LiteSpeed cannot enable incomplete gate');
+    unset($_SERVER['SERVER_SOFTWARE']);
+    esp_provision_assert(ESP_Fast_Gate_WP::before_active_change('1', '0') === '0',
+        'unknown web server cannot enable incomplete gate');
     echo "Fast Gate PHP-key provisioning test OK\n";
 } finally {
     foreach (['gate-ledger.sqlite', 'gate-ledger.sqlite-wal',

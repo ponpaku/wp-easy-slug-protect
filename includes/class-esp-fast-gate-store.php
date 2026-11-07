@@ -4,7 +4,7 @@
  * never treats a missing media row as public. SQLite is an opt-in dependency.
  */
 final class ESP_Fast_Gate_Store {
-    public const SCHEMA = '2';
+    public const SCHEMA = '3';
     private $db;
     private $writable;
 
@@ -64,6 +64,11 @@ final class ESP_Fast_Gate_Store {
             $this->db->exec("CREATE TABLE IF NOT EXISTS owner_epoch (
                 attachment_id INTEGER PRIMARY KEY NOT NULL,
                 epoch INTEGER NOT NULL DEFAULT 0)");
+            // Path-level CAS prevents different owners from overwriting one
+            // another's newly published authorization for the same file.
+            $this->db->exec("CREATE TABLE IF NOT EXISTS path_epoch (
+                path_hash TEXT PRIMARY KEY NOT NULL,
+                epoch INTEGER NOT NULL DEFAULT 0)");
             $this->db->exec("CREATE TABLE IF NOT EXISTS fenced (
                 attachment_id INTEGER NOT NULL, path_hash TEXT NOT NULL,
                 file_path TEXT NOT NULL, PRIMARY KEY(attachment_id,path_hash))");
@@ -79,7 +84,7 @@ final class ESP_Fast_Gate_Store {
             $this->db->exec("CREATE INDEX IF NOT EXISTS revoked_gc
                 ON revoked(db_deleted,retain_until)");
             $this->db->exec("INSERT OR IGNORE INTO meta(k,v) VALUES
-                ('schema','2'), ('ready','0'), ('serving','0')");
+                ('schema','3'), ('ready','0'), ('serving','0')");
         }) && $this->schema_ok();
     }
 
@@ -311,15 +316,24 @@ final class ESP_Fast_Gate_Store {
             $insert = $this->db->prepare(
                 "INSERT OR IGNORE INTO fenced(attachment_id,path_hash,file_path)
                  VALUES(:id,:hash,:path)");
+            $bump_path = $this->db->prepare(
+                "INSERT INTO path_epoch(path_hash,epoch) VALUES(:hash,1)
+                 ON CONFLICT(path_hash) DO UPDATE SET epoch=epoch+1");
             foreach (array_keys($paths) as $path) {
                 if (!self::safe_media_path($path)) {
                     throw new \RuntimeException('invalid old owner path');
                 }
+                $hash = hash('sha256', $path);
                 $insert->bindValue(':id', $id, SQLITE3_INTEGER);
-                $insert->bindValue(':hash', hash('sha256', $path), SQLITE3_TEXT);
+                $insert->bindValue(':hash', $hash, SQLITE3_TEXT);
                 $insert->bindValue(':path', $path, SQLITE3_TEXT);
                 if (!$insert->execute()) { throw new \RuntimeException('fence insert'); }
                 $insert->reset();
+                // A fence is a new authorization event even if the file's
+                // policy value itself has not changed yet.
+                $bump_path->bindValue(':hash', $hash, SQLITE3_TEXT);
+                if (!$bump_path->execute()) { throw new \RuntimeException('path epoch fence'); }
+                $bump_path->reset();
             }
         });
     }
@@ -344,6 +358,32 @@ final class ESP_Fast_Gate_Store {
             $stmt->bindValue(':id', $id, SQLITE3_INTEGER);
             $value = $stmt->execute()->fetchArray(SQLITE3_ASSOC);
             return $value ? (int)$value['epoch'] : 0;
+        } catch (\Throwable $e) { return null; }
+    }
+
+    /**
+     * Snapshot the version of EACH shared path before reading canonical
+     * WordPress authorization. Called once per owner refresh, not per media
+     * request. A missing path starts at generation zero.
+     *
+     * @return array|null file_path => epoch, or null on storage error.
+     */
+    public function path_epochs($paths) {
+        if (!is_array($paths)) { return null; }
+        try {
+            $query = $this->db->prepare(
+                'SELECT epoch FROM path_epoch WHERE path_hash=:hash');
+            $versions = [];
+            foreach (array_unique($paths) as $path) {
+                if (!self::safe_media_path($path)) { return null; }
+                $query->bindValue(':hash', hash('sha256', $path), SQLITE3_TEXT);
+                $result = $query->execute();
+                if (!$result) { return null; }
+                $row = $result->fetchArray(SQLITE3_ASSOC);
+                $versions[$path] = $row ? (int)$row['epoch'] : 0;
+                $query->reset();
+            }
+            return $versions;
         } catch (\Throwable $e) { return null; }
     }
 
@@ -385,27 +425,63 @@ final class ESP_Fast_Gate_Store {
      * An intervening metadata mutation increments its epoch, invalidating
      * the worker's snapshot; other owners' fences are never retired.
      */
-    public function publish_owner($id, $epoch, $policies, $owned_paths) {
+    public function publish_owner($id, $epoch, $policies, $owned_paths, $path_epochs) {
         if (!is_int($id) || $id < 1 || !is_int($epoch) || $epoch < 0 ||
-            !is_array($policies) || !is_array($owned_paths)) { return false; }
+            !is_array($policies) || !is_array($owned_paths) ||
+            !is_array($path_epochs) || count($path_epochs) !== count($policies)) {
+            return false;
+        }
         foreach ($policies as $path => $record) {
             if (!self::safe_media_path($path) || !is_array($record) ||
                 !in_array($record['policy'] ?? null,
                     ['public','protected','deny'], true) ||
-                !is_string($record['path_id'] ?? null)) { return false; }
+                !is_string($record['path_id'] ?? null) ||
+                !array_key_exists($path, $path_epochs) ||
+                !is_int($path_epochs[$path]) || $path_epochs[$path] < 0) {
+                return false;
+            }
         }
         foreach ($owned_paths as $path) {
             if (!self::safe_media_path($path) || !array_key_exists($path, $policies)) {
                 return false;
             }
         }
-        return $this->tx(function () use ($id, $epoch, $policies, $owned_paths) {
+        return $this->tx(function () use ($id, $epoch, $policies, $owned_paths, $path_epochs) {
             $stmt = $this->db->prepare(
                 'SELECT epoch FROM owner_epoch WHERE attachment_id=:id');
             $stmt->bindValue(':id', $id, SQLITE3_INTEGER);
             $row = $stmt->execute()->fetchArray(SQLITE3_ASSOC);
             if (($row ? (int)$row['epoch'] : 0) !== $epoch) {
                 throw new \RuntimeException('owner updated concurrently');
+            }
+            // Owner epochs alone cannot protect a shared media row.
+            // Verify every affected file-path epoch inside this SAME write
+            // transaction; another owner fencing or publishing that path
+            // makes any earlier snapshot stale.
+            $read_path = $this->db->prepare(
+                'SELECT epoch FROM path_epoch WHERE path_hash=:hash');
+            foreach ($path_epochs as $path => $expected_epoch) {
+                $read_path->bindValue(':hash', hash('sha256', $path), SQLITE3_TEXT);
+                $result = $read_path->execute();
+                if (!$result) { throw new \RuntimeException('path epoch read'); }
+                $snapshot = $result->fetchArray(SQLITE3_ASSOC);
+                $current_epoch = $snapshot ? (int)$snapshot['epoch'] : 0;
+                if ($current_epoch !== $expected_epoch) {
+                    throw new \RuntimeException('shared path was updated concurrently');
+                }
+                $read_path->reset();
+            }
+            $bump_path = $this->db->prepare(
+                "INSERT INTO path_epoch(path_hash,epoch) VALUES(:hash,1)
+                 ON CONFLICT(path_hash) DO UPDATE SET epoch=epoch+1");
+            // A successful publish invalidates every other owner's snapshot
+            // even if the published policy is unchanged (public -> public).
+            foreach ($path_epochs as $path => $snapshot_epoch) {
+                $bump_path->bindValue(':hash', hash('sha256', $path), SQLITE3_TEXT);
+                if (!$bump_path->execute()) {
+                    throw new \RuntimeException('path epoch publication');
+                }
+                $bump_path->reset();
             }
             $update = $this->db->prepare(
                 "INSERT INTO media(path_hash,file_path,policy,path_id)
@@ -462,6 +538,7 @@ final class ESP_Fast_Gate_Store {
             $this->db->exec('DELETE FROM owner_media');
             $this->db->exec('DELETE FROM fenced');
             $this->db->exec('DELETE FROM owner_epoch');
+            $this->db->exec('DELETE FROM path_epoch');
             $stmt = $this->db->prepare(
                 "INSERT INTO media(path_hash,file_path,policy,path_id)
                  VALUES(:hash,:path,:policy,:owner)");

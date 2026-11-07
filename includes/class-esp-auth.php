@@ -334,9 +334,11 @@ class ESP_Auth {
             $token_version = isset($login_info->password_version) ? intval($login_info->password_version) : 0;
 
             if ($current_version === $token_version) {
-                // 有効なトークンなので延長
-                $this->refresh_remember_login($path_settings, $login_info->id, $cookie_data['id'], $cookie_data['token']);
-                return true;
+                // MySQL延長が確定しなければ認証を成功扱いしない。
+                return $this->refresh_remember_login(
+                    $path_settings, $login_info->id,
+                    $cookie_data['id'], $cookie_data['token']
+                ) === true;
             }
 
             // バージョンが古いので失効させる
@@ -367,18 +369,39 @@ class ESP_Auth {
         $remember_settings = ESP_Option::get_current_setting('remember');
         $expires = time() + (DAY_IN_SECONDS * $remember_settings['time_frame']);
 
-        // データベースの有効期限を更新。失敗した更新からゲートCookieを発行しない。
-        $updated = $wpdb->update(
-            $wpdb->prefix . ESP_Config::DB_TABLES['remember'],
-            array('expires' => date('Y-m-d H:i:s', $expires)),
-            array('id' => $id),
-            array('%s'),
-            array('%d')
-        );
-
-        if ($updated === false) {
+        // A prior SELECT is not a lease: logout or expiry cleanup may remove
+        // the row between check_remember_login() and this refresh.
+        // Match the credential, path and generation again in the UPDATE.
+        $table = $wpdb->prefix . ESP_Config::DB_TABLES['remember'];
+        $token_hash = hash_hmac('sha256', $token, AUTH_SALT);
+        $version = isset($path_settings['password_version'])
+            ? (int)$path_settings['password_version'] : 0;
+        $db_expires = date('Y-m-d H:i:s', $expires);
+        $where = "id=%d AND user_id=%s AND token=%s AND path_id=%s
+                  AND password_version=%d";
+        $args = [$id, $user_id, $token_hash, $path_settings['id'], $version];
+        $updated = $wpdb->query($wpdb->prepare(
+            "UPDATE $table SET expires=%s
+             WHERE $where AND expires>NOW()",
+            $db_expires, ...$args
+        ));
+        if ($updated === false || $wpdb->last_error !== '' ||
+            ($updated !== 0 && $updated !== 1)) {
             error_log('ESP_Auth: Remember Me expiration refresh failed');
             return false;
+        }
+        if ($updated === 0) {
+            // MySQL reports 0 for an unchanged value AND for a missing row.
+            // Accept only an existing, still-valid matching credential whose
+            // expiry is already at least the requested extension.
+            $existing = $wpdb->get_var($wpdb->prepare(
+                "SELECT id FROM $table WHERE $where
+                 AND expires>NOW() AND expires >= %s LIMIT 1",
+                ...array_merge($args, [$db_expires])
+            ));
+            if ($wpdb->last_error !== '' || (string)$existing !== (string)$id) {
+                return false;
+            }
         }
         // パスを含めてCookieの更新を準備
         $this->cookie->prepare_remember_cookies($path_settings, $user_id, $token, $expires);
