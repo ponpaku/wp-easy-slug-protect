@@ -169,6 +169,31 @@ for i in $(seq 1 80); do
     if curl --silent --output /dev/null http://127.0.0.1:8096/; then break; fi
     sleep .2
 done
+# Preflight real Apache, MySQL, and WordPress routing before timing.
+docker exec "$container" php -r '
+$m=@new mysqli("host.docker.internal","root","","esp_fg_lifecycle",3306);
+if ($m->connect_errno) {
+    fwrite(STDERR,"FG_HTTP mysql unreachable: ".$m->connect_error."\n");exit(1);
+}
+echo "FG_HTTP mysql connection OK\n";
+'
+docker exec "$container" php -r '
+$_SERVER["SERVER_SOFTWARE"]="Apache/2.4";
+require "/var/www/html/wp-load.php";
+$uploads=wp_upload_dir();
+$r=ESP_Media_Index::resolve($uploads["basedir"]."/fg-life-public.jpg");
+echo "FG_HTTP WordPress media index: ".json_encode($r)."\n";
+echo "FG_HTTP runtime: ".json_encode(get_option("esp_runtime_state"))."\n";
+'
+curl --silent --show-error --dump-header "$report_root/legacy-preflight-headers.txt" \
+    --output "$report_root/legacy-preflight-body.txt" \
+    http://127.0.0.1:8096/wp-content/uploads/fg-life-public.jpg
+echo "FG_HTTP legacy public response headers:"
+head -n 18 "$report_root/legacy-preflight-headers.txt"
+echo "FG_HTTP legacy public body preview:"
+head -c 300 "$report_root/legacy-preflight-body.txt" || true
+echo
+
 # Baseline: the released PHP media-protection Rewrite (not a fake handler).
 python3 tests/fast-gate-http-benchmark.py --mode legacy \
     --cookie-file "$cookie_file" --output "$report_root/legacy-http.json" \
