@@ -62,6 +62,14 @@ wp config create --dbname=esp_fg_lifecycle --dbuser=root --dbpass= \
 wp core install --url=http://127.0.0.1:8096 --title=ESP-Gate-Life \
     --admin_user=fg-ci --admin_password=disposable-CI-only \
     --admin_email=fg-ci@example.test --skip-email
+# Stable ZIP is installed in a temporary host subdirectory named "wordpress",
+# whereas Apache serves it as /. Make the actual uploads URL explicit BEFORE
+# keys.php captures its immutable URL prefix.
+wp option update home http://127.0.0.1:8096 >/dev/null
+wp option update siteurl http://127.0.0.1:8096 >/dev/null
+wp option update upload_url_path http://127.0.0.1:8096/wp-content/uploads >/dev/null
+[[ "$(wp option get upload_url_path)" == "http://127.0.0.1:8096/wp-content/uploads" ]] ||
+    { echo "Disposable WordPress uploads URL did not persist" >&2; exit 1; }
 measure release_zip_install wp plugin install \
     "$root/release/easy-slug-protect-0.7.41.zip" --activate
 measure release_fixture_create stage seed-release

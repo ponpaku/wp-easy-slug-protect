@@ -287,6 +287,8 @@ if($phase==='http-prepare'){
     $wpdb->update($session_table,['expires'=>gmdate('Y-m-d H:i:s',$expires)],
         ['token'=>$snapshot['session_hash']]);
     $keys=require ESP_Fast_Gate_WP::private_dir().'/keys.php';
+    fg_life_check(($keys['prefix'] ?? null)==='/wp-content/uploads/',
+        'provisioned URL prefix does not match real Apache document root');
     $ticket=ESP_Fast_Gate_Token::issue($keys['site'],'fg_path','session','',
         $token,1,$expires,$keys['sig'],$keys['id']);
     fg_life_check(is_string($ticket),'failed to issue test-only signed ticket');
