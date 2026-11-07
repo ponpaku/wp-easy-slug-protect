@@ -231,6 +231,26 @@ if($phase==='cron-check'){
         $db->counts()['unconfirmed_revoked']===1,
         'Cron did not GC only confirmed+expired revocation');
     fg_life_emit('CRON_RECONCILE_AND_GC_OK',['counts'=>$db->counts()]);
+    // The Cron recovery fixture intentionally protected the public image.
+    // Restore it for the *separate* legacy-vs-fast HTTP benchmark. Use the
+    // real metadata pre-hook and real per-owner SQLite delta publication;
+    // only this PHP process opts into the unfinished gate code path.
+    $enable_ci_gate = static function() { return '1'; };
+    add_filter('pre_option_' . ESP_Fast_Gate_WP::ACTIVE_OPTION, $enable_ci_gate);
+    try {
+        fg_life_check((bool)update_post_meta($ids['public'],
+            ESP_Media_Index::PROTECTION_META, ''),
+            'restore anonymous public image after Cron test');
+        ESP_Media_Index::finish_noop_writes();
+        fg_life_check(ESP_Media_Index::reindex_attachment($ids['public']),
+            'rebuild restored public owner after Cron test');
+        fg_life_check($db->get_media($public)['policy']==='public',
+            'SQLite public authorization was not restored');
+    } finally {
+        remove_filter('pre_option_' . ESP_Fast_Gate_WP::ACTIVE_OPTION,
+            $enable_ci_gate);
+    }
+    fg_life_emit('PUBLIC_BASELINE_RESTORED');
     exit;
 }
 if($phase==='sqlite-crash'){
