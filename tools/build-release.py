@@ -19,7 +19,7 @@ def expected_source_files():
     # Only tracked runtime files enter the distribution. No tests, CI or docs.
     tracked = subprocess.check_output(["git", "ls-files", "-z"], cwd=ROOT).decode().split("\0")
     files = sorted(f for f in tracked if f in ("easy-slug-protect.php", "uninstall.php")
-                   or f.startswith(("includes/", "admin/", "front/", "languages/")))
+                   or f.startswith(("includes/", "admin/", "front/", "languages/", "gate/")))
     return files
 
 
@@ -27,7 +27,8 @@ def required_files(main):
     # Derive boot requirements from the actual load_dependencies() contract
     # instead of maintaining a second list when ESP gains a new PHP class.
     direct = re.findall(r"""\brequire(?:_once)?\s+ESP_PATH\s*\.\s*(['"])([^'"]+)\1""", main)
-    requirements = {"easy-slug-protect.php", "uninstall.php"} | {path for _, path in direct}
+    requirements = {"easy-slug-protect.php", "uninstall.php",
+                    "gate/fast-gate.php", "gate/class-esp-fast-gate-server.php"} | {path for _, path in direct}
     if len(direct) < 10 or "includes/class-esp-core.php" not in requirements or (
         "admin/classes/class-esp-admin-core.php" not in requirements
     ):

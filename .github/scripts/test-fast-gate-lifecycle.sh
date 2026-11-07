@@ -73,6 +73,9 @@ python3 tools/build-release.py --tag v0.7.41 >"$report_root/pr-zip.log"
 pr_zip="$PWD/dist/easy-slug-protect-0.7.41.zip"
 measure real_wordpress_zip_upgrade wp plugin install "$pr_zip" --force
 wp plugin is-active easy-slug-protect
+[[ -f "$ESP_WP_ROOT/wp-content/plugins/easy-slug-protect/gate/fast-gate.php" &&
+   -f "$ESP_WP_ROOT/wp-content/plugins/easy-slug-protect/gate/class-esp-fast-gate-server.php" ]] ||
+   { echo "Updated ZIP omitted standalone Fast Gate runtime files" >&2; exit 1; }
 measure release_upgrade_integrity stage after-upgrade
 wp option get esp_fast_gate_v2_active >/dev/null 2>&1 &&
     { echo "active option unexpected after upgrade" >&2; exit 1; } || true
