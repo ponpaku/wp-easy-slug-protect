@@ -80,7 +80,11 @@ foreach (['public'=>$public_file,'private'=>$private_file] as $kind=>$file) {
     ], $file, 0, true);
     fg_wp_assert(!is_wp_error($id) && (int)$id>0, 'wp_insert_attachment ' . $kind);
     $ids[$kind]=(int)$id;
-    fg_wp_assert((bool)update_attached_file($id, $file), 'attached_file ' . $kind);
+    // wp_insert_attachment($file) may already have stored this metadata;
+    // a no-op update returns false, even though the canonical file is valid.
+    update_attached_file($id, $file);
+    fg_wp_assert(realpath(get_attached_file($id)) === realpath($file),
+        'attached_file ' . $kind);
     $meta = ['file' => basename($file), 'sizes'=>[], 'width'=>2, 'height'=>2];
     fg_wp_assert((bool)wp_update_attachment_metadata($id,$meta),
         'wp_update_attachment_metadata ' . $kind);
