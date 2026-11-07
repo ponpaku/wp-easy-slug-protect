@@ -4,7 +4,7 @@
  *
  * NOT wired into .htaccess/Nginx automatically. The HTTP routing and update
  * synchronization must be reviewed before this endpoint is used in production.
- * ESP_GATE_PRIVATE_DIR must be provided by a trusted server/FPM config.
+ * Uses the plugin-owned wp-content/esp-fast-gate-v2 directory, no user path input.
  */
 ini_set('display_errors', '0');
 require_once __DIR__ . '/../includes/class-esp-fast-gate-token.php';
@@ -24,23 +24,17 @@ try {
         header('Allow: GET, HEAD');
         esp_fast_gate_status(405);
     }
-    $dir = getenv('ESP_GATE_PRIVATE_DIR');
-    $private = is_string($dir) && $dir !== '' ? realpath($dir) : false;
-    $docroot = realpath((string)($_SERVER['DOCUMENT_ROOT'] ?? ''));
-    if (!$private || !is_dir($private) || is_link($dir) ||
-        ($docroot && ($private === $docroot ||
-            strpos($private . '/', rtrim($docroot, '/') . '/') === 0))) {
+    // Standard plugin layout only; no environment variable or user input.
+    $dir = dirname(__DIR__, 3) . '/esp-fast-gate-v2';
+    $private = realpath($dir);
+    if (!$private || $private !== $dir || !is_dir($private) || is_link($dir)) {
         esp_fast_gate_status(503);
     }
-    $keyfile = $private . '/gate-keys.json';
-    if (!is_file($keyfile) || is_link($keyfile)) {
+    $keyfile = $private . '/keys.php';
+    if (!is_file($keyfile) || is_link($keyfile) || !is_readable($keyfile)) {
         esp_fast_gate_status(503);
     }
-    $json = file_get_contents($keyfile);
-    if (!is_string($json) || strlen($json) > 4096) {
-        esp_fast_gate_status(503);
-    }
-    $keys = json_decode($json, true);
+    $keys = require $keyfile;
     if (!is_array($keys) ||
         !is_string($keys['site'] ?? null) ||
         !is_string($keys['sig'] ?? null) || strlen($keys['sig']) < 32 ||

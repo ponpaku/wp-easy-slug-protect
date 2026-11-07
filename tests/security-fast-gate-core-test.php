@@ -86,6 +86,8 @@ try {
     fg_assert($db->get_media('2026/11/b.jpg')['path_id'] === $path, 'protected');
     fg_assert($db->get_media('2026/11/c.jpg')['policy'] === 'deny', 'deny');
     fg_assert($db->get_media('2026/11/unknown.jpg') === null, 'missing not public');
+    fg_assert(!$db->serving(), 'build does not implicitly enable gate');
+    fg_assert($db->set_serving(true), 'explicit serving for isolated test');
     fg_assert($db->is_revoked($ref) === false, 'not revoked');
 
     $root = sys_get_temp_dir() . '/esp-gate-media-' . bin2hex(random_bytes(6));
@@ -149,6 +151,57 @@ try {
     fg_assert($db->set_path($path, 4), 'publish next generation');
     fg_assert($db->get_path($path)['version'] === 4, 'new version');
     fg_assert(!$db->get_path($path)['blocked'], 'unblocked after verification');
+    fg_assert($db->set_path('path_B', 1), 'second path');
+    fg_assert(!$db->block_paths([$path, 'missing_path']), 'atomic block failure');
+    fg_assert(!$db->get_path($path)['blocked'], 'atomic rollback all paths');
+    fg_assert($db->block_paths([$path, 'path_B']), 'atomic block success');
+    fg_assert($db->get_path($path)['blocked'] &&
+        $db->get_path('path_B')['blocked'], 'both paths blocked');
+    fg_assert($db->set_path($path, 5), 'publish bumped path version');
+    fg_assert(!$db->get_path($path)['blocked'], 'new password version unlocks');
+
+    // Initial catalog is not serving; one owner's pending change fences both
+    // its old path and a new path currently published by another owner.
+    fg_assert($db->replace_catalog([
+        '2026/11/a.jpg' => ['policy'=>'public', 'path_id'=>''],
+        '2026/11/b.jpg' => ['policy'=>'public', 'path_id'=>''],
+    ], [
+        11 => ['2026/11/a.jpg'],
+        12 => ['2026/11/b.jpg'],
+    ]), 'import initial owner map');
+    fg_assert(!$db->ready() && !$db->serving(), 'build disables serving');
+    fg_assert($db->set_ready(true) && !$db->serving(),
+        'ready never enables serving');
+    fg_assert($db->set_serving(true), 'explicit serving');
+    fg_assert($db->fence_owner(11, ['2026/11/b.jpg']), 'old+new fence');
+    fg_assert($db->get_media('2026/11/a.jpg') === null, 'old owner fenced');
+    fg_assert($db->get_media('2026/11/b.jpg') === null,
+        'new collision path fenced');
+    fg_assert($db->pending_owners() === [11], 'bounded pending queue');
+    $epoch = $db->owner_epoch(11);
+    fg_assert($epoch === 1, 'epoch increment');
+    fg_assert(!$db->publish_owner(11, 0, [
+        '2026/11/a.jpg'=>['policy'=>'deny','path_id'=>''],
+        '2026/11/b.jpg'=>['policy'=>'deny','path_id'=>'']
+    ], ['2026/11/a.jpg']), 'stale worker cannot un-fence');
+    fg_assert($db->fence_owner(11, ['2026/11/c.jpg']), 'second change');
+    fg_assert(!$db->publish_owner(11, 1, [
+        '2026/11/a.jpg'=>['policy'=>'deny','path_id'=>''],
+        '2026/11/b.jpg'=>['policy'=>'deny','path_id'=>''],
+        '2026/11/c.jpg'=>['policy'=>'deny','path_id'=>''],
+    ], ['2026/11/a.jpg']), 'old snapshot cannot retire newer fence');
+    fg_assert($db->publish_owner(11, 2, [
+        '2026/11/a.jpg'=>['policy'=>'protected','path_id'=>$path],
+        '2026/11/b.jpg'=>['policy'=>'deny','path_id'=>''],
+        '2026/11/c.jpg'=>['policy'=>'deny','path_id'=>''],
+    ], ['2026/11/a.jpg']), 'safe refresh publishes all fenced paths');
+    fg_assert($db->get_media('2026/11/a.jpg')['policy'] === 'protected',
+        'new private policy after refresh');
+    fg_assert($db->get_media('2026/11/b.jpg')['policy'] === 'deny',
+        'collision remains denied');
+    fg_assert($db->pending_owners() === [], 'fence cleared after publication');
+    fg_assert($db->set_serving(false) && !$db->serving(), 'OFF halts gate');
+
     fg_assert($db->replace_media([
         '2026/11/b.jpg' => ['policy' => 'protected', 'path_id' => $path],
     ]), 'rebuild');

@@ -50,7 +50,7 @@ final class ESP_Fast_Gate_Server {
         $relative = self::relative_path($uri, $prefix);
         if ($relative === null) { return ['status' => 403]; }
         if (!is_array($cookies) || !is_string($root) ||
-            !is_dir($root) || !$store || !$store->ready()) {
+            !is_dir($root) || !$store || !$store->serving()) {
             return ['status' => 503];
         }
         $entry = $store->get_media($relative);

@@ -7,48 +7,76 @@
  */
 final class ESP_Fast_Gate_WP {
     public const ACTIVE_OPTION = 'esp_fast_gate_v2_active';
-    private const KEY_FILE = 'gate-keys.json';
+    private const KEY_FILE = 'keys.php';
     private const DB_FILE = 'gate-ledger.sqlite';
+    private static $touched = [];
 
     public static function register() {
         add_filter('pre_update_option_' . ESP_Config::OPTION_KEY,
             [self::class, 'before_settings_save'], 5, 2);
+        add_filter('pre_update_option_' . self::ACTIVE_OPTION,
+            [self::class, 'before_active_change'], 5, 2);
         add_action('update_option_' . ESP_Config::OPTION_KEY,
             [self::class, 'after_settings_save'], 30, 2);
         // Share the existing 5-minute media-index Cron, no second scheduler.
         add_action(ESP_Media_Index::BATCH_HOOK,
             [self::class, 'maintenance'], 30);
+        // Reuse the index's successful publication event; never trust dirty data.
+        add_action('esp_media_index_published', [self::class, 'refresh_owner'], 10, 1);
+        add_action('shutdown', [self::class, 'flush_modified_owners'], PHP_INT_MAX);
         if (defined('WP_CLI') && WP_CLI && class_exists('WP_CLI')) {
             \WP_CLI::add_command('esp gate-ledger', 'ESP_Fast_Gate_CLI');
         }
     }
 
-    /** Only administrator-selected, non-web-accessible directories are valid. */
+    /**
+     * No user-supplied storage path. The standalone gate derives the same
+     * content-directory location from the standard plugin layout.
+     */
+    public static function storage_path() {
+        if (!defined('WP_CONTENT_DIR') || !defined('ESP_PATH')) { return null; }
+        $content = realpath(WP_CONTENT_DIR);
+        $plugin_content = realpath(dirname(rtrim(ESP_PATH, '/'), 2));
+        if (!$content || !$plugin_content || $content !== $plugin_content) {
+            return null; // Nonstandard plugin layout is not auto-provisioned.
+        }
+        return $content . '/esp-fast-gate-v2';
+    }
+
     public static function private_dir() {
-        if (!defined('ESP_GATE_PRIVATE_DIR') ||
-            !is_string(ESP_GATE_PRIVATE_DIR) || ESP_GATE_PRIVATE_DIR === '') {
+        $expected = self::storage_path();
+        if ($expected === null || is_link($expected) ||
+            !is_dir($expected) || realpath($expected) !== $expected) {
             return null;
         }
-        $dir = realpath(ESP_GATE_PRIVATE_DIR);
-        $docroot = realpath(ABSPATH);
-        $content = defined('WP_CONTENT_DIR') ? realpath(WP_CONTENT_DIR) : false;
-        if ($dir === false || $docroot === false || !is_dir($dir) ||
-            is_link(ESP_GATE_PRIVATE_DIR)) {
-            return null;
-        }
-        foreach ([$docroot, $content] as $forbidden) {
-            if (is_string($forbidden) &&
-                ($dir === $forbidden ||
-                 strpos($dir . '/', rtrim($forbidden, '/') . '/') === 0)) {
-                return null;
-            }
-        }
-        return $dir;
+        return $expected;
     }
 
     public static function active() {
         return (string)get_option(self::ACTIVE_OPTION, '0') === '1';
     }
+
+    /**
+     * OFF first revokes standalone serving. A rewrite that remains pointed
+     * at the standalone script must not silently survive a disabled WP sync.
+     * This hook intentionally does NOT install a fast-gate rewrite.
+     */
+    public static function before_active_change($new, $old) {
+        if ((string)$old === '1' && (string)$new !== '1') {
+            $db = self::ledger(true);
+            if (!$db || !$db->set_serving(false)) {
+                return $old;
+            }
+        }
+        // Nginx will retain the original WordPress media delivery.
+        $software = (string)($_SERVER['SERVER_SOFTWARE'] ?? '');
+        if ((string)$new === '1' &&
+            (!preg_match('/Apache|LiteSpeed/i', $software))) {
+            return $old;
+        }
+        return $new;
+    }
+
 
     public static function ledger($write = false) {
         $dir = self::private_dir();
@@ -63,7 +91,8 @@ final class ESP_Fast_Gate_WP {
         if (!is_file($file) || is_link($file) || !is_readable($file)) {
             return null;
         }
-        $keys = json_decode((string)@file_get_contents($file), true);
+        // A direct HTTP PHP request only executes return; it prints no keys.
+        $keys = require $file;
         if (!is_array($keys) ||
             ($keys['site'] ?? '') !== (string)get_current_blog_id() ||
             !is_string($keys['sig'] ?? null) || strlen($keys['sig']) < 32 ||
@@ -74,10 +103,23 @@ final class ESP_Fast_Gate_WP {
     }
 
     public static function provision() {
-        $dir = self::private_dir();
-        if ($dir === null || !is_writable($dir) ||
-            !class_exists('SQLite3')) {
-            return false;
+        $dir = self::storage_path();
+        if ($dir === null || !class_exists('SQLite3')) { return false; }
+        if (!is_dir($dir)) {
+            if (!@mkdir($dir, 0700) || !@chmod($dir, 0700)) { return false; }
+        }
+        if (self::private_dir() === null || !is_writable($dir)) { return false; }
+        // Deny direct HTTP access to SQLite, WAL/SHM and even the PHP key.
+        // If AllowOverride is disabled, gate activation must fail HTTP checks.
+        $deny = $dir . '/.htaccess';
+        $rules = "<IfModule mod_authz_core.c>\nRequire all denied\n</IfModule>\n"
+            . "<IfModule !mod_authz_core.c>\nDeny from all\n</IfModule>\n";
+        if (!is_file($deny)) {
+            if (@file_put_contents($deny, $rules, LOCK_EX) !== strlen($rules)) {
+                return false;
+            }
+        } elseif (@file_get_contents($deny) !== $rules) {
+            return false; // Never overwrite administrator-modified rules.
         }
         $file = $dir . '/' . self::KEY_FILE;
         if (file_exists($file) || is_link($file)) { return false; }
@@ -93,22 +135,29 @@ final class ESP_Fast_Gate_WP {
             'root' => $root,
             'prefix' => rtrim($prefix, '/') . '/',
         ];
+        $php = "<?php\nreturn " . var_export($keys, true) . ";\n";
         $handle = @fopen($file, 'x');
         if (!$handle) { return false; }
-        @chmod($file, 0600);
+        $written = false;
         try {
-            $written = fwrite($handle, wp_json_encode($keys));
-            if ($written === false || $written < 1 || !fflush($handle)) {
-                @unlink($file);
-                return false;
+            if (@chmod($file, 0600) &&
+                (fileperms($file) & 0777) === 0600) {
+                $bytes = strlen($php);
+                $offset = 0;
+                while ($offset < $bytes) {
+                    $n = fwrite($handle, substr($php, $offset));
+                    if (!is_int($n) || $n <= 0) { break; }
+                    $offset += $n;
+                }
+                $written = $offset === $bytes && fflush($handle);
             }
         } finally {
             fclose($handle);
         }
+        if (!$written) { @unlink($file); return false; }
         $db = self::ledger(true);
         if (!$db || !$db->install()) {
-            // Do not silently regenerate a key after partial provisioning:
-            // an operator must inspect and explicitly reset the state.
+            // No key regeneration after partial provisioning.
             return false;
         }
         return true;
@@ -158,15 +207,19 @@ final class ESP_Fast_Gate_WP {
         if ($unstable === null || $wpdb->last_error !== '' || (int)$unstable > 0) {
             return false;
         }
-        $rows = $wpdb->get_col("SELECT DISTINCT f.file_path
+        $rows = $wpdb->get_results("SELECT f.file_path, f.attachment_id
             FROM $files f JOIN $state s ON s.attachment_id=f.attachment_id
             WHERE s.status='ready' AND s.pending_count=0
-              AND f.generation=s.active_generation");
+              AND f.generation=s.active_generation", ARRAY_A);
         if (!is_array($rows) || $wpdb->last_error !== '') { return false; }
 
         $catalog = [];
-        foreach ($rows as $file) {
-            if (!ESP_Media_Index::valid_path($file)) { return false; }
+        $owners = [];
+        foreach ($rows as $record) {
+            $file = $record['file_path'] ?? null;
+            $id_owner = isset($record['attachment_id']) ? (int)$record['attachment_id'] : 0;
+            if (!ESP_Media_Index::valid_path($file) || $id_owner <= 0) { return false; }
+            $owners[$id_owner][] = $file;
             $result = ESP_Media_Index::resolve($root . '/' . $file);
             if ($result['status'] === 'error') { return false; }
             if ($result['status'] === 'ambiguous' ||
@@ -194,13 +247,16 @@ final class ESP_Fast_Gate_WP {
             $versions[(string)$id] = (int)$item['password_version'];
         }
         // These operations disable the gate until the final explicit READY.
-        if (!$db->replace_media($catalog) || !$db->replace_paths($versions)) {
+        if (self::active() || $db->serving()) { return false; }
+        if (!$db->replace_catalog($catalog, $owners) ||
+            !$db->replace_paths($versions)) {
             return false;
         }
         $after = ESP_Media_Index::build_status(false);
         if (empty($after['ready']) || !empty($after['error'])) {
             return false;
         }
+        // Ready is ONLY catalog completeness; serving remains OFF.
         return $db->set_ready(true);
     }
 
@@ -264,12 +320,146 @@ final class ESP_Fast_Gate_WP {
         }
     }
 
+    /**
+     * Fast-Gate-specific pre-fence invoked by the EXISTING media-index guards.
+     * New candidate paths protect collisions with another public owner.
+     * Missing/invalid source evidence halts serving before the WP mutation.
+     */
+    public static function fence_media_change($id, $meta_key = null, $new_value = null) {
+        if (!self::active()) { return true; }
+        $db = self::ledger(true);
+        if (!$db) { return false; }
+        if (!$db->ready()) { return !$db->serving(); }
+        $candidates = self::candidate_paths((int)$id, $meta_key, $new_value);
+        if ($candidates === null) {
+            return $db->set_serving(false);
+        }
+        if (!$db->fence_owner((int)$id, $candidates)) {
+            return $db->set_serving(false);
+        }
+        self::$touched[(int)$id] = true;
+        return true;
+    }
+
+    private static function candidate_paths($id, $meta_key, $new_value) {
+        global $wpdb;
+        if ($id < 1) { return null; }
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT meta_key,meta_value FROM {$wpdb->postmeta}
+             WHERE post_id=%d AND meta_key IN (%s,%s)
+             ORDER BY meta_id ASC", $id, '_wp_attached_file',
+            '_wp_attachment_metadata'), ARRAY_A);
+        if (!is_array($rows) || $wpdb->last_error !== '') { return null; }
+        $attached = null; $metadata = false; $seen = [];
+        foreach ($rows as $row) {
+            if (!is_string($row['meta_key']) || isset($seen[$row['meta_key']])) {
+                return null;
+            }
+            $seen[$row['meta_key']] = true;
+            if ($row['meta_key'] === '_wp_attached_file') {
+                $attached = $row['meta_value'];
+            } elseif ($row['meta_key'] === '_wp_attachment_metadata') {
+                $metadata = maybe_unserialize($row['meta_value']);
+            }
+        }
+        if ($meta_key === '_wp_attached_file') { $attached = $new_value; }
+        if ($meta_key === '_wp_attachment_metadata') {
+            $metadata = is_string($new_value) ? maybe_unserialize($new_value) : $new_value;
+        }
+        return ESP_Media_Index::enumerate($attached, $metadata);
+    }
+
+    /** A missed/uncancellable guard must not leave the fast gate serving. */
+    public static function halt_if_active() {
+        if (!self::active()) { return true; }
+        $db = self::ledger(true);
+        return $db && $db->set_serving(false);
+    }
+
+    /**
+     * Index has completed a successful owner generation. Publish only after
+     * live MySQL ownership/protection checks. Fences stay until published.
+     */
+    public static function refresh_owner($id) {
+        if (!self::active()) { return true; }
+        global $wpdb;
+        $id = (int)$id;
+        $db = self::ledger(true);
+        if (!$db || !$db->ready() || $id <= 0) { return false; }
+        $epoch = $db->owner_epoch($id);
+        $before = $db->owner_paths($id);
+        if ($epoch === null || $before === null) { return false; }
+        $files = ESP_Media_Index::files_table();
+        $state = ESP_Media_Index::state_table();
+        $current = $wpdb->get_col($wpdb->prepare(
+            "SELECT f.file_path FROM $files f
+             JOIN $state s ON s.attachment_id=f.attachment_id
+             WHERE f.attachment_id=%d AND s.status='ready'
+               AND s.pending_count=0 AND f.generation=s.active_generation",
+            $id));
+        if (!is_array($current) || $wpdb->last_error !== '') { return false; }
+        $paths = array_unique(array_merge($before, $current));
+        $uploads = wp_upload_dir(null, false);
+        $root = realpath($uploads['basedir'] ?? '');
+        $settings = ESP_Option::get_current_setting('path');
+        if (!$root || !is_array($settings)) { return false; }
+        $policies = [];
+        foreach ($paths as $file) {
+            if (!ESP_Media_Index::valid_path($file)) { return false; }
+            $real = realpath($root . '/' . $file);
+            if (!$real || !is_file($real)) {
+                $policies[$file] = ['policy'=>'deny','path_id'=>''];
+                continue;
+            }
+            $resolved = ESP_Media_Index::resolve($real);
+            if ($resolved['status'] === 'error') { return false; }
+            if ($resolved['status'] !== 'resolved') {
+                $policies[$file] = ['policy'=>'deny','path_id'=>''];
+                continue;
+            }
+            $path_id = (string)$resolved['protected_path_id'];
+            $policies[$file] = $path_id !== '' && !isset($settings[$path_id])
+                ? ['policy'=>'deny','path_id'=>'']
+                : ['policy'=>($path_id === '' ? 'public' : 'protected'),
+                   'path_id'=>$path_id];
+        }
+        return $db->publish_owner($id, $epoch, $policies, $current);
+    }
+
+    /**
+     * Opportunistically publish the touched owner before the request ends,
+     * after the existing index has retired its pending writes. If it cannot
+     * publish, the fence remains and the shared Cron retries via index.
+     */
+    public static function flush_modified_owners() {
+        if (!self::active() || !self::$touched) { return; }
+        $ids = array_keys(self::$touched);
+        self::$touched = [];
+        foreach ($ids as $id) {
+            ESP_Media_Index::reindex_attachment((int)$id);
+        }
+    }
+
     /** Expired confirmed revocations are maintained with the media index Cron. */
     public static function maintenance() {
         if (!self::active()) { return; }
         $db = self::ledger(true);
-        if (!$db || !$db->schema_ok() || !$db->gc(time())) {
+        if (!$db || !$db->schema_ok()) {
+            error_log('ESP Fast Gate: Cron ledger unavailable');
+            return;
+        }
+        if (!$db->gc(time())) {
             error_log('ESP Fast Gate: Cron revocation maintenance failed');
+        }
+        // A PHP worker may terminate after fencing but before publishing.
+        // Rebuild only pending owners; do not rescan all uploads each time.
+        $pending = $db->pending_owners(25);
+        if ($pending === null) {
+            error_log('ESP Fast Gate: cannot read fenced owners');
+            return;
+        }
+        foreach ($pending as $id) {
+            ESP_Media_Index::reindex_attachment($id, true);
         }
     }
 
@@ -292,11 +482,9 @@ final class ESP_Fast_Gate_WP {
         if (!$to_block) { return $new; }
         $db = self::ledger(true);
         if (!$db || !$db->ready()) { return $old; }
-        foreach ($to_block as $id) {
-            if (!$db->block_path($id)) {
-                error_log('ESP Fast Gate: pre-change authorization block failed');
-                return $old;
-            }
+        if (!$db->block_paths($to_block)) {
+            error_log('ESP Fast Gate: atomic pre-change authorization block failed');
+            return $old;
         }
         return $new;
     }
@@ -342,6 +530,7 @@ class ESP_Fast_Gate_CLI {
             'schema_ok' => $db ? $db->schema_ok() : false,
             'ready' => $db ? $db->ready() : false,
             'active' => ESP_Fast_Gate_WP::active(),
+            'serving' => $db ? $db->serving() : false,
             'counts' => $db ? $db->counts() : null,
         ]));
     }

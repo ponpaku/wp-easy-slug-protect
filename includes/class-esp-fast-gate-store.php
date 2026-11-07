@@ -4,7 +4,7 @@
  * never treats a missing media row as public. SQLite is an opt-in dependency.
  */
 final class ESP_Fast_Gate_Store {
-    public const SCHEMA = '1';
+    public const SCHEMA = '2';
     private $db;
     private $writable;
 
@@ -58,6 +58,16 @@ final class ESP_Fast_Gate_Store {
                 file_path TEXT NOT NULL,
                 policy TEXT NOT NULL CHECK(policy IN ('public','protected','deny')),
                 path_id TEXT NOT NULL DEFAULT '')");
+            $this->db->exec("CREATE TABLE IF NOT EXISTS owner_media (
+                attachment_id INTEGER NOT NULL, path_hash TEXT NOT NULL,
+                file_path TEXT NOT NULL, PRIMARY KEY(attachment_id,path_hash))");
+            $this->db->exec("CREATE TABLE IF NOT EXISTS owner_epoch (
+                attachment_id INTEGER PRIMARY KEY NOT NULL,
+                epoch INTEGER NOT NULL DEFAULT 0)");
+            $this->db->exec("CREATE TABLE IF NOT EXISTS fenced (
+                attachment_id INTEGER NOT NULL, path_hash TEXT NOT NULL,
+                file_path TEXT NOT NULL, PRIMARY KEY(attachment_id,path_hash))");
+            $this->db->exec("CREATE INDEX IF NOT EXISTS fenced_hash ON fenced(path_hash)");
             $this->db->exec("CREATE TABLE IF NOT EXISTS paths (
                 path_id TEXT PRIMARY KEY NOT NULL,
                 password_version INTEGER NOT NULL,
@@ -69,7 +79,7 @@ final class ESP_Fast_Gate_Store {
             $this->db->exec("CREATE INDEX IF NOT EXISTS revoked_gc
                 ON revoked(db_deleted,retain_until)");
             $this->db->exec("INSERT OR IGNORE INTO meta(k,v) VALUES
-                ('schema','1'), ('ready','0')");
+                ('schema','2'), ('ready','0'), ('serving','0')");
         }) && $this->schema_ok();
     }
 
@@ -90,9 +100,32 @@ final class ESP_Fast_Gate_Store {
 
     public function set_ready($ready) {
         return $this->tx(function () use ($ready) {
+            if (!$ready) { $this->db->exec("UPDATE meta SET v='0' WHERE k='serving'"); }
             $stmt = $this->db->prepare("UPDATE meta SET v=:v WHERE k='ready'");
             $stmt->bindValue(':v', $ready ? '1' : '0', SQLITE3_TEXT);
             if (!$stmt->execute()) { throw new \RuntimeException('state'); }
+        });
+    }
+
+    /**
+     * Physical routing and the decision to serve are separate from a
+     * successfully built catalog. Provision and build never enable serving.
+     */
+    public function serving() {
+        try {
+            return $this->ready() &&
+                $this->db->querySingle("SELECT v FROM meta WHERE k='serving'") === '1';
+        } catch (\Throwable $e) { return false; }
+    }
+
+    public function set_serving($on) {
+        if ($on && !$this->ready()) { return false; }
+        return $this->tx(function () use ($on) {
+            $stmt = $this->db->prepare("UPDATE meta SET v=:value WHERE k='serving'");
+            $stmt->bindValue(':value', $on ? '1' : '0', SQLITE3_TEXT);
+            if (!$stmt->execute() || $this->db->changes() !== 1) {
+                throw new \RuntimeException('serving marker missing');
+            }
         });
     }
 
@@ -111,6 +144,28 @@ final class ESP_Fast_Gate_Store {
             $stmt->bindValue(':version', $version, SQLITE3_INTEGER);
             $stmt->bindValue(':blocked', $blocked ? 1 : 0, SQLITE3_INTEGER);
             if (!$stmt->execute()) { throw new \RuntimeException('path'); }
+        });
+    }
+
+    /**
+     * One SQLite transaction for a multi-path pre-save password revocation.
+     * Partial failures never block only the first path in a settings batch.
+     */
+    public function block_paths($paths) {
+        if (!is_array($paths) || !$paths) { return false; }
+        foreach ($paths as $path) {
+            if (!is_string($path) || $path === '') { return false; }
+        }
+        return $this->tx(function () use ($paths) {
+            $stmt = $this->db->prepare(
+                'UPDATE paths SET blocked=1 WHERE path_id=:id');
+            foreach (array_unique($paths) as $path) {
+                $stmt->bindValue(':id', $path, SQLITE3_TEXT);
+                if (!$stmt->execute() || $this->db->changes() !== 1) {
+                    throw new \RuntimeException('protected path missing');
+                }
+                $stmt->reset();
+            }
         });
     }
 
@@ -147,9 +202,16 @@ final class ESP_Fast_Gate_Store {
             if (!$this->ready() || !is_string($path) || $path === '') {
                 return null;
             }
+            $hash = hash('sha256', $path);
+            $check = $this->db->prepare(
+                "SELECT 1 FROM fenced WHERE path_hash=:hash LIMIT 1");
+            $check->bindValue(':hash', $hash, SQLITE3_TEXT);
+            if ($check->execute()->fetchArray(SQLITE3_NUM) !== false) {
+                return null;
+            }
             $stmt = $this->db->prepare(
                 "SELECT file_path,policy,path_id FROM media WHERE path_hash=:hash");
-            $stmt->bindValue(':hash', hash('sha256', $path), SQLITE3_TEXT);
+            $stmt->bindValue(':hash', $hash, SQLITE3_TEXT);
             $row = $stmt->execute()->fetchArray(SQLITE3_ASSOC);
             if (!$row || !is_string($row['file_path']) ||
                 !hash_equals($row['file_path'], $path) ||
@@ -164,7 +226,7 @@ final class ESP_Fast_Gate_Store {
     public function replace_media($records) {
         if (!is_array($records)) { return false; }
         return $this->tx(function () use ($records) {
-            $this->db->exec("UPDATE meta SET v='0' WHERE k='ready'");
+            $this->db->exec("UPDATE meta SET v='0' WHERE k IN ('ready','serving')");
             $this->db->exec('DELETE FROM media');
             $stmt = $this->db->prepare(
                 "INSERT INTO media(path_hash,file_path,policy,path_id)
@@ -192,7 +254,7 @@ final class ESP_Fast_Gate_Store {
     public function replace_paths($paths) {
         if (!is_array($paths)) { return false; }
         return $this->tx(function () use ($paths) {
-            $this->db->exec("UPDATE meta SET v='0' WHERE k='ready'");
+            $this->db->exec("UPDATE meta SET v='0' WHERE k IN ('ready','serving')");
             $this->db->exec('DELETE FROM paths');
             $stmt = $this->db->prepare(
                 'INSERT INTO paths(path_id,password_version,blocked) VALUES(:id,:version,0)');
@@ -221,6 +283,215 @@ final class ESP_Fast_Gate_Store {
                     'SELECT COUNT(*) FROM revoked WHERE db_deleted=0'),
             ];
         } catch (\Throwable $e) { return null; }
+    }
+
+    /** Persist a per-owner deny fence BEFORE canonical WordPress metadata changes. */
+    public function fence_owner($id, $candidate_paths) {
+        if (!is_int($id) || $id < 1 || !is_array($candidate_paths)) {
+            return false;
+        }
+        foreach ($candidate_paths as $path) {
+            if (!self::safe_media_path($path)) { return false; }
+        }
+        return $this->tx(function () use ($id, $candidate_paths) {
+            $bump = $this->db->prepare(
+                "INSERT INTO owner_epoch(attachment_id,epoch) VALUES(:id,1)
+                 ON CONFLICT(attachment_id) DO UPDATE SET epoch=epoch+1");
+            $bump->bindValue(':id', $id, SQLITE3_INTEGER);
+            $bump->execute();
+            $paths = [];
+            $old = $this->db->prepare(
+                "SELECT file_path FROM owner_media WHERE attachment_id=:id");
+            $old->bindValue(':id', $id, SQLITE3_INTEGER);
+            $results = $old->execute();
+            while ($row = $results->fetchArray(SQLITE3_ASSOC)) {
+                $paths[$row['file_path']] = true;
+            }
+            foreach ($candidate_paths as $path) { $paths[$path] = true; }
+            $insert = $this->db->prepare(
+                "INSERT OR IGNORE INTO fenced(attachment_id,path_hash,file_path)
+                 VALUES(:id,:hash,:path)");
+            foreach (array_keys($paths) as $path) {
+                if (!self::safe_media_path($path)) {
+                    throw new \RuntimeException('invalid old owner path');
+                }
+                $insert->bindValue(':id', $id, SQLITE3_INTEGER);
+                $insert->bindValue(':hash', hash('sha256', $path), SQLITE3_TEXT);
+                $insert->bindValue(':path', $path, SQLITE3_TEXT);
+                if (!$insert->execute()) { throw new \RuntimeException('fence insert'); }
+                $insert->reset();
+            }
+        });
+    }
+
+    private static function safe_media_path($path) {
+        if (!is_string($path) || $path === '' || strlen($path) > 4096 ||
+            $path[0] === '/' || strpos($path, '\\') !== false ||
+            preg_match('/[\x00-\x1f\x7f]/', $path)) {
+            return false;
+        }
+        foreach (explode('/', $path) as $part) {
+            if ($part === '' || $part[0] === '.') { return false; }
+        }
+        return true;
+    }
+
+    public function owner_epoch($id) {
+        if (!is_int($id) || $id < 1) { return null; }
+        try {
+            $stmt = $this->db->prepare(
+                'SELECT epoch FROM owner_epoch WHERE attachment_id=:id');
+            $stmt->bindValue(':id', $id, SQLITE3_INTEGER);
+            $value = $stmt->execute()->fetchArray(SQLITE3_ASSOC);
+            return $value ? (int)$value['epoch'] : 0;
+        } catch (\Throwable $e) { return null; }
+    }
+
+    /** Bounded retry queue of owners whose SQLite fences remain. */
+    public function pending_owners($limit = 25) {
+        if (!is_int($limit) || $limit < 1 || $limit > 200) { return null; }
+        try {
+            $stmt = $this->db->prepare(
+                'SELECT DISTINCT attachment_id FROM fenced ORDER BY attachment_id LIMIT :limit');
+            $stmt->bindValue(':limit', $limit, SQLITE3_INTEGER);
+            $result = $stmt->execute();
+            $owners = [];
+            while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
+                $owners[] = (int)$row['attachment_id'];
+            }
+            return $owners;
+        } catch (\Throwable $e) { return null; }
+    }
+
+    public function owner_paths($id) {
+        if (!is_int($id) || $id < 1) { return null; }
+        try {
+            $out = [];
+            foreach (['owner_media', 'fenced'] as $table) {
+                $stmt = $this->db->prepare(
+                    "SELECT file_path FROM $table WHERE attachment_id=:id");
+                $stmt->bindValue(':id', $id, SQLITE3_INTEGER);
+                $rows = $stmt->execute();
+                while ($row = $rows->fetchArray(SQLITE3_ASSOC)) {
+                    $out[$row['file_path']] = true;
+                }
+            }
+            return array_keys($out);
+        } catch (\Throwable $e) { return null; }
+    }
+
+    /**
+     * Publish refreshed policies and retire only THIS owner's fence atomically.
+     * An intervening metadata mutation increments its epoch, invalidating
+     * the worker's snapshot; other owners' fences are never retired.
+     */
+    public function publish_owner($id, $epoch, $policies, $owned_paths) {
+        if (!is_int($id) || $id < 1 || !is_int($epoch) || $epoch < 0 ||
+            !is_array($policies) || !is_array($owned_paths)) { return false; }
+        foreach ($policies as $path => $record) {
+            if (!self::safe_media_path($path) || !is_array($record) ||
+                !in_array($record['policy'] ?? null,
+                    ['public','protected','deny'], true) ||
+                !is_string($record['path_id'] ?? null)) { return false; }
+        }
+        foreach ($owned_paths as $path) {
+            if (!self::safe_media_path($path) || !array_key_exists($path, $policies)) {
+                return false;
+            }
+        }
+        return $this->tx(function () use ($id, $epoch, $policies, $owned_paths) {
+            $stmt = $this->db->prepare(
+                'SELECT epoch FROM owner_epoch WHERE attachment_id=:id');
+            $stmt->bindValue(':id', $id, SQLITE3_INTEGER);
+            $row = $stmt->execute()->fetchArray(SQLITE3_ASSOC);
+            if (($row ? (int)$row['epoch'] : 0) !== $epoch) {
+                throw new \RuntimeException('owner updated concurrently');
+            }
+            $update = $this->db->prepare(
+                "INSERT INTO media(path_hash,file_path,policy,path_id)
+                 VALUES(:hash,:path,:policy,:owner)
+                 ON CONFLICT(path_hash) DO UPDATE SET
+                    file_path=excluded.file_path,
+                    policy=excluded.policy,path_id=excluded.path_id");
+            foreach ($policies as $path => $policy) {
+                $update->bindValue(':hash', hash('sha256', $path), SQLITE3_TEXT);
+                $update->bindValue(':path', $path, SQLITE3_TEXT);
+                $update->bindValue(':policy', $policy['policy'], SQLITE3_TEXT);
+                $update->bindValue(':owner', $policy['path_id'], SQLITE3_TEXT);
+                if (!$update->execute()) { throw new \RuntimeException('media publish'); }
+                $update->reset();
+            }
+            $clear = $this->db->prepare(
+                'DELETE FROM owner_media WHERE attachment_id=:id');
+            $clear->bindValue(':id', $id, SQLITE3_INTEGER);
+            $clear->execute();
+            $insert = $this->db->prepare(
+                "INSERT INTO owner_media(attachment_id,path_hash,file_path)
+                 VALUES(:id,:hash,:path)");
+            foreach (array_unique($owned_paths) as $path) {
+                $insert->bindValue(':id', $id, SQLITE3_INTEGER);
+                $insert->bindValue(':hash', hash('sha256', $path), SQLITE3_TEXT);
+                $insert->bindValue(':path', $path, SQLITE3_TEXT);
+                if (!$insert->execute()) { throw new \RuntimeException('owner insert'); }
+                $insert->reset();
+            }
+            $rm = $this->db->prepare('DELETE FROM fenced WHERE attachment_id=:id');
+            $rm->bindValue(':id', $id, SQLITE3_INTEGER);
+            $rm->execute();
+        });
+    }
+
+    /**
+     * Offline catalog import. Never overwrites revocations or activates
+     * serving, and leaves the gate stopped during/after the import.
+     */
+    public function replace_catalog($policies, $owners) {
+        if (!is_array($policies) || !is_array($owners)) { return false; }
+        foreach ($owners as $owner => $paths) {
+            if ((!is_int($owner) && !ctype_digit((string)$owner)) ||
+                (int)$owner <= 0 || !is_array($paths)) { return false; }
+            foreach ($paths as $path) {
+                if (!array_key_exists($path, $policies) || !self::safe_media_path($path)) {
+                    return false;
+                }
+            }
+        }
+        return $this->tx(function () use ($policies, $owners) {
+            $this->db->exec("UPDATE meta SET v='0' WHERE k IN ('ready','serving')");
+            $this->db->exec('DELETE FROM media');
+            $this->db->exec('DELETE FROM owner_media');
+            $this->db->exec('DELETE FROM fenced');
+            $this->db->exec('DELETE FROM owner_epoch');
+            $stmt = $this->db->prepare(
+                "INSERT INTO media(path_hash,file_path,policy,path_id)
+                 VALUES(:hash,:path,:policy,:owner)");
+            foreach ($policies as $path => $policy) {
+                if (!self::safe_media_path($path) ||
+                    !is_array($policy) ||
+                    !in_array($policy['policy'] ?? null, ['public','protected','deny'], true) ||
+                    !is_string($policy['path_id'] ?? null)) {
+                    throw new \RuntimeException('invalid catalog entry');
+                }
+                $stmt->bindValue(':hash', hash('sha256', $path), SQLITE3_TEXT);
+                $stmt->bindValue(':path', $path, SQLITE3_TEXT);
+                $stmt->bindValue(':policy', $policy['policy'], SQLITE3_TEXT);
+                $stmt->bindValue(':owner', $policy['path_id'], SQLITE3_TEXT);
+                if (!$stmt->execute()) { throw new \RuntimeException('catalog insert'); }
+                $stmt->reset();
+            }
+            $mapped = $this->db->prepare(
+                "INSERT INTO owner_media(attachment_id,path_hash,file_path)
+                 VALUES(:id,:hash,:path)");
+            foreach ($owners as $owner => $paths) {
+                foreach (array_unique($paths) as $path) {
+                    $mapped->bindValue(':id', (int)$owner, SQLITE3_INTEGER);
+                    $mapped->bindValue(':hash', hash('sha256', $path), SQLITE3_TEXT);
+                    $mapped->bindValue(':path', $path, SQLITE3_TEXT);
+                    if (!$mapped->execute()) { throw new \RuntimeException('catalog owner'); }
+                    $mapped->reset();
+                }
+            }
+        });
     }
 
     /** Store all revocations atomically, including simultaneous session+remember. */
