@@ -177,6 +177,12 @@ try {
     fg_assert($db->get_media('2026/11/a.jpg') === null, 'old owner fenced');
     fg_assert($db->get_media('2026/11/b.jpg') === null,
         'new collision path fenced');
+    fg_assert(ESP_Fast_Gate_Server::authorize($prefix . '2026/11/a.jpg',
+        [], $site, $root, $prefix, $sig, $idkey, $db, $now + 1)['status']
+        === 403, 'previously public file must fail closed during mutation');
+    fg_assert(ESP_Fast_Gate_Server::authorize($prefix . '2026/11/b.jpg',
+        [], $site, $root, $prefix, $sig, $idkey, $db, $now + 1)['status']
+        === 403, 'colliding public owner must fail closed during mutation');
     fg_assert($db->pending_owners() === [11], 'bounded pending queue');
     $epoch = $db->owner_epoch(11);
     fg_assert($epoch === 1, 'epoch increment');
