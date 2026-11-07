@@ -227,7 +227,61 @@ code="$(curl -sS -o "$report_root/fast-preflight-body" \
     http://127.0.0.1:8096/wp-content/uploads/fg-life-protected.jpg)"
 echo "FG_HTTP fast preflight HTTP=$code"
 head -n 14 "$report_root/fast-preflight-headers"
-[[ "$code" == 200 ]] || { echo "Fast Gate preflight failed" >&2; exit 1; }
+if [[ "$code" != 200 ]]; then
+    echo "Fast Gate preflight rejected the test credential: $code" >&2
+    # The PHP/SQLite CLI check uses *known disposable credentials*, never
+    # outputs secrets. It distinguishes ledger/token state from HTTP routing.
+    docker exec "$container" php -r '
+    $dir="/var/www/html/wp-content/plugins/easy-slug-protect";
+    require $dir."/includes/class-esp-fast-gate-token.php";
+    require $dir."/includes/class-esp-fast-gate-store.php";
+    require $dir."/gate/class-esp-fast-gate-server.php";
+    $private="/var/www/html/wp-content/esp-fast-gate-v2";
+    $keys=require $private."/keys.php";
+    $db=ESP_Fast_Gate_Store::open($private."/gate-ledger.sqlite",false);
+    $token=str_repeat("x",64);
+    $ticket=ESP_Fast_Gate_Token::issue($keys["site"],"fg_path",
+        "session","",$token,1,time()+86400,$keys["sig"],$keys["id"]);
+    $cookies=["esp_auth_fg_path"=>$token,"esp_gate_fg_path"=>$ticket];
+    $verify=ESP_Fast_Gate_Token::verify($ticket,$keys["site"],
+        "fg_path",$cookies,1,$keys["sig"],$keys["id"]);
+    $decision=ESP_Fast_Gate_Server::authorize(
+        "/wp-content/uploads/fg-life-protected.jpg",$cookies,
+        $keys["site"],$keys["root"],$keys["prefix"],
+        $keys["sig"],$keys["id"],$db);
+    echo "FG_DEBUG_CLI ".json_encode([
+        "serving"=>$db->serving(),
+        "protected_media"=>$db->get_media("fg-life-protected.jpg"),
+        "path"=>$db->get_path("fg_path"),
+        "token_valid"=>$verify!==null,
+        "auth_status"=>$decision["status"],
+        "url_prefix"=>$keys["prefix"]])."\n";
+    '
+    # Temporarily substitute a diagnostic script inside ONLY the disposable
+    # fixture to observe PHP's post-Rewrite URI/cookie NAMES (no secret data).
+    docker exec "$container" cp \
+        /var/www/html/wp-content/plugins/easy-slug-protect/gate/fast-gate.php \
+        /tmp/esp-fg-original-php
+    docker exec -i "$container" tee \
+        /var/www/html/wp-content/plugins/easy-slug-protect/gate/fast-gate.php \
+        >/dev/null <<'DIAG'
+<?php
+header('Content-Type: application/json');
+echo json_encode([
+    'request_uri'=>$_SERVER['REQUEST_URI']??null,
+    'redirect_url'=>$_SERVER['REDIRECT_URL']??null,
+    'script_name'=>$_SERVER['SCRIPT_NAME']??null,
+    'cookie_names'=>array_keys($_COOKIE),
+    'remote_addr'=>$_SERVER['REMOTE_ADDR']??null,
+]);
+DIAG
+    curl -sS -H "Cookie: $(cat "$cookie_file")" \
+      http://127.0.0.1:8096/wp-content/uploads/fg-life-protected.jpg
+    echo
+    docker exec "$container" cp /tmp/esp-fg-original-php \
+        /var/www/html/wp-content/plugins/easy-slug-protect/gate/fast-gate.php
+    exit 1
+fi
 grep -qi '^cache-control:.*no-store' "$report_root/fast-preflight-headers" ||
     { echo "Standalone cache header absent; Rewrite bypassed" >&2; exit 1; }
 if grep -qi '^content-disposition:' "$report_root/fast-preflight-headers"; then
