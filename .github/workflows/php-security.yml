@@ -138,6 +138,29 @@ jobs:
           coverage: none
       - name: Real WordPress schema, release and upgrader fixtures
         run: bash .github/scripts/test-wordpress-updates.sh
+  fast-gate-real-wordpress:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
+          MYSQL_DATABASE: esp_fast_gate_wp
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mysqli, sqlite3
+          coverage: none
+      - name: Exercise Fast Gate v2 with REAL WordPress, MySQL and SQLite
+        env:
+          ESP_ALLOW_DISPOSABLE_DB: "1"
+        run: bash .github/scripts/test-fast-gate-wordpress.sh
   wordpress-apache-http:
     runs-on: ubuntu-latest
     services:
