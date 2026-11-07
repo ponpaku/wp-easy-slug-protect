@@ -199,16 +199,20 @@ python3 tests/fast-gate-http-benchmark.py --mode legacy \
     --cookie-file "$cookie_file" --output "$report_root/legacy-http.json" \
     | tee -a "$report_root/stages.log"
 
-# Apache's uploads/.htaccess has its own RewriteRule and can override
-# ancestor per-directory rewrite configuration. In this isolated container,
-# register the test-only router at SERVER scope (before per-dir processing).
-# This is deliberately NOT a product activation/rewrite implementation.
-docker exec -i "$container" tee /etc/apache2/conf-enabled/esp-fg-ci-router.conf \
+# Rewrite rules in Apache's main server config are not inherited by
+# VirtualHosts. Install a disposable test-only vhost so routing executes
+# BEFORE per-directory uploads/.htaccess.
+docker exec -i "$container" tee /etc/apache2/sites-enabled/000-default.conf \
     >"$report_root/apache-routing.conf" <<'APACHE'
-<IfModule mod_rewrite.c>
-RewriteEngine On
-RewriteRule ^/wp-content/uploads/(.+)$ /wp-content/plugins/easy-slug-protect/gate/fast-gate.php [PT,L]
-</IfModule>
+<VirtualHost *:80>
+    ServerName localhost
+    DocumentRoot /var/www/html
+    ErrorLog ${APACHE_LOG_DIR}/error.log
+    CustomLog ${APACHE_LOG_DIR}/access.log combined
+    LogLevel warn rewrite:trace2
+    RewriteEngine On
+    RewriteRule ^/wp-content/uploads/(.+)$ /wp-content/plugins/easy-slug-protect/gate/fast-gate.php [PT,L]
+</VirtualHost>
 APACHE
 docker exec "$container" apache2ctl configtest
 docker exec "$container" apache2ctl graceful
