@@ -163,6 +163,7 @@ docker run --detach --rm --name "$container" \
     --add-host=host.docker.internal:host-gateway \
     --publish 127.0.0.1:8096:80 \
     --mount "type=bind,src=$ESP_WP_ROOT,dst=/var/www/html" \
+    --mount "type=bind,src=$ESP_WP_ROOT,dst=$ESP_WP_ROOT" \
     esp-fast-gate-apache-ci >/dev/null
 started=1
 for i in $(seq 1 80); do
