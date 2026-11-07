@@ -151,36 +151,62 @@ class ESP_Logout {
      */
     private function logout_from_path($path_settings) {
         $path_id = $path_settings['id'];
-        
-        // DBデータのクリア
         $session_token = $this->cookie->get_session_cookie($path_id);
         $cookie_data = $this->cookie->get_remember_cookies_for_path($path_settings);
+
+        // Persist the revocation of BOTH kinds before deleting either MySQL row.
+        // An unconfirmed deletion must never remove its revocation record.
+        $refs = class_exists('ESP_Fast_Gate_WP')
+            ? ESP_Fast_Gate_WP::begin_logout($path_id, $session_token, $cookie_data)
+            : [];
+        if ($refs === false) {
+            ESP_Message::set_error(__('ログアウトの失効情報を保存できませんでした。再度お試しください。',
+                ESP_Config::TEXT_DOMAIN));
+            return false;
+        }
+
+        global $wpdb;
+        $all_deleted = true;
         if ($cookie_data) {
-            global $wpdb;
-            $wpdb->delete(
+            $deleted = $wpdb->delete(
                 $wpdb->prefix . ESP_Config::DB_TABLES['remember'],
-                array(
+                [
                     'user_id' => $cookie_data['id'],
-                    'path_id' => $path_id
-                ),
-                array('%s', '%s')
+                    'path_id' => $path_id,
+                    'token' => hash_hmac('sha256', $cookie_data['token'], AUTH_SALT),
+                ],
+                ['%s', '%s', '%s']
             );
+            if ($deleted === false) {
+                $all_deleted = false;
+            } elseif (isset($refs['remember'])) {
+                ESP_Fast_Gate_WP::confirm_logout($refs['remember']);
+            }
         }
 
         if ($session_token) {
-            global $wpdb;
-            $wpdb->delete(
+            $deleted = $wpdb->delete(
                 $wpdb->prefix . ESP_Config::DB_TABLES['session'],
-                array(
+                [
                     'token' => hash_hmac('sha256', $session_token, AUTH_SALT),
-                    'path_id' => $path_id
-                ),
-                array('%s', '%s')
+                    'path_id' => $path_id,
+                ],
+                ['%s', '%s']
             );
+            if ($deleted === false) {
+                $all_deleted = false;
+            } elseif (isset($refs['session'])) {
+                ESP_Fast_Gate_WP::confirm_logout($refs['session']);
+            }
         }
 
-        // Cookieのクリア
+        // The browser is never granted a new signed ticket by this path.
         $this->cookie->clear_all_cookies_for_path($path_settings);
+        if (!$all_deleted) {
+            ESP_Message::set_error(__('ログアウト処理の一部が完了しませんでした。',
+                ESP_Config::TEXT_DOMAIN));
+        }
+        return $all_deleted;
     }
 
     /**

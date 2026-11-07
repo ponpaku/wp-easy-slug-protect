@@ -173,6 +173,10 @@ class ESP_Auth {
 
         // Cookie設定を一時保存
         $this->cookie->prepare_session_cookie($path_id, $token, $expires);
+        if (class_exists('ESP_Fast_Gate_WP')) {
+            ESP_Fast_Gate_WP::issue_cookie($path_id, 'session', '', $token,
+                $password_version, $expires);
+        }
 
         return true;
     }
@@ -218,6 +222,10 @@ class ESP_Auth {
 
         // Cookie設定を準備（Cookieにはプレーンテキストのトークン）
         $this->cookie->prepare_remember_cookies($path_settings, $user_id, $token, $expires);
+        if (class_exists('ESP_Fast_Gate_WP')) {
+            ESP_Fast_Gate_WP::issue_cookie($path_settings['id'], 'remember',
+                $user_id, $token, (int)($path_settings['password_version'] ?? 0), $expires);
+        }
 
         return true;
     }
@@ -258,7 +266,8 @@ class ESP_Auth {
         $table = $wpdb->prefix . ESP_Config::DB_TABLES['session'];
 
         $session = $wpdb->get_row($wpdb->prepare(
-            "SELECT id, path_id, password_version FROM $table WHERE token = %s AND expires > NOW()",
+            "SELECT id, path_id, password_version, UNIX_TIMESTAMP(expires) AS expires_ts
+             FROM $table WHERE token = %s AND expires > NOW()",
             $token_hash
         ));
 
@@ -284,6 +293,10 @@ class ESP_Auth {
             return false;
         }
 
+        if (class_exists('ESP_Fast_Gate_WP')) {
+            ESP_Fast_Gate_WP::issue_cookie($path_id, 'session', '', $cookie_token,
+                $current_version, (int)($session->expires_ts ?? 0));
+        }
         return true;
     }
 
@@ -354,8 +367,8 @@ class ESP_Auth {
         $remember_settings = ESP_Option::get_current_setting('remember');
         $expires = time() + (DAY_IN_SECONDS * $remember_settings['time_frame']);
 
-        // データベースの有効期限を更新
-        $wpdb->update(
+        // データベースの有効期限を更新。失敗した更新からゲートCookieを発行しない。
+        $updated = $wpdb->update(
             $wpdb->prefix . ESP_Config::DB_TABLES['remember'],
             array('expires' => date('Y-m-d H:i:s', $expires)),
             array('id' => $id),
@@ -363,7 +376,16 @@ class ESP_Auth {
             array('%d')
         );
 
+        if ($updated === false) {
+            error_log('ESP_Auth: Remember Me expiration refresh failed');
+            return false;
+        }
         // パスを含めてCookieの更新を準備
         $this->cookie->prepare_remember_cookies($path_settings, $user_id, $token, $expires);
+        if (class_exists('ESP_Fast_Gate_WP')) {
+            ESP_Fast_Gate_WP::issue_cookie($path_settings['id'], 'remember',
+                $user_id, $token, (int)($path_settings['password_version'] ?? 0), $expires);
+        }
+        return true;
     }
 }
