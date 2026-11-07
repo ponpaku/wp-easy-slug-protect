@@ -198,14 +198,21 @@ python3 tests/fast-gate-http-benchmark.py --mode legacy \
     --cookie-file "$cookie_file" --output "$report_root/legacy-http.json" \
     | tee -a "$report_root/stages.log"
 
-# Test-only rewrite: BEFORE Apache serves existing static files, send every
-# uploads media URL to the reviewed standalone gate script.
-cat > "$uploads/.htaccess" <<'HTACCESS'
+# Test-only root Rewrite takes precedence over the existing uploads rules
+# and static files. A WordPress request can repair its own uploads/.htaccess,
+# so editing uploads/.htaccess here would NOT prove standalone delivery.
+# [END] terminates per-directory rewriting for the gate entrypoint.
+cat > "$ESP_WP_ROOT/.htaccess" <<'HTACCESS'
 <IfModule mod_rewrite.c>
 RewriteEngine On
-RewriteRule ^(.*)$ /wp-content/plugins/easy-slug-protect/gate/fast-gate.php [L,QSA]
+RewriteRule ^wp-content/uploads/(.+)$ /wp-content/plugins/easy-slug-protect/gate/fast-gate.php [END,QSA]
+RewriteRule ^index\.php$ - [L]
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule . /index.php [L]
 </IfModule>
 HTACCESS
+grep -Fq 'fast-gate.php [END,QSA]' "$ESP_WP_ROOT/.htaccess"
 python3 tests/fast-gate-http-benchmark.py --mode fast \
     --cookie-file "$cookie_file" --output "$report_root/fast-http.json" \
     | tee -a "$report_root/stages.log"

@@ -54,6 +54,16 @@ for name in files:
     if any(code != 200 for code, _, _, _ in entries):
         raise RuntimeError(f"{args.mode} {name} unexpected status")
     digests = {hashlib.sha256(body).hexdigest() for _, body, _, _ in entries}
+    # A 200 response alone does NOT prove our test-only Apache rewrite routed
+    # to the standalone gate. Verify route-specific cache headers: the old
+    # public WordPress media handler intentionally emits long-lived public
+    # caching, whereas every standalone response must be private/no-store.
+    if args.mode == "fast":
+        h = {k.lower(): v for k, v in entries[0][2].items()}
+        if "no-store" not in h.get("cache-control", "") or (
+            "content-disposition" in h
+        ):
+            raise RuntimeError(f"Fast Gate rewrite bypassed for {name}; cache={h.get('cache-control')} disposition={h.get('content-disposition')}")
     if len(digests) != 1:
         raise RuntimeError(f"{args.mode} {name} inconsistent bytes")
     ms = [x[-1] for x in entries]
