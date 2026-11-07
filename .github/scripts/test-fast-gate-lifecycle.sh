@@ -211,7 +211,7 @@ docker exec -i "$container" tee /etc/apache2/sites-enabled/000-default.conf \
     CustomLog ${APACHE_LOG_DIR}/access.log combined
     LogLevel warn rewrite:trace2
     RewriteEngine On
-    RewriteRule ^/wp-content/uploads/(.+)$ /wp-content/plugins/easy-slug-protect/gate/fast-gate.php [PT,L]
+    RewriteRule ^/wp-content/uploads/(.+)$ /wp-content/plugins/easy-slug-protect/gate/fast-gate.php [PT,END]
 </VirtualHost>
 APACHE
 docker exec "$container" apache2ctl configtest
@@ -227,8 +227,13 @@ head -n 14 "$report_root/fast-preflight-headers"
 [[ "$code" == 200 ]] || { echo "Fast Gate preflight failed" >&2; exit 1; }
 grep -qi '^cache-control:.*no-store' "$report_root/fast-preflight-headers" ||
     { echo "Standalone cache header absent; Rewrite bypassed" >&2; exit 1; }
-! grep -qi '^content-disposition:' "$report_root/fast-preflight-headers" ||
-    { echo "Legacy handler still served file; Rewrite bypassed" >&2; exit 1; }
+if grep -qi '^content-disposition:' "$report_root/fast-preflight-headers"; then
+    echo "Legacy handler still served file; Rewrite bypassed" >&2
+    docker exec "$container" apache2ctl -S 2>&1 || true
+    docker exec "$container" cat /etc/apache2/sites-enabled/000-default.conf || true
+    docker logs --tail 100 "$container" >&2 || true
+    exit 1
+fi
 python3 tests/fast-gate-http-benchmark.py --mode fast \
     --cookie-file "$cookie_file" --output "$report_root/fast-http.json" \
     | tee -a "$report_root/stages.log"
