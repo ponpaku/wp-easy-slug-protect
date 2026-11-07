@@ -94,6 +94,13 @@ jobs:
           ESP_TEST_DB_PASSWORD: test-password
           ESP_TEST_DB_NAME: esp_test
         run: php tests/security-mysql-integration.php
+      - name: Verify Remember Me refresh race against real MySQL
+        env:
+          ESP_TEST_DB_HOST: 127.0.0.1
+          ESP_TEST_DB_USER: root
+          ESP_TEST_DB_PASSWORD: test-password
+          ESP_TEST_DB_NAME: esp_test
+        run: php tests/security-fast-gate-remember-mysql.php
       - name: Exercise dedicated media index and safety states in MySQL
         env:
           ESP_TEST_DB_HOST: 127.0.0.1

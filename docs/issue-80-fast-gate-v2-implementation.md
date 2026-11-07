@@ -58,6 +58,45 @@ This document records actual code behavior, not a claim that Issue #80 is comple
 - No external backup rollback detection. Operator restoration of obsolete
   ledger+keys requires key rotation and gate reinitialization (Issue #80).
 
+## Review follow-up — R01 / R03 / R04 (2026-11-08)
+
+- **R01 (shared file path concurrency):** the SQLite ledger schema is now
+  version **3**. In addition to attachment-scoped `owner_epoch`, it persists
+  `path_epoch` by SHA-256 of the relative media path. Both pre-write fences
+  and completed owner publications increment the shared path epoch. A
+  `refresh_owner()` worker records each affected path epoch **before**
+  resolving MySQL authorization. `publish_owner()` validates both owner
+  and all affected path epochs within the *same SQLite write transaction*,
+  failing without clearing its deny fence if a different owner intervened.
+  A regression interleaves two separate SQLite connections:
+  B snapshots public, A publishes protected, then B's stale public
+  publication is rejected. This does not remove the need for true live
+  WordPress/MySQL concurrent HTTP acceptance testing.
+- **R03 (premature activation):** setting
+  `esp_fast_gate_v2_active=1` through ordinary WordPress option updates
+  is rejected **even on Apache/LiteSpeed** until the dedicated verified
+  activation+Rewrite contract has been implemented. Ordinary WordPress
+  media updates and logout remain unaffected while the option is off.
+- **R04 (Remember Me expiry refresh):** the MySQL UPDATE rechecks
+  record ID, user ID, token hash, protected path ID, password generation
+  and existing non-expiry. An affected-row count of 0 is accepted
+  only after a fresh database read confirms the exact credential remains
+  valid with an expiry at least as long as the requested renewal.
+  Failed/absent/expired credentials never renew the Remember or gate Cookie,
+  and `check_remember_login()` returns false when refresh fails.
+  Deterministic mocked state-machine and real MySQL interleaving tests
+  cover vanished rows, changed generation, expiry and no-op renewals.
+- **R02 (HTTP access to SQLite):** deliberately **not changed** in this
+  review follow-up. Deployment exposure verification at activation is
+  still a separate unresolved item by user decision. The existing
+  `wp-content` automatic placement, PHP-only keys and Apache `.htaccess`
+  policy are retained.
+
+**Compatibility:** Existing experimental SQLite schema v2 stores are *not*
+silently upgraded or treated as ready under schema v3. No production Fast
+Gate rewrite/activation is enabled in this Draft. An explicit safe migration
+or clean reinitialization with key handling will be required before launch.
+
 ## Outstanding blockers — DO NOT ENABLE
 
 1. **Incremental media correctness** (R01): deny fences and owner refresh

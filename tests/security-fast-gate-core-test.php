@@ -226,13 +226,15 @@ try {
     fg_assert($db->set_ready(true) && !$db->serving(),
         'replacement catalog cannot activate serving');
     fg_assert($db->set_serving(true), 'enable isolated R01 test');
+    $worker_a = ESP_Fast_Gate_Store::open($file, true);
+    fg_assert($worker_a !== null, 'second SQLite writer opens');
     fg_assert($db->fence_owner(32, [$shared]), 'B pre-fence');
     $b_epoch = $db->owner_epoch(32);
     $b_paths = $db->path_epochs([$shared]); // B reads OLD public policy.
-    fg_assert($db->fence_owner(31, [$shared]), 'A pre-fence');
-    $a_epoch = $db->owner_epoch(31);
-    $a_paths = $db->path_epochs([$shared]);
-    fg_assert($db->publish_owner(31, $a_epoch, [
+    fg_assert($worker_a->fence_owner(31, [$shared]), 'A pre-fence');
+    $a_epoch = $worker_a->owner_epoch(31);
+    $a_paths = $worker_a->path_epochs([$shared]);
+    fg_assert($worker_a->publish_owner(31, $a_epoch, [
         $shared => ['policy'=>'protected','path_id'=>$path],
     ], [$shared], $a_paths), 'A publishes new protected policy');
     fg_assert(!$db->publish_owner(32, $b_epoch, [
@@ -253,12 +255,13 @@ try {
     // path, even if it has not yet published the new protection.
     fg_assert($db->fence_owner(32, [$shared]), 'B second fence');
     $prior = $db->path_epochs([$shared]);
-    fg_assert($db->fence_owner(31, [$shared]), 'A new pending mutation');
+    fg_assert($worker_a->fence_owner(31, [$shared]), 'A new pending mutation');
     fg_assert(!$db->publish_owner(32, $db->owner_epoch(32), [
         $shared => ['policy'=>'public','path_id'=>''],
     ], [], $prior), 'cross-owner pre-fence invalidates stale snapshot');
     fg_assert($db->get_media($shared) === null,
         'pending A and B both fail closed');
+    unset($worker_a);
     fg_assert($db->set_serving(false) && !$db->serving(), 'OFF halts gate');
 
     fg_assert($db->replace_media([
