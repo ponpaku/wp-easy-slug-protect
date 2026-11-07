@@ -190,9 +190,8 @@ curl --silent --show-error --dump-header "$report_root/legacy-preflight-headers.
     http://127.0.0.1:8096/wp-content/uploads/fg-life-public.jpg
 echo "FG_HTTP legacy public response headers:"
 head -n 18 "$report_root/legacy-preflight-headers.txt"
-echo "FG_HTTP legacy public body preview:"
-head -c 300 "$report_root/legacy-preflight-body.txt" || true
-echo
+echo "FG_HTTP legacy public response body digest:"
+sha256sum "$report_root/legacy-preflight-body.txt"
 
 # Baseline: the released PHP media-protection Rewrite (not a fake handler).
 python3 tests/fast-gate-http-benchmark.py --mode legacy \

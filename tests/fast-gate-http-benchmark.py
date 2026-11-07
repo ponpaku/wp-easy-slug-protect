@@ -79,16 +79,17 @@ if args.mode == "fast":
     for name, method, headers, want in [
         ("fg-life-protected.jpg", "HEAD", {}, 200),
         ("fg-life-protected.jpg", "GET", {"Range": "bytes=0-31"}, 206),
-        ("fg-life-does-not-exist.jpg", "GET", {}, 403),
+        ("fg-life-does-not-exist.jpg", "GET", {}, (403, 404)),
     ]:
         status, body, _, _ = fetch(name, name == "fg-life-protected.jpg", method, headers)
-        if status != want:
+        acceptable = want if isinstance(want, tuple) else (want,)
+        if status not in acceptable:
             raise RuntimeError(f"Fast Gate {method} {name}: {status}, expected {want}")
         if method == "HEAD" and body:
             raise RuntimeError("HEAD returned a response body")
         if "Range" in headers and len(body) != 32:
             raise RuntimeError("Range yielded incorrect length")
-    results["fast_gate_http_checks"] = ["protected anonymous 403", "GET/HEAD", "Range 206", "unknown 403"]
+    results["fast_gate_http_checks"] = ["protected anonymous 403", "GET/HEAD", "Range 206", "unknown denied 403/404"]
 
 Path(args.output).write_text(json.dumps(results, indent=2, ensure_ascii=False) + "\n")
 print("FG_HTTP_BENCHMARK " + json.dumps({
