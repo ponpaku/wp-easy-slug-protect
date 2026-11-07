@@ -103,8 +103,10 @@ final class ESP_Fast_Gate_Store {
         return $this->tx(function () use ($path, $version, $blocked) {
             $stmt = $this->db->prepare("INSERT INTO paths(path_id,password_version,blocked)
                 VALUES(:id,:version,:blocked)
-                ON CONFLICT(path_id) DO UPDATE SET password_version=excluded.password_version,
-                                                   blocked=excluded.blocked");
+                ON CONFLICT(path_id) DO UPDATE SET
+                  password_version=MAX(paths.password_version,excluded.password_version),
+                  blocked=CASE WHEN excluded.password_version>paths.password_version
+                    THEN excluded.blocked ELSE paths.blocked END");
             $stmt->bindValue(':id', $path, SQLITE3_TEXT);
             $stmt->bindValue(':version', $version, SQLITE3_INTEGER);
             $stmt->bindValue(':blocked', $blocked ? 1 : 0, SQLITE3_INTEGER);

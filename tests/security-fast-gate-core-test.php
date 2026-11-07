@@ -143,6 +143,9 @@ try {
     fg_assert($db->is_revoked($ref) === false, 'safe expired GC');
     fg_assert($db->block_path($path), 'preemptive block');
     fg_assert($db->get_path($path)['blocked'] === true, 'blocked');
+    fg_assert($db->set_path($path, 3), 'stale same-generation write');
+    fg_assert($db->get_path($path)['blocked'] === true,
+        'stale callback must not release a pre-save block');
     fg_assert($db->set_path($path, 4), 'publish next generation');
     fg_assert($db->get_path($path)['version'] === 4, 'new version');
     fg_assert(!$db->get_path($path)['blocked'], 'unblocked after verification');

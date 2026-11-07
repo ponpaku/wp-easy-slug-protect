@@ -18,7 +18,7 @@ final class ESP_Fast_Gate_WP {
         // Share the existing 5-minute media-index Cron, no second scheduler.
         add_action(ESP_Media_Index::BATCH_HOOK,
             [self::class, 'maintenance'], 30);
-        if (defined('WP_CLI') && WP_CLI) {
+        if (defined('WP_CLI') && WP_CLI && class_exists('WP_CLI')) {
             \WP_CLI::add_command('esp gate-ledger', 'ESP_Fast_Gate_CLI');
         }
     }
@@ -306,8 +306,22 @@ final class ESP_Fast_Gate_WP {
         if (!self::active() || !is_array($new)) { return; }
         $db = self::ledger(true);
         if (!$db || !$db->ready()) { return; }
+        // Only changed generations and newly created paths are published.
+        // An unrelated options save must NOT release another worker's
+        // in-flight password-change block.
+        $prior = is_array($old['path'] ?? null) ? $old['path'] : [];
         foreach ($new['path'] ?? [] as $id => $path) {
             $version = (int)($path['password_version'] ?? 0);
+            if (isset($prior[$id]) &&
+                (int)($prior[$id]['password_version'] ?? 0) === $version) {
+                continue;
+            }
+            // A delayed callback must not publish obsolete settings.
+            $current = ESP_Option::get_current_setting('path');
+            if (!isset($current[$id]) ||
+                (int)($current[$id]['password_version'] ?? 0) !== $version) {
+                continue;
+            }
             if (!$db->set_path((string)$id, $version)) {
                 $db->set_ready(false);
                 error_log('ESP Fast Gate: protected path state sync failed');
