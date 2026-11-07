@@ -2,6 +2,7 @@
 /* Fast Gate v2 core regressions: independent of WordPress and MySQL. */
 require_once __DIR__ . '/../includes/class-esp-fast-gate-token.php';
 require_once __DIR__ . '/../includes/class-esp-fast-gate-store.php';
+require_once __DIR__ . '/../gate/class-esp-fast-gate-server.php';
 
 function fg_assert($ok, $message) {
     if (!$ok) { throw new RuntimeException($message); }
@@ -87,9 +88,45 @@ try {
     fg_assert($db->get_media('2026/11/unknown.jpg') === null, 'missing not public');
     fg_assert($db->is_revoked($ref) === false, 'not revoked');
 
+    $root = sys_get_temp_dir() . '/esp-gate-media-' . bin2hex(random_bytes(6));
+    mkdir($root . '/2026/11', 0700, true);
+    file_put_contents($root . '/2026/11/a.jpg', 'public image');
+    file_put_contents($root . '/2026/11/b.jpg', 'protected image');
+    file_put_contents($root . '/2026/11/c.jpg', 'denied image');
+    $prefix = '/wp-content/uploads/';
+    $authCookies = $normal;
+    $authCookies['esp_gate_' . $path] = $ticket;
+    $checked = ESP_Fast_Gate_Server::authorize($prefix . '2026/11/b.jpg',
+        $authCookies, $site, $root, $prefix, $sig, $idkey, $db, $now + 1);
+    fg_assert($checked['status'] === 200 && $checked['protected'] === true,
+        'standalone protected gate');
+    fg_assert(ESP_Fast_Gate_Server::authorize($prefix . '2026/11/b.jpg',
+        [], $site, $root, $prefix, $sig, $idkey, $db, $now + 1)['status']
+        === 403, 'no cookie cannot access protected');
+    fg_assert(ESP_Fast_Gate_Server::authorize($prefix . '2026/11/a.jpg',
+        [], $site, $root, $prefix, $sig, $idkey, $db, $now + 1)['status']
+        === 200, 'verified public');
+    fg_assert(ESP_Fast_Gate_Server::authorize($prefix . '2026/11/c.jpg',
+        $authCookies, $site, $root, $prefix, $sig, $idkey, $db, $now + 1)['status']
+        === 403, 'deny row');
+    fg_assert(ESP_Fast_Gate_Server::authorize($prefix . '2026/11/z.jpg',
+        $authCookies, $site, $root, $prefix, $sig, $idkey, $db, $now + 1)['status']
+        === 403, 'unknown must not be public');
+    foreach (['../2026/11/b.jpg','%252e%252e/b.jpg','2026/%2f/b.jpg',
+             '2026/11/.hidden.jpg'] as $invalid) {
+        fg_assert(ESP_Fast_Gate_Server::authorize($prefix . $invalid,
+            $authCookies, $site, $root, $prefix, $sig, $idkey, $db, $now + 1)['status']
+            !== 200, 'unsafe URL rejected: ' . $invalid);
+    }
+
+
     // Persistence before WordPress DB deletion; crash/reopen must not lose it.
     fg_assert($db->revoke_many([$ref, $verified['ref']], $now), 'revoke atomic');
     fg_assert($db->is_revoked($ref) === true, 'revoked');
+    fg_assert(ESP_Fast_Gate_Server::authorize($prefix . '2026/11/b.jpg',
+        $authCookies, $site, $root, $prefix, $sig, $idkey, $db, $now + 1)['status']
+        === 403, 'stolen old cookies denied after logout');
+
     fg_assert($db->gc($now + 1000000), 'gc before DB confirmation');
     fg_assert($db->is_revoked($ref) === true, 'unconfirmed cannot GC');
     unset($db);
@@ -120,4 +157,13 @@ try {
     foreach ([$file, $file . '-wal', $file . '-shm'] as $item) {
         if (file_exists($item)) { unlink($item); }
     }
+    if (isset($root) && is_dir($root)) {
+        foreach (['a.jpg','b.jpg','c.jpg'] as $name) {
+            @unlink($root . '/2026/11/' . $name);
+        }
+        @rmdir($root . '/2026/11');
+        @rmdir($root . '/2026');
+        @rmdir($root);
+    }
+
 }

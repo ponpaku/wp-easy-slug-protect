@@ -15,6 +15,9 @@ final class ESP_Fast_Gate_WP {
             [self::class, 'before_settings_save'], 5, 2);
         add_action('update_option_' . ESP_Config::OPTION_KEY,
             [self::class, 'after_settings_save'], 30, 2);
+        // Share the existing 5-minute media-index Cron, no second scheduler.
+        add_action(ESP_Media_Index::BATCH_HOOK,
+            [self::class, 'maintenance'], 30);
         if (defined('WP_CLI') && WP_CLI) {
             \WP_CLI::add_command('esp gate-ledger', 'ESP_Fast_Gate_CLI');
         }
@@ -258,6 +261,15 @@ final class ESP_Fast_Gate_WP {
         $db = self::ledger(true);
         if (!$db || !$db->confirm_deleted($ref)) {
             error_log('ESP Fast Gate: could not confirm revoked session deletion');
+        }
+    }
+
+    /** Expired confirmed revocations are maintained with the media index Cron. */
+    public static function maintenance() {
+        if (!self::active()) { return; }
+        $db = self::ledger(true);
+        if (!$db || !$db->schema_ok() || !$db->gc(time())) {
+            error_log('ESP Fast Gate: Cron revocation maintenance failed');
         }
     }
 
