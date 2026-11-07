@@ -268,7 +268,7 @@ final class ESP_Fast_Gate_WP {
         if (!self::active()) { return; }
         $keys = self::keys();
         $db = self::ledger(false);
-        if (!$keys || !$db || !$db->ready()) { return; }
+        if (!$keys || !$db || !$db->serving()) { return; }
         $p = $db->get_path((string)$path);
         if (!$p || $p['blocked'] || $p['version'] !== (int)$version) {
             return;
