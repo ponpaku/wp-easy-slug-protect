@@ -199,21 +199,32 @@ python3 tests/fast-gate-http-benchmark.py --mode legacy \
     --cookie-file "$cookie_file" --output "$report_root/legacy-http.json" \
     | tee -a "$report_root/stages.log"
 
-# Test-only root Rewrite takes precedence over the existing uploads rules
-# and static files. A WordPress request can repair its own uploads/.htaccess,
-# so editing uploads/.htaccess here would NOT prove standalone delivery.
-# [END] terminates per-directory rewriting for the gate entrypoint.
-cat > "$ESP_WP_ROOT/.htaccess" <<'HTACCESS'
+# Apache's uploads/.htaccess has its own RewriteRule and can override
+# ancestor per-directory rewrite configuration. In this isolated container,
+# register the test-only router at SERVER scope (before per-dir processing).
+# This is deliberately NOT a product activation/rewrite implementation.
+docker exec -i "$container" tee /etc/apache2/conf-enabled/esp-fg-ci-router.conf \
+    >"$report_root/apache-routing.conf" <<'APACHE'
 <IfModule mod_rewrite.c>
 RewriteEngine On
-RewriteRule ^wp-content/uploads/(.+)$ /wp-content/plugins/easy-slug-protect/gate/fast-gate.php [END,QSA]
-RewriteRule ^index\.php$ - [L]
-RewriteCond %{REQUEST_FILENAME} !-f
-RewriteCond %{REQUEST_FILENAME} !-d
-RewriteRule . /index.php [L]
+RewriteRule ^/wp-content/uploads/(.+)$ /wp-content/plugins/easy-slug-protect/gate/fast-gate.php [PT,L]
 </IfModule>
-HTACCESS
-grep -Fq 'fast-gate.php [END,QSA]' "$ESP_WP_ROOT/.htaccess"
+APACHE
+docker exec "$container" apache2ctl configtest
+docker exec "$container" apache2ctl graceful
+sleep 1
+# Verify the route is really different before any benchmark is accepted.
+code="$(curl -sS -o "$report_root/fast-preflight-body" \
+    -D "$report_root/fast-preflight-headers" -w '%{http_code}' \
+    -H "Cookie: $(cat "$cookie_file")" \
+    http://127.0.0.1:8096/wp-content/uploads/fg-life-protected.jpg)"
+echo "FG_HTTP fast preflight HTTP=$code"
+head -n 14 "$report_root/fast-preflight-headers"
+[[ "$code" == 200 ]] || { echo "Fast Gate preflight failed" >&2; exit 1; }
+grep -qi '^cache-control:.*no-store' "$report_root/fast-preflight-headers" ||
+    { echo "Standalone cache header absent; Rewrite bypassed" >&2; exit 1; }
+! grep -qi '^content-disposition:' "$report_root/fast-preflight-headers" ||
+    { echo "Legacy handler still served file; Rewrite bypassed" >&2; exit 1; }
 python3 tests/fast-gate-http-benchmark.py --mode fast \
     --cookie-file "$cookie_file" --output "$report_root/fast-http.json" \
     | tee -a "$report_root/stages.log"
