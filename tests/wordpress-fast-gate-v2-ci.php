@@ -41,8 +41,15 @@ $protected = [
 ];
 $settings['path'] = [$path_id => $protected];
 fg_wp_assert(update_option(ESP_Config::OPTION_KEY, $settings), 'settings update');
-fg_wp_assert(ESP_Protection_State::boot(new ESP_Setup()) === true,
-    'actual plugin runtime protection not ready');
+// The installed CLI plugin can be VERIFY_REQUIRED until a web-server
+// context validates Rewrite. Use the same verification step as the existing
+// real Apache/WordPress CI fixture after configuring protected paths.
+$verified = ESP_Updater::during_activation(static function () {
+    return ESP_Protection_State::verify_and_commit(new ESP_Setup());
+});
+fg_wp_assert($verified === true,
+    'real plugin protection verification after setting: ' .
+    wp_json_encode(get_option(ESP_Protection_State::RUNTIME_STATE_OPTION)));
 
 // R03: this is a real WordPress update_option() with real registered filters.
 update_option(ESP_Fast_Gate_WP::ACTIVE_OPTION, '0', false);
