@@ -179,10 +179,16 @@ RewriteRule . /index.php [L]
 </IfModule>
 HTACCESS
 wp config set DB_HOST host.docker.internal --type=constant
+# Add a disposable, environment-gated HTTP driver to the REAL WordPress
+# fixture, not to the distributable plugin ZIP.
+mkdir -p "$ESP_WP_ROOT/wp-content/mu-plugins"
+cp tests/fixtures/fast-gate-http-auth-mu.php \
+    "$ESP_WP_ROOT/wp-content/mu-plugins/fg-disposable-http-auth.php"
 sudo chown -R 33:33 "$ESP_WP_ROOT/wp-content/esp-fast-gate-v2"
 docker build --progress=plain -f tests/fixtures/fast-gate-apache.Dockerfile \
     -t esp-fast-gate-apache-ci . 2>&1 | tee "$report_root/apache-build.log"
 docker run --detach --rm --name "$container" \
+    --env ESP_FG_CI_HTTP_AUTH=1 \
     --add-host=host.docker.internal:host-gateway \
     --publish 127.0.0.1:8096:80 \
     --mount "type=bind,src=$ESP_WP_ROOT,dst=/var/www/html" \
@@ -313,6 +319,12 @@ if grep -qi '^content-disposition:' "$report_root/fast-preflight-headers"; then
 fi
 python3 tests/fast-gate-http-benchmark.py --mode fast \
     --cookie-file "$cookie_file" --output "$report_root/fast-http.json" \
+    | tee -a "$report_root/stages.log"
+# Real WordPress over HTTP issues BOTH cookie kinds, refreshes Remember Me,
+# logs out via the existing plugin, and rotates a live path password version.
+# Run after the baseline since this mutates the test's MySQL credentials.
+python3 tests/fast-gate-http-auth-lifecycle.py \
+    --output "$report_root/auth-lifecycle-http.json" \
     | tee -a "$report_root/stages.log"
 # Confirm direct HTTP cannot expose the SQLite file in this Apache setup.
 code="$(curl -sS -o /dev/null -w '%{http_code}' \
