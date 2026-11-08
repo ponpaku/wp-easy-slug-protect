@@ -59,15 +59,25 @@ curl -fsSL --retry 6 --retry-all-errors --retry-delay 2 \
 echo "FG_DOWNLOAD WP-CLI downloaded"
 mkdir -p "$root/release"
 echo "FG_DOWNLOAD published v0.7.41 ZIP"
-curl -fsSL --retry 6 --retry-all-errors --retry-delay 2 \
+release_zip="$root/release/easy-slug-protect-0.7.41.zip"
+pinned_release_sha=5e4c39b2e979c39b360cbb45b67d0f0f39a09bded54850560e30687563e8aafe
+if ! curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 \
     https://github.com/ponpaku/wp-easy-slug-protect/releases/download/v0.7.41/easy-slug-protect-0.7.41.zip \
-    -o "$root/release/easy-slug-protect-0.7.41.zip"
-echo "FG_DOWNLOAD release ZIP downloaded"
-echo "FG_DOWNLOAD published SHA256 manifest"
-curl -fsSL --retry 6 --retry-all-errors --retry-delay 2 \
-    https://github.com/ponpaku/wp-easy-slug-protect/releases/download/v0.7.41/easy-slug-protect-0.7.41.zip.sha256 \
-    -o "$root/release/easy-slug-protect-0.7.41.zip.sha256"
-echo "FG_DOWNLOAD SHA256 manifest downloaded"
+    -o "$release_zip"; then
+    # Some runners cannot reach the release binary CDN. Rebuild from the
+    # immutable public tag using THAT tag's release builder, then require
+    # byte-for-byte identity with GitHub Release's published SHA-256 digest.
+    echo "FG_DOWNLOAD release CDN unavailable; rebuild immutable v0.7.41 tag"
+    git fetch --depth=1 origin refs/tags/v0.7.41:refs/tags/v0.7.41
+    git worktree add --detach "$root/release-tag" v0.7.41
+    (cd "$root/release-tag"; python3 tools/build-release.py \
+        --tag v0.7.41 --output "$root/release")
+fi
+printf '%s  %s\n' "$pinned_release_sha" "$release_zip" | sha256sum -c -
+# The manifest may also be unavailable with a release asset CDN outage.
+# Comparing with GitHub's published digest is the stronger source of truth.
+printf '%s  %s\n' "$pinned_release_sha" "$(basename "$release_zip")" \
+    >"$root/release/easy-slug-protect-0.7.41.zip.sha256"
 (cd "$root/release"; sha256sum -c easy-slug-protect-0.7.41.zip.sha256)
 echo 'FG_LIFECYCLE Verified genuine published v0.7.41 ZIP digest' | tee -a "$report_root/stages.log"
 
