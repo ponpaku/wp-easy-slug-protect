@@ -32,7 +32,8 @@ add_action('init', static function () {
     $action = (string)$_GET['esp_fg_ci_auth'];
     if (in_array($action, [
         'deploy-prepare','deploy-enable-fail-probe','deploy-enable','deploy-disable',
-        'deploy-status','deploy-legacy-logout'
+        'deploy-status','deploy-legacy-logout',
+        'deploy-inject-stale-lock','deploy-recover'
     ], true)) {
         // Deployment endpoint is a disposable fixture only. Unlike the auth
         // fixture it never forces the active option or serving flag.
@@ -46,6 +47,24 @@ add_action('init', static function () {
         $result = true;
         if ($action === 'deploy-prepare') {
             $result=ESP_Fast_Gate_Deployment::prepare();
+        } elseif ($action === 'deploy-inject-stale-lock') {
+            $db=ESP_Fast_Gate_WP::ledger(true);
+            $result=false;
+            if (!ESP_Fast_Gate_Deployment::route_fast() &&
+                !ESP_Fast_Gate_WP::active() && $db && !$db->serving() &&
+                add_option('esp_fast_gate_v2_deploy_lock',
+                    (time()-3600).':'.wp_generate_uuid4(), '', false)) {
+                $set_route=new ReflectionMethod(
+                    'ESP_Fast_Gate_Deployment','write_route');
+                $rewrite=new ReflectionMethod(
+                    'ESP_Fast_Gate_Deployment','rewrite');
+                // Simulate a crashed controller AFTER installing its 503
+                // route, BEFORE signing or serving were enabled.
+                $result=$set_route->invoke(null,'fast') === true &&
+                    $rewrite->invoke(null,true) === true;
+            }
+        } elseif ($action === 'deploy-recover') {
+            $result=ESP_Fast_Gate_Deployment::recover();
         } elseif ($action === 'deploy-enable-fail-probe') {
             $failure = static function ($pre,$args,$url) {
                 if (strpos($url,'/esp-fast-gate-route-') !== false) {

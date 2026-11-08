@@ -593,6 +593,16 @@ class ESP_Fast_Gate_CLI {
         \WP_CLI::success('Fast Gate v2 stopped and legacy media route restored.');
     }
 
+    public function recover($args, $assoc_args) {
+        $hint = $assoc_args['server'] ?? null;
+        $result = ESP_Fast_Gate_Deployment::recover($hint);
+        if ($result !== true) {
+            \WP_CLI::error($result instanceof WP_Error ?
+                $result->get_error_code() : 'esp_gate_recover_failed');
+        }
+        \WP_CLI::success('Interrupted Fast Gate switch recovered to the legacy route.');
+    }
+
     public function gc($args, $assoc_args) {
         $db = ESP_Fast_Gate_WP::ledger(true);
         if (!$db || !$db->schema_ok() || !$db->gc(time())) {

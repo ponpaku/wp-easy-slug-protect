@@ -59,6 +59,22 @@ check(failed["error"] == "esp_gate_http_probe_failed" and
 check(request("/wp-content/uploads/fg-life-public.jpg")[0] == 200,
       "legacy HTTP route must remain operational after probe failure")
 
+# Simulate a crashed PHP transition AFTER the non-serving gate Rewrite was
+# installed and a stale durable lock remained. Administrator-led recovery
+# must first stop SQLite serving, restore legacy Rewrite, then clear the lock.
+stale = command("inject-stale-lock", 200)
+check(stale["success"] and stale["route"] == "fast" and
+      not stale["active"] and not stale["serving"],
+      "disposable interrupted transition has armed route but stopped reader")
+check(request("/wp-content/uploads/fg-life-public.jpg")[0] == 503,
+      "interrupted transition cannot expose static media")
+recovered = command("recover", 200)
+check(recovered["success"] and recovered["route"] == "legacy" and
+      not recovered["active"] and not recovered["serving"],
+      "explicit stale-lock recovery restores safe WordPress route")
+check(request("/wp-content/uploads/fg-life-public.jpg")[0] == 200,
+      "legacy HTTP recovered after interrupted transition")
+
 enabled = command("enable", 200)
 check(enabled["success"] is True and enabled["route"] == "fast" and
       enabled["active"] is True and enabled["serving"] is True,
@@ -129,4 +145,5 @@ check(request("/wp-content/esp-fast-gate-v2/gate-ledger.sqlite")[0] == 403,
 print("FG_VERIFIED_DEPLOYMENT_HTTP " + json.dumps(
     {"checks_passed": passed, "activation": "passed",
      "failed_probe_rollback": "passed", "disable_to_legacy": "passed",
-     "generation_rotation_after_legacy_logout": "passed"}))
+     "generation_rotation_after_legacy_logout": "passed",
+     "stale_lock_recovery": "passed"}))

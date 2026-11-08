@@ -11,7 +11,10 @@ if (!defined('ABSPATH')) { exit; }
 
 final class ESP_Fast_Gate_Deployment {
     public const ROUTE_OPTION = 'esp_fast_gate_v2_route';
+    private const LOCK_OPTION = 'esp_fast_gate_v2_deploy_lock';
+    private const RECOVERY_AFTER_SECONDS = 900;
     private static $changing = false;
+    private static $owned_lock = null;
 
     public static function register() {
         add_filter('pre_update_option_' . self::ROUTE_OPTION,
@@ -20,6 +23,7 @@ final class ESP_Fast_Gate_Deployment {
         add_action('admin_post_esp_fast_gate_prepare', [self::class, 'admin_prepare']);
         add_action('admin_post_esp_fast_gate_enable', [self::class, 'admin_enable']);
         add_action('admin_post_esp_fast_gate_disable', [self::class, 'admin_disable']);
+        add_action('admin_post_esp_fast_gate_recover', [self::class, 'admin_recover']);
         add_filter('pre_update_option_' . ESP_Config::OPTION_KEY,
             [self::class, 'guard_media_disable'], 4, 2);
     }
@@ -196,16 +200,110 @@ final class ESP_Fast_Gate_Deployment {
             wp_remote_retrieve_response_code($private) === 403;
     }
 
+    private static function clear_lock_cache() {
+        wp_cache_delete(self::LOCK_OPTION, 'options');
+        wp_cache_delete('notoptions', 'options');
+        wp_cache_delete('alloptions', 'options');
+    }
+
     private static function lock() {
-        // The option's unique name is an atomic DB acquisition operation.
-        // A failed/crashed transition is recoverable by an administrator after
-        // manual inspection; never silently steal a possibly live lock.
-        return add_option('esp_fast_gate_v2_deploy_lock',
-            (string)(time() . ':' . wp_generate_uuid4()), '', false);
+        // WordPress option names have a UNIQUE DB index; add_option is the
+        // lock acquisition. The token also fences stale workers during
+        // explicit administrator-led interruption recovery.
+        $token = time() . ':' . wp_generate_uuid4();
+        if (!add_option(self::LOCK_OPTION, $token, '', false)) {
+            return false;
+        }
+        self::$owned_lock = $token;
+        return true;
+    }
+
+    private static function owns_lock() {
+        global $wpdb;
+        if (!is_string(self::$owned_lock) || !is_object($wpdb)) {
+            return false;
+        }
+        $stored = $wpdb->get_var($wpdb->prepare(
+            "SELECT option_value FROM {$wpdb->options} WHERE option_name=%s",
+            self::LOCK_OPTION));
+        return $wpdb->last_error === '' &&
+            is_string($stored) && hash_equals(self::$owned_lock, $stored);
     }
 
     private static function unlock() {
-        delete_option('esp_fast_gate_v2_deploy_lock');
+        global $wpdb;
+        if (self::owns_lock()) {
+            // An old worker must not delete a newer recovery worker's token.
+            $wpdb->query($wpdb->prepare(
+                "DELETE FROM {$wpdb->options}
+                 WHERE option_name=%s AND option_value=%s",
+                self::LOCK_OPTION, self::$owned_lock));
+            self::clear_lock_cache();
+        }
+        self::$owned_lock = null;
+    }
+
+    /**
+     * Explicit recovery of a crashed PHP request. Never auto-steal the
+     * deployment lock; require 15m minimum age and admin/CLI invocation.
+     * Keep serving off until a verified legacy rewrite is back in place.
+     */
+    public static function recover($server_hint = null) {
+        $previous = $_SERVER['SERVER_SOFTWARE'] ?? null;
+        if (defined('WP_CLI') && WP_CLI && $server_hint !== null) {
+            if (!in_array($server_hint, ['apache','litespeed'], true)) {
+                return self::error('unsupported_server');
+            }
+            $_SERVER['SERVER_SOFTWARE'] = $server_hint === 'apache'
+                ? 'Apache/2.4 (WP-CLI target)' : 'LiteSpeed (WP-CLI target)';
+        }
+        try {
+            if (!self::server_supported()) {
+                return self::error('unsupported_server');
+            }
+            global $wpdb;
+            $old = $wpdb->get_var($wpdb->prepare(
+                "SELECT option_value FROM {$wpdb->options} WHERE option_name=%s",
+                self::LOCK_OPTION));
+            if (!is_string($old) ||
+                !preg_match('/^([0-9]{10,}):[a-fA-F0-9-]{36}$/D', $old, $parts)) {
+                return self::error('no_recoverable_lock');
+            }
+            $age = time() - (int)$parts[1];
+            if ($age < self::RECOVERY_AFTER_SECONDS) {
+                return self::error('transition_still_recent');
+            }
+            $new = time() . ':' . wp_generate_uuid4();
+            $claimed = $wpdb->query($wpdb->prepare(
+                "UPDATE {$wpdb->options} SET option_value=%s
+                 WHERE option_name=%s AND option_value=%s",
+                $new, self::LOCK_OPTION, $old));
+            if ($claimed !== 1) { return self::error('recovery_claim_failed'); }
+            self::$owned_lock = $new;
+            self::clear_lock_cache();
+            try {
+                $db = ESP_Fast_Gate_WP::ledger(true);
+                if (!$db || !$db->set_serving(false)) {
+                    return self::error('recovery_cannot_stop_serving');
+                }
+                if (!self::write_route('legacy') || !self::rewrite(false)) {
+                    self::write_route('fast');
+                    return self::error('recovery_legacy_route_failed');
+                }
+                if (!self::write_active(false)) {
+                    return self::error('recovery_active_option_failed');
+                }
+                return true;
+            } finally {
+                self::unlock();
+            }
+        } finally {
+            if ($previous === null) {
+                unset($_SERVER['SERVER_SOFTWARE']);
+            } else {
+                $_SERVER['SERVER_SOFTWARE'] = $previous;
+            }
+        }
     }
 
     /**
@@ -235,13 +333,18 @@ final class ESP_Fast_Gate_Deployment {
             }
             if (!self::lock()) { return self::error('transition_locked'); }
             try {
+                if (!self::owns_lock()) { return self::error('transition_lock_lost'); }
                 // 1. Install fail-closed route: serving=0 -> 503.
-                if (!self::write_route('fast') || !self::rewrite(true)) {
+                $installed = self::write_route('fast') && self::rewrite(true);
+                if (!self::owns_lock()) { return self::error('transition_lock_lost'); }
+                if (!$installed) {
                     self::rollback_enable($db);
                     return self::error('route_install_failed');
                 }
                 // 2. Verify the REAL HTTP handler and private directory denial.
-                if (!self::http_probe($keys)) {
+                $http_ok = self::http_probe($keys);
+                if (!self::owns_lock()) { return self::error('transition_lock_lost'); }
+                if (!$http_ok) {
                     self::rollback_enable($db);
                     return self::error('http_probe_failed');
                 }
@@ -249,26 +352,38 @@ final class ESP_Fast_Gate_Deployment {
                 // During the rebuild, media/password writes are fenced or
                 // rejected by the existing WP index bridge even though the
                 // user-facing active flag is not yet set.
-                if (!ESP_Fast_Gate_WP::build_catalog() || !self::prepared()) {
+                $catalog_ok = ESP_Fast_Gate_WP::build_catalog() &&
+                    self::prepared();
+                if (!self::owns_lock()) { return self::error('transition_lock_lost'); }
+                if (!$catalog_ok) {
                     self::rollback_enable($db);
                     return self::error('catalog_recheck_failed');
                 }
                 // 4. Every re-activation must invalidate tickets copied
                 // before a legacy-mode logout. Legacy WP logout does not
                 // append SQLite revocations while Fast Gate is disabled.
-                if (!$db->rotate_ticket_signing_key()) {
+                $rotated = $db->rotate_ticket_signing_key();
+                if (!self::owns_lock()) { return self::error('transition_lock_lost'); }
+                if (!$rotated) {
                     self::rollback_enable($db);
                     return self::error('ticket_generation_failed');
                 }
                 // 5. Start WP mutation/logout synchronization before serving.
-                if (!self::write_active(true)) {
+                $active_ok = self::write_active(true);
+                if (!self::owns_lock()) { return self::error('transition_lock_lost'); }
+                if (!$active_ok) {
                     self::rollback_enable($db);
                     return self::error('active_option_failed');
                 }
                 // 6. Only now permit the standalone reader to serve media.
+                if (!self::owns_lock()) { return self::error('transition_lock_lost'); }
                 if (!$db->set_serving(true)) {
                     self::rollback_enable($db);
                     return self::error('serving_start_failed');
+                }
+                if (!self::owns_lock()) {
+                    $db->set_serving(false);
+                    return self::error('transition_lock_lost');
                 }
                 return true;
             } finally {
@@ -310,12 +425,16 @@ final class ESP_Fast_Gate_Deployment {
             if (!self::server_supported()) { return self::error('unsupported_server'); }
             if (!self::lock()) { return self::error('transition_locked'); }
             try {
+                if (!self::owns_lock()) { return self::error('transition_lock_lost'); }
                 $db = ESP_Fast_Gate_WP::ledger(true);
                 if (!$db || !$db->set_serving(false)) {
                     return self::error('cannot_stop_serving');
                 }
+                if (!self::owns_lock()) { return self::error('transition_lock_lost'); }
                 // Restore the legacy WP/PHP protection while gate is STOPPED.
-                if (!self::write_route('legacy') || !self::rewrite(false)) {
+                $restored = self::write_route('legacy') && self::rewrite(false);
+                if (!self::owns_lock()) { return self::error('transition_lock_lost'); }
+                if (!$restored) {
                     self::write_route('fast');
                     return self::error('legacy_route_restore_failed');
                 }
@@ -347,16 +466,30 @@ final class ESP_Fast_Gate_Deployment {
             $db && $db->serving() ? 'running' : 'stopped') :
             (self::prepared() ? 'prepared' : 'unprepared');
         echo '<div class="wrap"><h1>Fast Gate v2</h1><p>';
-        echo esc_html('State: ' . $state . '. Apache/LiteSpeed only. ');
-        echo esc_html('The current WordPress media protection stays in place until explicit activation.');
-        echo '</p>';
+        $states = [
+            'running'=>'稼働中',
+            'stopped'=>'停止中（配信を拒否しています）',
+            'prepared'=>'準備完了（従来方式で配信中）',
+            'unprepared'=>'未準備（従来方式で配信中）',
+        ];
+        echo esc_html('状態: ' . ($states[$state] ?? $state) .
+            '。Apache / LiteSpeed 専用。');
+        echo '</p><p>準備操作だけでは配信方式は変わりません。高速ゲートの有効化時に実HTTPで検証します。</p>';
         $result = isset($_GET['esp_fg_result']) ?
             sanitize_key(wp_unslash($_GET['esp_fg_result'])) : '';
         if ($result !== '') {
             echo '<div class="notice notice-info"><p>' . esc_html($result) . '</p></div>';
         }
-        foreach (['prepare'=>'Prepare ledger','enable'=>'Enable verified gate',
-            'disable'=>'Disable / restore WordPress route'] as $action=>$label) {
+        $actions = [
+            'prepare'=>'台帳を準備する',
+            'enable'=>'高速ゲートを有効化する（HTTP検証あり）',
+            'disable'=>'高速ゲートを無効化して従来方式に戻す',
+        ];
+        if (get_option(self::LOCK_OPTION, false) !== false) {
+            echo '<p>切替処理が中断された場合のみ、進行中の処理がないことを確認して復旧してください。15分未満のロックは解除しません。</p>';
+            $actions['recover'] = '中断した切替を復旧する';
+        }
+        foreach ($actions as $action=>$label) {
             echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
             echo '<input type="hidden" name="action" value="esp_fast_gate_' .
                 esc_attr($action) . '">';
@@ -374,6 +507,8 @@ final class ESP_Fast_Gate_Deployment {
             $result = self::prepare();
         } elseif ($action === 'enable') {
             $result = self::enable();
+        } elseif ($action === 'recover') {
+            $result = self::recover();
         } else {
             $result = self::disable();
         }
@@ -387,4 +522,5 @@ final class ESP_Fast_Gate_Deployment {
     public static function admin_prepare() { self::admin_action('prepare'); }
     public static function admin_enable() { self::admin_action('enable'); }
     public static function admin_disable() { self::admin_action('disable'); }
+    public static function admin_recover() { self::admin_action('recover'); }
 }
