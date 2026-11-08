@@ -2,7 +2,7 @@
 /**
  * WordPress-side adapter for the Fast Gate v2 authorization protocol.
  *
- * IMPORTANT: no automatic activation or Rewrite changes in this review slice.
+ * Activation and Rewrite switching are handled explicitly by ESP_Fast_Gate_Deployment.
  * A future gate deployment must validate media coverage and HTTP routing.
  */
 final class ESP_Fast_Gate_WP {
@@ -68,10 +68,13 @@ final class ESP_Fast_Gate_WP {
                 return $old;
             }
         }
-        // Draft only: no verified Rewrite installation/rollback exists yet.
-        // SERVER_SOFTWARE alone must never enable the hooks that can block
-        // ordinary WordPress logout or media writes without a usable ledger.
-        if ((string)$new === '1') { return $old; }
+        // An arbitrary WordPress option update is never a deployment action.
+        // Only the verified transition controller may enable media/logout hooks.
+        if ((string)$new === '1' &&
+            (!class_exists('ESP_Fast_Gate_Deployment') ||
+             !ESP_Fast_Gate_Deployment::allow_active_option_write())) {
+            return $old;
+        }
         return $new;
     }
 
@@ -554,6 +557,26 @@ class ESP_Fast_Gate_CLI {
                 'live metadata, private keys, and uploads configuration.');
         }
         \WP_CLI::success('Verified media catalog built. Fast Gate is still inactive.');
+    }
+
+    public function activate($args, $assoc_args) {
+        $hint = $assoc_args['server'] ?? null;
+        $result = ESP_Fast_Gate_Deployment::enable($hint);
+        if ($result !== true) {
+            \WP_CLI::error($result instanceof WP_Error ?
+                $result->get_error_code() : 'esp_gate_activate_failed');
+        }
+        \WP_CLI::success('Fast Gate v2 verified and enabled.');
+    }
+
+    public function deactivate($args, $assoc_args) {
+        $hint = $assoc_args['server'] ?? null;
+        $result = ESP_Fast_Gate_Deployment::disable($hint);
+        if ($result !== true) {
+            \WP_CLI::error($result instanceof WP_Error ?
+                $result->get_error_code() : 'esp_gate_deactivate_failed');
+        }
+        \WP_CLI::success('Fast Gate v2 stopped and legacy media route restored.');
     }
 
     public function gc($args, $assoc_args) {

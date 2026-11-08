@@ -1788,7 +1788,21 @@ class ESP_Media_Protection {
         
         // 有効なら保護メディアが0件でもルールを適用（初回追加の直配信漏洩防止）
         if ($has_protected_media) {
-            if ($this->is_litespeed()) {
+            // The Fast Gate route belongs inside THIS existing ESP-managed
+            // block. Never create an independent uploads/.htaccess writer.
+            // Every candidate media extension (even a not-yet-indexed file)
+            // must be routed BEFORE Apache can serve its static bytes.
+            if (class_exists('ESP_Fast_Gate_Deployment') &&
+                ESP_Fast_Gate_Deployment::route_fast()) {
+                $target = ESP_Fast_Gate_Deployment::gate_target();
+                if ($target === null) {
+                    return new WP_Error('esp_fast_gate_target_invalid',
+                        'Standalone gate URL cannot be constructed');
+                }
+                $rules .= "{$indent}# Fast Gate: no static-file existence shortcut\n";
+                $rules .= "{$indent}RewriteCond %{REQUEST_URI} ^.*\\.({$extensions_pattern})$ [NC]\n";
+                $rules .= "{$indent}RewriteRule ^(.+)$ {$target} [L,QSA]\n";
+            } elseif ($this->is_litespeed()) {
                 // 監査・既存ルール比較はキーを生成しない。
                 // キーの作成・更新は明示的なRewrite更新処理だけで行う。
                 $litespeed_key = $litespeed_key_override !== null
@@ -1810,9 +1824,11 @@ class ESP_Media_Protection {
                 $rules .= "{$indent}RewriteRule ^ - [L]\n";
             }
 
-            $rules .= "{$indent}# 保護されたファイル拡張子へのアクセスをWordPress経由に\n";
-            $rules .= "{$indent}RewriteCond %{REQUEST_FILENAME} -f\n";
-            $rules .= "{$indent}RewriteCond %{REQUEST_URI} ^.*\\.({$extensions_pattern})$ [NC]\n";
+            if (!class_exists('ESP_Fast_Gate_Deployment') ||
+                !ESP_Fast_Gate_Deployment::route_fast()) {
+                $rules .= "{$indent}# 保護されたファイル拡張子へのアクセスをWordPress経由に\n";
+                $rules .= "{$indent}RewriteCond %{REQUEST_FILENAME} -f\n";
+                $rules .= "{$indent}RewriteCond %{REQUEST_URI} ^.*\\.({$extensions_pattern})$ [NC]\n";
 
             // mod_rewriteは照合前にURLをデコードするため、&/+/#/?/空白等を
             // クエリ値へ埋め込む前に再エスケープする。Apacheは選択的[B=]で
@@ -1821,9 +1837,10 @@ class ESP_Media_Protection {
             // 通常[B]の%2Fはクエリ値としてPHP側で復号される。
             $rewrite_flags = $this->is_litespeed()
                 ? '[B,L,QSA]' : '"[B= %&+#?;,L]"';
-            $rules .= "{$indent}RewriteRule ^(.+)$ {$home_path}index.php?" . self::REWRITE_ENDPOINT . "=$1 {$rewrite_flags}\n";
+                $rules .= "{$indent}RewriteRule ^(.+)$ {$home_path}index.php?" . self::REWRITE_ENDPOINT . "=$1 {$rewrite_flags}\n";
+            }
         }
-        
+
         $rules .= "</IfModule>\n";
         $rules .= "# END ESP Media Protection\n";
         

@@ -43,6 +43,22 @@ try {
         !is_string($keys['prefix'] ?? null)) {
         esp_fast_gate_status(503);
     }
+    // Authentication-only installation probe. It returns NO media bytes and
+    // no secret; a random nonce must be authenticated with a site-wide HMAC.
+    // The admin verifier needs this to prove Apache routed an uploads URL
+    // to THIS standalone PHP script rather than to WordPress or static files.
+    $probe = $_SERVER['HTTP_X_ESP_GATE_ROUTE_PROBE'] ?? null;
+    if (is_string($probe) &&
+        preg_match('/^([a-f0-9]{32}):([a-f0-9]{64})$/D', $probe, $parts) &&
+        hash_equals(hash_hmac('sha256', 'route|' . $parts[1], $keys['sig']),
+            $parts[2])) {
+        http_response_code(204);
+        header('Cache-Control: private, no-store');
+        header('X-ESP-Gate-Route-Ack: ' .
+            hash_hmac('sha256', 'ack|' . $parts[1], $keys['sig']));
+        header('X-Content-Type-Options: nosniff');
+        exit;
+    }
     $store = ESP_Fast_Gate_Store::open($private . '/gate-ledger.sqlite', false);
     $decision = ESP_Fast_Gate_Server::authorize(
         $_SERVER['REQUEST_URI'] ?? '', $_COOKIE, $keys['site'],
