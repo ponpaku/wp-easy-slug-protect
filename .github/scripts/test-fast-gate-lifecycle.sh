@@ -30,8 +30,27 @@ cleanup() {
     return "$rc"
 }
 trap cleanup EXIT
-curl -fsSL --retry 2 https://wordpress.org/wordpress-7.1.3.tar.gz |
-    tar -xz -C "$root"
+# WordPress release CDN sometimes returns intermittent 504 on Actions.
+# Fall back to its separately hosted tagged source archive, and assert the
+# exact WordPress core version after extraction (never use "latest").
+wordpress_archive="$root/wp-7.1.3.tar.gz"
+if curl --fail --silent --show-error --location --retry 3 --retry-all-errors \
+    --retry-delay 2 https://wordpress.org/wordpress-7.1.3.tar.gz \
+    -o "$wordpress_archive"; then
+    tar -xz -C "$root" -f "$wordpress_archive"
+else
+    echo "WordPress.org download unavailable; trying tagged GitHub source" >&2
+    curl --fail --silent --show-error --location --retry 3 --retry-all-errors \
+      --retry-delay 2 \
+      https://github.com/WordPress/WordPress/archive/refs/tags/7.1.3.tar.gz \
+      -o "$wordpress_archive"
+    tar -xz -C "$root" -f "$wordpress_archive"
+    mv "$root/WordPress-7.1.3" "$root/wordpress"
+fi
+grep -Eq "wp_version = '7\\.1\\.3';" "$root/wordpress/wp-includes/version.php" || {
+    echo "Downloaded WordPress source has an unexpected version" >&2
+    exit 1
+}
 curl -fsSL --retry 2 \
     https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar \
     -o "$root/wp-cli.phar"

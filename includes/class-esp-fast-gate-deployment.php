@@ -40,8 +40,8 @@ final class ESP_Fast_Gate_Deployment {
     public static function guard_media_disable($new, $old) {
         // A live gate must retain its rewrite until the explicit OFF operation.
         if (self::route_fast() && is_array($new) && is_array($old) &&
-            !empty($old['media']['enabled']) &&
-            empty($new['media']['enabled'])) {
+            (bool)($old['media']['enabled'] ?? true) &&
+            !($new['media']['enabled'] ?? true)) {
             return $old;
         }
         return $new;
@@ -86,7 +86,8 @@ final class ESP_Fast_Gate_Deployment {
 
     private static function keys() {
         $dir = ESP_Fast_Gate_WP::private_dir();
-        if (!$dir || !is_file($dir . '/keys.php')) { return null; }
+        if (!$dir || is_link($dir . '/keys.php') ||
+            !is_file($dir . '/keys.php')) { return null; }
         $keys = require $dir . '/keys.php';
         if (!is_array($keys) || ($keys['site'] ?? null) !== (string)get_current_blog_id() ||
             !is_string($keys['sig'] ?? null) || strlen($keys['sig']) < 32 ||
@@ -107,8 +108,12 @@ final class ESP_Fast_Gate_Deployment {
 
     public static function prepared() {
         $db = ESP_Fast_Gate_WP::ledger(false);
-        if (!$db || !$db->ready() || !self::keys() || !ESP_Media_Index::enabled() ||
-            !ESP_Media_Index::ready()) { return false; }
+        $media = ESP_Option::get_current_setting('media');
+        if (!is_array($media) || empty($media['enabled']) ||
+            !$db || !$db->ready() || !self::keys() ||
+            !ESP_Media_Index::enabled() || !ESP_Media_Index::ready()) {
+            return false;
+        }
         $status = ESP_Media_Index::build_status(false);
         return !empty($status['ready']) && empty($status['error']);
     }
@@ -228,12 +233,20 @@ final class ESP_Fast_Gate_Deployment {
                     self::rollback_enable($db);
                     return self::error('http_probe_failed');
                 }
-                // 3. Start WP mutation/logout synchronization before serving.
+                // 3. Last full reconciliation under the non-serving route.
+                // During the rebuild, media/password writes are fenced or
+                // rejected by the existing WP index bridge even though the
+                // user-facing active flag is not yet set.
+                if (!ESP_Fast_Gate_WP::build_catalog() || !self::prepared()) {
+                    self::rollback_enable($db);
+                    return self::error('catalog_recheck_failed');
+                }
+                // 4. Start WP mutation/logout synchronization before serving.
                 if (!self::write_active(true)) {
                     self::rollback_enable($db);
                     return self::error('active_option_failed');
                 }
-                // 4. Only now permit the standalone reader to serve media.
+                // 5. Only now permit the standalone reader to serve media.
                 if (!$db->set_serving(true)) {
                     self::rollback_enable($db);
                     return self::error('serving_start_failed');

@@ -57,6 +57,18 @@ final class ESP_Fast_Gate_WP {
     }
 
     /**
+     * Route installation precedes enabling the option. During that short
+     * transition, media/password mutations still require SQLite fencing
+     * even though the reader is deliberately stopped. No auth ticket is
+     * issued until active() AND serving() have both been enabled.
+     */
+    private static function guarding() {
+        return self::active() ||
+            (class_exists('ESP_Fast_Gate_Deployment') &&
+             ESP_Fast_Gate_Deployment::route_fast());
+    }
+
+    /**
      * OFF first revokes standalone serving. A rewrite that remains pointed
      * at the standalone script must not silently survive a disabled WP sync.
      * This hook intentionally does NOT install a fast-gate rewrite.
@@ -327,10 +339,10 @@ final class ESP_Fast_Gate_WP {
      * Missing/invalid source evidence halts serving before the WP mutation.
      */
     public static function fence_media_change($id, $meta_key = null, $new_value = null) {
-        if (!self::active()) { return true; }
+        if (!self::guarding()) { return true; }
         $db = self::ledger(true);
         if (!$db) { return false; }
-        if (!$db->ready()) { return !$db->serving(); }
+        if (!$db->ready()) { return false; }
         $candidates = self::candidate_paths((int)$id, $meta_key, $new_value);
         if ($candidates === null) {
             return $db->set_serving(false);
@@ -372,7 +384,7 @@ final class ESP_Fast_Gate_WP {
 
     /** A missed/uncancellable guard must not leave the fast gate serving. */
     public static function halt_if_active() {
-        if (!self::active()) { return true; }
+        if (!self::guarding()) { return true; }
         $db = self::ledger(true);
         return $db && $db->set_serving(false);
     }
@@ -382,7 +394,7 @@ final class ESP_Fast_Gate_WP {
      * live MySQL ownership/protection checks. Fences stay until published.
      */
     public static function refresh_owner($id) {
-        if (!self::active()) { return true; }
+        if (!self::guarding()) { return true; }
         global $wpdb;
         $id = (int)$id;
         $db = self::ledger(true);
@@ -438,7 +450,7 @@ final class ESP_Fast_Gate_WP {
      * publish, the fence remains and the shared Cron retries via index.
      */
     public static function flush_modified_owners() {
-        if (!self::active() || !self::$touched) { return; }
+        if (!self::guarding() || !self::$touched) { return; }
         $ids = array_keys(self::$touched);
         self::$touched = [];
         foreach ($ids as $id) {
@@ -448,7 +460,7 @@ final class ESP_Fast_Gate_WP {
 
     /** Expired confirmed revocations are maintained with the media index Cron. */
     public static function maintenance() {
-        if (!self::active()) { return; }
+        if (!self::guarding()) { return; }
         $db = self::ledger(true);
         if (!$db || !$db->schema_ok()) {
             error_log('ESP Fast Gate: Cron ledger unavailable');
@@ -471,7 +483,7 @@ final class ESP_Fast_Gate_WP {
 
     /** Require path-scoped pre-revocation for password changes or path removal. */
     public static function before_settings_save($new, $old) {
-        if (!self::active() || !is_array($new) || !is_array($old)) {
+        if (!self::guarding() || !is_array($new) || !is_array($old)) {
             return $new;
         }
         $old_paths = $old['path'] ?? [];
@@ -497,7 +509,7 @@ final class ESP_Fast_Gate_WP {
 
     /** Re-enable only the generation saved in the WordPress settings. */
     public static function after_settings_save($old, $new) {
-        if (!self::active() || !is_array($new)) { return; }
+        if (!self::guarding() || !is_array($new)) { return; }
         $db = self::ledger(true);
         if (!$db || !$db->ready()) { return; }
         // Only changed generations and newly created paths are published.
