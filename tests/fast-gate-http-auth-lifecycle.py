@@ -60,9 +60,20 @@ def fetch(url, cookie=None, method="GET", headers=None, opener=None):
     return code, body, response_headers, (time.perf_counter_ns() - start) / 1e6
 
 
+class RedirectRecorder(urllib.request.HTTPRedirectHandler):
+    def __init__(self):
+        super().__init__()
+        self.hops = []
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        self.hops.append((code, newurl, headers.get_all("Set-Cookie") or []))
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def action(jar, command, expect=True):
+    recorder = RedirectRecorder()
     opener = urllib.request.build_opener(
-        urllib.request.HTTPCookieProcessor(jar)
+        urllib.request.HTTPCookieProcessor(jar), recorder
     )
     status, body, hdr, ms = fetch(
         base + "/?esp_fg_ci_auth=" + command, opener=opener
@@ -77,6 +88,18 @@ def action(jar, command, expect=True):
         check(status == 200, f"WordPress HTTP {command} successful")
     else:
         check(status == 409, f"WordPress HTTP {command} denied")
+    if command.startswith("redirect-"):
+        check(len(recorder.hops) == 1 and recorder.hops[0][0] == 302,
+              f"Actual ESP_Cookie::do_redirect emitted HTTP 302 for {command}")
+        check("esp_fg_ci_redirect_landed=1" in recorder.hops[0][1],
+              "Redirect Location matches the WordPress landing URL")
+        issued = recorder.hops[0][2]
+        check(any("esp_gate_fg_path=" in item for item in issued),
+              "Signed gate ticket appears on original redirect Set-Cookie")
+        check(data.get("landed") is True and
+              data.get("source_cookie_seen") is True and
+              data.get("signed_cookie_seen") is True,
+              "Redirect destination received both cookies from client")
     return data
 
 
@@ -165,6 +188,17 @@ def parallel_access(valid_cookie):
 # plugin options and MySQL credential tables. Only the CI MU plugin provides
 # a test-only HTTP endpoint for driving existing authentication methods.
 gate(403)  # known protected file, no cookies
+
+# The actual shipped redirect function emits queued cookies before
+# returning a 302; the redirected WordPress GET receives both credentials.
+for kind in ("session", "remember"):
+    redirected_jar = http.cookiejar.CookieJar()
+    action(redirected_jar, "redirect-" + kind)
+    require_gate_credentials(redirected_jar, kind)
+    redirected_header = cookie_header(redirected_jar)
+    gate(200, redirected_header)
+    action(redirected_jar, "logout")
+    gate(403, redirected_header)
 
 session_jar = http.cookiejar.CookieJar()
 action(session_jar, "session")

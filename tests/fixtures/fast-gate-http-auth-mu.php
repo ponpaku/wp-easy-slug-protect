@@ -9,7 +9,8 @@
 if (!defined('ABSPATH')) { exit; }
 
 add_action('init', static function () {
-    if (!isset($_GET['esp_fg_ci_auth'])) { return; }
+    if (!isset($_GET['esp_fg_ci_auth']) &&
+        !isset($_GET['esp_fg_ci_redirect_landed'])) { return; }
     if (getenv('ESP_FG_CI_HTTP_AUTH') !== '1' ||
         !defined('DB_NAME') || DB_NAME !== 'esp_fg_lifecycle' ||
         !class_exists('ESP_Fast_Gate_WP') ||
@@ -17,8 +18,20 @@ add_action('init', static function () {
         status_header(404);
         exit;
     }
+    if (isset($_GET['esp_fg_ci_redirect_landed'])) {
+        header('Cache-Control: no-store');
+        header('Content-Type: application/json; charset=utf-8');
+        echo wp_json_encode([
+            'landed'=>true,
+            'source_cookie_seen'=>isset($_COOKIE['esp_auth_fg_path']) ||
+                isset($_COOKIE['esp_remember_token_fg_path']),
+            'signed_cookie_seen'=>isset($_COOKIE['esp_gate_fg_path']),
+        ]);
+        exit;
+    }
     $action = (string)$_GET['esp_fg_ci_auth'];
-    $supported = ['session', 'remember', 'refresh', 'logout',
+    $supported = ['session', 'remember', 'redirect-session',
+        'redirect-remember', 'refresh', 'logout',
         'logout-fail-session', 'logout-fail-remember', 'rotate'];
     if (!in_array($action, $supported, true)) {
         status_header(404);
@@ -37,11 +50,20 @@ add_action('init', static function () {
     }
     $ok = false;
     $result = ['action' => $action];
-    if ($action === 'session' || $action === 'remember') {
-        if ($action === 'remember') { $_POST['esp_remember'] = '1'; }
-        else { unset($_POST['esp_remember']); }
+    if (in_array($action,
+        ['session','remember','redirect-session','redirect-remember'], true)) {
+        if (in_array($action, ['remember','redirect-remember'], true)) {
+            $_POST['esp_remember'] = '1';
+        } else { unset($_POST['esp_remember']); }
         $auth = new ESP_Auth();
         $ok = $auth->process_login($path, 'disposable-ci-password');
+        if ($ok && strpos($action, 'redirect-') === 0) {
+            // This invokes the actual shipped cookie + redirect method.
+            // The client must receive Set-Cookie on the HTTP 302 and send
+            // both original and signed cookies on the following GET.
+            ESP_Cookie::get_instance()->do_redirect(
+                '/?esp_fg_ci_redirect_landed=1');
+        }
         if ($ok) { ESP_Cookie::get_instance()->set_pending_cookies(); }
         $result['authenticated'] = $ok;
     } elseif ($action === 'refresh') {

@@ -10,7 +10,12 @@ mkdir -p "$report_root"
 root="$(mktemp -d "${RUNNER_TEMP:-/tmp}/esp-fg-life.XXXXXXXX")"
 container="esp-fg-bench-${GITHUB_RUN_ID:-local}-$$"
 started=0
+race_pid=""
 cleanup() {
+    if [[ -n "$race_pid" ]]; then
+        kill "$race_pid" >/dev/null 2>&1 || true
+        wait "$race_pid" >/dev/null 2>&1 || true
+    fi
     rc=$?
     if [[ $started -eq 1 ]]; then
         docker logs "$container" >"$report_root/apache.log" 2>&1 || true
@@ -144,6 +149,46 @@ measure gate_cron_repair_gc env ESP_FG_CI_FORCE_GATE=1 \
     php "$root/wp-cli.phar" --allow-root --path="$ESP_WP_ROOT" \
     cron event run esp_media_index_v1_batch
 stage cron-check
+
+# R01: use separate real PHP/WordPress connections with a deterministic
+# rendezvous. B holds the OLD public MySQL snapshot while A commits a real
+# protected metadata/index update, then B must fail its shared-path CAS.
+# No new production hooks or full-site locks are introduced.
+race_dir="$root/fg-r01-rendezvous"
+mkdir -p "$race_dir"
+export ESP_FG_RACE_SYNC="$race_dir"
+export ESP_FG_CI_RACE=1
+race_driver="$PWD/tests/wordpress-fast-gate-cross-owner-race-ci.php"
+env ESP_FG_RACE_PHASE=setup php "$race_driver" \
+    | tee -a "$report_root/stages.log"
+env ESP_FG_RACE_PHASE=stale-b php "$race_driver" \
+    >"$report_root/r01-stale-b.log" 2>&1 &
+race_pid=$!
+for i in $(seq 1 400); do
+    [[ -f "$race_dir/b-ready" ]] && break
+    if ! kill -0 "$race_pid" >/dev/null 2>&1; then
+        cat "$report_root/r01-stale-b.log"
+        echo "B worker terminated before the R01 barrier" >&2
+        exit 1
+    fi
+    sleep .05
+done
+if [[ ! -f "$race_dir/b-ready" ]]; then
+    cat "$report_root/r01-stale-b.log"
+    echo "R01 B worker did not reach the deterministic barrier" >&2
+    exit 1
+fi
+env ESP_FG_RACE_PHASE=protect-a php "$race_driver" \
+    | tee -a "$report_root/stages.log"
+touch "$race_dir/a-done"
+wait "$race_pid"
+race_pid=""
+cat "$report_root/r01-stale-b.log" | tee -a "$report_root/stages.log"
+env ESP_FG_RACE_PHASE=verify php "$race_driver" \
+    | tee -a "$report_root/stages.log"
+unset ESP_FG_RACE_SYNC ESP_FG_CI_RACE
+stage catalog-status
+
 # Confirm recurring Cron registration survives execution and the standalone
 # WP-CLI GC operates on the same completed ledger without dropping any
 # unconfirmed revocation.
