@@ -1,10 +1,10 @@
 # Issue #80 / PR #81 — v0.7.41 → Fast Gate v2 validation record
 
 **Status: CI PASS, not cleared for production activation.**  
-**Verified commit:** [5b8039a2f701b7b4c55dffc3069ce83632988dba](https://github.com/ponpaku/wp-easy-slug-protect/commit/5b8039a2f701b7b4c55dffc3069ce83632988dba)  
-**Latest execution:** 2026-11-08 03:52 UTC (2026-11-08 12:52 JST).  
-**Latest CI:** https://github.com/ponpaku/wp-easy-slug-protect/actions/runs/42444437752  
-**Prior independent passing run:** https://github.com/ponpaku/wp-easy-slug-protect/actions/runs/42426598832  
+**Verified commit:** [f8fe25ad1a8dc56c06c902e2ebe3770173d75941](https://github.com/ponpaku/wp-easy-slug-protect/commit/f8fe25ad1a8dc56c06c902e2ebe3770173d75941)  
+**Latest execution:** 2026-11-08 04:47 UTC (2026-11-08 13:47 JST).  
+**Latest CI:** https://github.com/ponpaku/wp-easy-slug-protect/actions/runs/42448161466  
+**Prior independent passing runs:** https://github.com/ponpaku/wp-easy-slug-protect/actions/runs/42444437752 and https://github.com/ponpaku/wp-easy-slug-protect/actions/runs/42426598832  
 **Evidence:** Artifact `esp-fast-gate-v2-lifecycle-actual` (raw HTTP samples, comparison.json, stages.log, timings.csv, Apache logs; 14-day artifact retention).
 
 > This is a reproducible baseline for a **Draft**, not a release approval. A prior passing run recorded one invalid **-448 ms** `gate_build_cli` interval because the CI runner wall clock stepped backward. The latest successful run replaced it with Python `time.monotonic_ns` for CLI operation timing, confirmed a positive **460 ms** catalog build duration and also exercised standalone `wp esp gate-ledger gc`. The HTTP test uses the separately monotonic `time.perf_counter_ns`. The earlier invalid interval was never used in speed comparisons.
@@ -78,18 +78,72 @@ The test was not accepted until the standalone PHP entrypoint was **included in 
 
 **Concrete defect fixed during validation:** `tools/build-release.py` previously omitted the `gate/` directory, so the distributed plugin ZIP lacked the standalone Fast Gate entrypoint. The builder now includes `gate/` and mandates both standalone PHP files, and the lifecycle test asserts the files exist after ZIP upgrade.
 
+## Real HTTP authentication lifecycle and concurrent access (run 42448161466)
+
+**PASS:** 9/9 PHP security workflow jobs; in particular, the full
+`fast-gate-upgrade-lifecycle` job passed with a fresh actual WordPress
+7.1.3 installation, MySQL 8, Apache/PHP 8.3 and SQLite. Test-only plugin
+`tests/fixtures/fast-gate-http-auth-mu.php` is copied solely into the
+disposable WordPress fixture; it is gated by an explicit Docker environment
+variable and the exact disposable DB name, and is **excluded from the
+distribution ZIP**. It calls existing `ESP_Auth::process_login()`,
+`ESP_Auth::is_logged_in()` and `ESP_Logout` methods, while the client uses
+real HTTP `Set-Cookie` and subsequent `Cookie` headers. Fast Gate routing
+remains a disposable Apache VirtualHost rule, **not a product feature**.
+
+The real WordPress HTTP scenarios passed **57 assertions**:
+
+- Normal session login issues both WordPress's session cookie and signed gate
+  cookie; protected GET returns identical image bytes.
+- Remember Me login issues the identity/token and signed gate cookies,
+  refreshes via real WordPress/MySQL, and continues authorizing media.
+- Session logout and Remember Me logout revoke the corresponding credentials
+  before removing MySQL rows; a **retained copy of the old cookie header**
+  returns HTTP 403. A refresh after revoked session logout cannot reissue.
+- With session and Remember cookies simultaneously present, one logout denies
+  **both** previously issued login kinds.
+- WordPress option update increments the password generation from **1 to 2**
+  while the test-only gate is active; a previously valid ticket is rejected,
+  and a fresh WordPress password login obtains a new usable ticket.
+- A forged HMAC, altered login token, missing signed ticket, signed ticket
+  without its original login cookie, anonymous requests, unsupported POST and
+  malformed Range requests are denied. HEAD and a valid single byte Range
+  operate correctly.
+
+The **8-worker mixed concurrency check** made 128 actual standalone HTTP GETs
+(64 authenticated and 64 anonymous) against the same protected file. Each
+authenticated request returned HTTP 200 with the expected body digest; each
+anonymous request returned HTTP 403. Local-runner latency observations:
+authenticated median **6.0817 ms**, p95 **8.1745 ms**; anonymous median
+**5.6955 ms**, p95 **8.4564 ms**. The 128-request burst is not a sustained
+throughput or max-worker benchmark.
+
+Sequential small-file benchmark on the same latest run (60 successful GETs
+per mode and file; median/p95 in ms):
+
+| Mode / file | Legacy median | Fast Gate median | Median speedup | Legacy p95 | Fast Gate p95 |
+|---|---:|---:|---:|---:|---:|
+| Protected, authorized | 18.0826 | 1.5654 | 11.551× | 19.8066 | 1.6449 |
+| Public | 16.9135 | 1.4580 | 11.600× | 21.1004 | 1.5238 |
+
+Each HTTP result is checked for the distinct standalone response headers,
+matching file digest, no unauthorized disclosure, and fail-closed behavior.
+All metrics are loopback results from one shared Actions runner, not
+production estimates. Raw test output is archived in
+`auth-lifecycle-http.json` and the other lifecycle artifacts.
+
 ## Remaining release blockers / evidence limits
 
 1. **Not production-enabled.** The Apache route in this experiment is installed **only inside disposable CI**. Automatic activation, rollback and Rewrite bypass prevention remain separate engineering gates. LiteSpeed and Nginx Fast Gate routing were not benchmarked.
-2. **Not a real user login/logout E2E.** The benchmark issues a valid signed ticket from known disposable credentials; it does not prove the full browser sign-in, Remember Me refresh, password changes, unsuccessful SQL deletion, UI redirects and multi-session lifecycle.
+2. **Browser UI / failure injection remain separate.** HTTP requests now exercise real WordPress password authentication, Remember Me refresh, session+Remember logout and password generation changes (with real MySQL and saved/returned cookies). However, the test uses a disposable test-only HTTP endpoint rather than the shipped shortcodes, browser UI, real nonce submission/redirects, and does not inject an actual logout SQL deletion failure. Those remain acceptance cases.
 3. **No hard-kill / power-loss guarantee.** The SQLite WAL test exits a PHP process with a pending transaction; it does not simulate SIGKILL during fsync, a disk crash, corruption, external backup restore, or multi-host storage.
 4. **WP-Cron was explicitly executed via WP-CLI.** It verifies registered events and real Cron callbacks, not unattended triggering under low site traffic, cron daemon scheduling, or long-term orphan maintenance. The scheduled event's continuity and dedicated CLI GC both passed in the latest run.
-5. **No load/scale conclusion:** 245 attachments, one protected path, tiny JPEG, sequential requests only. Need larger file sizes, >=100k attachments, parallel requests, CPU, memory, disk I/O, p95/p99 under saturation, and demonstrably no WordPress/MySQL bootstrap on the media hot path.
+5. **No sustained load/scale conclusion:** 245 attachments, one protected path, tiny JPEG; an 8-worker/128-request parallel authorization test now passes, but larger files, >=100k attachments, higher parallelism, CPU/memory/I/O, p95/p99 under saturation and a runtime proof that the hot path boots neither WordPress nor MySQL remain to be assessed.
 6. **No future-version migration test.** The upgrade uses the same plugin version `0.7.41` under `--force`; test a version-incremented ZIP, upgrade notices/hooks and preservation of real-world settings before any stable release.
 7. **No external-backup rollback detection.** Consistent with Issue #80 R03 scope: backup restoration is an operator procedure, not auto-detected. Document reset/key rotation steps before shipping.
 
 ### Reproduction
 
-Run `fast-gate-upgrade-lifecycle` in `.github/workflows/php-security.yml`. It invokes `.github/scripts/test-fast-gate-lifecycle.sh` and generates `esp-fast-gate-v2-lifecycle-actual`. Inspect `stages.log`, `timings.csv`, `comparison.json`, `legacy-http.json`, `fast-http.json` and `apache.log`. The test refuses to run without `CI=true` and `ESP_ALLOW_DISPOSABLE_DB=1` and verifies the disposable database name.
+Run `fast-gate-upgrade-lifecycle` in `.github/workflows/php-security.yml`. It invokes `.github/scripts/test-fast-gate-lifecycle.sh` and generates `esp-fast-gate-v2-lifecycle-actual`. Inspect `stages.log`, `timings.csv`, `comparison.json`, `auth-lifecycle-http.json`, `legacy-http.json`, `fast-http.json` and `apache.log`. The HTTP auth scenario is implemented in `tests/fast-gate-http-auth-lifecycle.py` and its disposable-only MU-plugin fixture `tests/fixtures/fast-gate-http-auth-mu.php`. The test refuses to run without `CI=true` and `ESP_ALLOW_DISPOSABLE_DB=1` and verifies the disposable database name.
 
 Related: [Issue #80](https://github.com/ponpaku/wp-easy-slug-protect/issues/80), [PR #81](https://github.com/ponpaku/wp-easy-slug-protect/pull/81), [implementation notes](issue-80-fast-gate-v2-implementation.md).
