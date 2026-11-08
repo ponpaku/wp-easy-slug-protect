@@ -1,10 +1,10 @@
 # Issue #80 / PR #81 — v0.7.41 → Fast Gate v2 validation record
 
 **Status: CI PASS, not cleared for production activation.**  
-**Verified commit:** [92639c42517da981a399ea7a0fc00457189dffca](https://github.com/ponpaku/wp-easy-slug-protect/commit/92639c42517da981a399ea7a0fc00457189dffca)  
-**Latest execution:** 2026-11-08 04:54 UTC (2026-11-08 13:54 JST).  
-**Latest CI:** https://github.com/ponpaku/wp-easy-slug-protect/actions/runs/42448563405  
-**Prior independent passing runs:** https://github.com/ponpaku/wp-easy-slug-protect/actions/runs/42448161466, https://github.com/ponpaku/wp-easy-slug-protect/actions/runs/42444437752, and https://github.com/ponpaku/wp-easy-slug-protect/actions/runs/42426598832  
+**Latest tested code commit:** [1b1ad8f555533ae9115b0a862c9fce5185056116](https://github.com/ponpaku/wp-easy-slug-protect/commit/1b1ad8f555533ae9115b0a862c9fce5185056116)  
+**Latest execution:** 2026-11-08 06:11 UTC (2026-11-08 15:11 JST).  
+**Latest code CI (9/9 jobs passed):** https://github.com/ponpaku/wp-easy-slug-protect/actions/runs/42453662803  
+**Prior independent passing runs:** https://github.com/ponpaku/wp-easy-slug-protect/actions/runs/42448563405, https://github.com/ponpaku/wp-easy-slug-protect/actions/runs/42448161466, https://github.com/ponpaku/wp-easy-slug-protect/actions/runs/42444437752, and https://github.com/ponpaku/wp-easy-slug-protect/actions/runs/42426598832  
 **Evidence:** Artifact `esp-fast-gate-v2-lifecycle-actual` (raw HTTP samples, comparison.json, stages.log, timings.csv, Apache logs; 14-day artifact retention).
 
 > This is a reproducible baseline for a **Draft**, not a release approval. A prior passing run recorded one invalid **-448 ms** `gate_build_cli` interval because the CI runner wall clock stepped backward. The latest successful run replaced it with Python `time.monotonic_ns` for CLI operation timing, confirmed a positive **460 ms** catalog build duration and also exercised standalone `wp esp gate-ledger gc`. The HTTP test uses the separately monotonic `time.perf_counter_ns`. The earlier invalid interval was never used in speed comparisons.
@@ -145,10 +145,36 @@ All metrics are loopback results from one shared Actions runner, not
 production estimates. Raw test output is archived in
 `auth-lifecycle-http.json` and the other lifecycle artifacts.
 
+## Narrowly scoped follow-up: shared-path PHP-worker race and cookie redirect
+
+**PASS** in [Actions run 42453662803](https://github.com/ponpaku/wp-easy-slug-protect/actions/runs/42453662803), at tested implementation HEAD `1b1ad8f`. This adds **test-only** coverage at the two specific Fast Gate integration boundaries introduced by PR #81; it does not extend the product scope.
+
+### R01: Two independent real WordPress/PHP/MySQL workers
+
+`tests/wordpress-fast-gate-cross-owner-race-ci.php` is invoked as distinct **PHP processes with independent MySQL and SQLite connections**. An initial WordPress attachment B is temporarily made to claim file P alongside owner A, then detached through a real WordPress metadata/index update. The test intentionally suppresses just B's SQLite publication to emulate a PHP worker stopping between canonical MySQL publication and ledger refresh, leaving B's durable deny fence.
+
+- Worker **B** starts a real MySQL `REPEATABLE READ` consistent snapshot where P is **public** and waits at a known SQL resolver query after taking the SQLite shared-path epoch snapshot.
+- Independently, worker **A** updates P to **protected** with real `update_post_meta()`, indexes the result and publishes protected policy to the SQLite ledger.
+- B resumes with its **stale public MySQL snapshot**. Its `refresh_owner()` returns **false**, as the intervening path epoch changed; it cannot overwrite A's protected ledger record or retire B's deny fence.
+- With a fresh MySQL snapshot, B can safely refresh; A is subsequently returned to public. The catalog is rebuilt and checked complete and **non-serving**, and the original 245-file fixture is restored.
+
+**Observed checkpoints:** `B_MYSQL_PUBLISHED_SQLITE_FENCED`, `OWNER_A_PROTECTED_MYSQL_AND_SQLITE_COMMITTED`, `STALE_PUBLIC_PUBLISH_REJECTED_FENCE_RETAINED`, `R01_REAL_MULTIPROCESS_COMPLETED_AND_RESTORED`. The rendezvous is deterministic and bounded (test fails rather than waiting indefinitely). This proves the targeted **cross-owner stale publication** behavior, not every possible concurrent metadata/update scenario.
+
+### Real redirect path and emitted signed cookie
+
+The disposable WordPress HTTP test invokes the shipped `ESP_Cookie::do_redirect()` after a real `ESP_Auth::process_login()` for both normal session and Remember Me. The HTTP client checks:
+
+- Exactly one **HTTP 302** carrying the expected WordPress landing `Location`.
+- The **original 302** contains an `esp_gate_fg_path` **Set-Cookie**, not merely a later HTTP 200 response.
+- The redirected GET presents **both** the source login Cookie and the signed gate Cookie, and subsequently loads the protected file over the actual standalone HTTP route.
+- Logging out invalidates a retained copy of the pre-logout cookie header.
+
+The full HTTP authentication test now has **93 assertions** (previously 73). The test uses a disposable endpoint rather than the real HTML login form and form nonce; **those pre-existing UI paths have not been newly claimed as tested**. No production redirect implementation was changed.
+
 ## Remaining release blockers / evidence limits
 
 1. **Not production-enabled.** The Apache route in this experiment is installed **only inside disposable CI**. Automatic activation, rollback and Rewrite bypass prevention remain separate engineering gates. LiteSpeed and Nginx Fast Gate routing were not benchmarked.
-2. **Browser UI / advanced failure injection remain separate.** HTTP requests now exercise real WordPress password authentication, Remember Me refresh, both-kind logout, password generation changes and actual SQL DELETE failures (with real MySQL and saved/returned cookies). However, the test uses a disposable endpoint rather than the shipped shortcodes, browser UI, real nonce submission/redirects and broader concurrent SQL/SQLite failures. Those remain acceptance cases.
+2. **Browser form/nonces and broader failure injection remain separate.** The test now exercises the shipped cookie redirect function with an actual 302, source+signed Set-Cookie, and redirected GET, plus actual WordPress password authentication, Remember Me refresh, logout, and real MySQL DELETE failure. However, it still uses a disposable endpoint instead of the shipped HTML login form, nonce submission and shortcode UI. Broader concurrent SQL/SQLite failure conditions remain outside this narrowly scoped PR regression.
 3. **No hard-kill / power-loss guarantee.** The SQLite WAL test exits a PHP process with a pending transaction; it does not simulate SIGKILL during fsync, a disk crash, corruption, external backup restore, or multi-host storage.
 4. **WP-Cron was explicitly executed via WP-CLI.** It verifies registered events and real Cron callbacks, not unattended triggering under low site traffic, cron daemon scheduling, or long-term orphan maintenance. The scheduled event's continuity and dedicated CLI GC both passed in the latest run.
 5. **No sustained load/scale conclusion:** 245 attachments, one protected path, tiny JPEG; an 8-worker/128-request parallel authorization test now passes, but larger files, >=100k attachments, higher parallelism, CPU/memory/I/O, p95/p99 under saturation and a runtime proof that the hot path boots neither WordPress nor MySQL remain to be assessed.
@@ -157,6 +183,6 @@ production estimates. Raw test output is archived in
 
 ### Reproduction
 
-Run `fast-gate-upgrade-lifecycle` in `.github/workflows/php-security.yml`. It invokes `.github/scripts/test-fast-gate-lifecycle.sh` and generates `esp-fast-gate-v2-lifecycle-actual`. Inspect `stages.log`, `timings.csv`, `comparison.json`, `auth-lifecycle-http.json`, `legacy-http.json`, `fast-http.json` and `apache.log`. The HTTP auth scenario is implemented in `tests/fast-gate-http-auth-lifecycle.py` and its disposable-only MU-plugin fixture `tests/fixtures/fast-gate-http-auth-mu.php`. The test refuses to run without `CI=true` and `ESP_ALLOW_DISPOSABLE_DB=1` and verifies the disposable database name.
+Run `fast-gate-upgrade-lifecycle` in `.github/workflows/php-security.yml`. It invokes `.github/scripts/test-fast-gate-lifecycle.sh` and generates `esp-fast-gate-v2-lifecycle-actual`. Inspect `stages.log`, `timings.csv`, `comparison.json`, `auth-lifecycle-http.json`, `legacy-http.json`, `fast-http.json` and `apache.log`. The HTTP auth/redirect scenarios are implemented in `tests/fast-gate-http-auth-lifecycle.py` and its disposable-only MU-plugin fixture `tests/fixtures/fast-gate-http-auth-mu.php`. The deterministic independent-worker R01 test is `tests/wordpress-fast-gate-cross-owner-race-ci.php`, invoked from the same lifecycle script with phase-specific environment gates. The test refuses to run without `CI=true` and `ESP_ALLOW_DISPOSABLE_DB=1` and verifies the disposable database name.
 
 Related: [Issue #80](https://github.com/ponpaku/wp-easy-slug-protect/issues/80), [PR #81](https://github.com/ponpaku/wp-easy-slug-protect/pull/81), [implementation notes](issue-80-fast-gate-v2-implementation.md).
