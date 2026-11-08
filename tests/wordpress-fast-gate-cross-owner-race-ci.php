@@ -224,8 +224,26 @@ if($phase==='verify'){
         'restore failed or B retained a stale denial');
     fg_race_assert($db->set_serving(false),
         'cannot stop test-only gate after race');
-    fg_race_assert(ESP_Fast_Gate_WP::build_catalog(),
-        'cannot rebuild clean catalog after race');
+    $rebuilt=ESP_Fast_Gate_WP::build_catalog();
+    if (!$rebuilt) {
+        $state_table=ESP_Media_Index::state_table();
+        $dirty=$wpdb->get_results(
+            "SELECT attachment_id,status,revision,pending_count
+             FROM $state_table WHERE attachment_id>0
+             AND (status<>'ready' OR pending_count<>0) LIMIT 6",ARRAY_A);
+        $state=ESP_Media_Index::build_status(false);
+        $b_resolved=ESP_Media_Index::resolve($b_abs);
+        fg_race_log('FINAL_CATALOG_DIAGNOSTICS',[
+            'index_ready'=>ESP_Media_Index::ready(),
+            'index_state'=>$state,
+            'dirty'=>$dirty,
+            'gate_ready'=>$db->ready(),
+            'gate_counts'=>$db->counts(),
+            'b_resolve'=>$b_resolved,
+            'mysql_error'=>$wpdb->last_error
+        ]);
+    }
+    fg_race_assert($rebuilt,'cannot rebuild clean catalog after race');
     fg_race_assert($db->ready() && !$db->serving() &&
         $db->counts()['media']===245 &&
         $db->pending_owners()===[],
