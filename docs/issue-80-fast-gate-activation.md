@@ -7,21 +7,25 @@ does not change any `Cache-Control` behavior.
 ## Scope and user entrypoints
 
 - WordPress administrator: **Settings → Fast Gate**, with actions **Prepare
-  ledger**, **Enable verified gate** and **Disable / restore WordPress route**.
+  ledger**, **Enable verified gate**, **Disable / restore WordPress route**,
+  and explicit **Recover interrupted transition** (visible when a deployment
+  lock remains).
   The storage directory is plugin-managed; no path entry form or server rule
   copy/paste is required.
 - WP-CLI: `wp esp gate-ledger provision`, `build`, `activate --server=apache`
   (or `--server=litespeed`), `deactivate --server=apache`,
-  `status`, `gc`. WordPress CLI does not know the active HTTP server:
+  `recover --server=apache`, `status`, `gc`. WordPress CLI does not know the active HTTP server:
   its explicit `--server` **hint is not evidence** of routing; mandatory
   real HTTP checks still prove the deployment.
 - Nginx, OpenResty, Tengine and unknown server types: **no Fast Gate support**
   in this PR. The existing WordPress/PHP media route is left unchanged.
 
-**Prepare** requires the existing media index enabled and READY. It provisions
-`wp-content/esp-fast-gate-v2` only if absent; on an already-provisioned
-installation it checks existing secrets/schema and creates/rebuilds the
-catalog only when not READY. `keys.php` is never silently regenerated.
+**Prepare** explicitly opts in to the existing incremental media index,
+if READY but not yet enabled. If the index is still being built, it runs a
+bounded index batch and reports **index_build_pending**; retry later after
+Cron/index progress. It provisions `wp-content/esp-fast-gate-v2` only if
+absent; on an already-provisioned installation it checks existing
+secrets/schema and creates/rebuilds the catalog only when not READY. `keys.php` is never silently regenerated.
 A large catalog may require a WP-CLI build rather than the administrative
 request timeout.
 
@@ -63,13 +67,21 @@ serving or change Rewrite.
    **stopped**, so media requests during the transition fail closed (503).
    WordPress metadata/password mutations already require SQLite fences once
    the route is armed, *before* the active option is enabled.
-3. Send a fresh nonce/HMAC as an HTTP request header to an uploads media URL.
-   Only the standalone PHP handler, with the secret key, can return the
-   required 204 + authenticated acknowledgement header. Direct HTTP access
-   to the SQLite ledger must return 403 on the same actual web server.
+3. Create an **actual, non-secret and unique .jpg file** in the uploads
+   directory and send a fresh nonce/HMAC HTTP request for that existing
+   file. Only the standalone PHP handler, with the site secret, can return
+   204 and the signed acknowledgement. The test file is removed on success
+   **and** failure. This catches front proxies that serve existing static
+   uploads directly but proxy missing files to WordPress/Apache. Direct
+   SQLite HTTP access must also return 403 on the real origin.
 4. Perform a **final full catalog reconciliation while routing is armed and
    serving remains OFF**. If index state changed unexpectedly, abort.
-5. Enable the WordPress Fast Gate synchronization/ revocation option, then
+5. Atomically rotate the **per-deployment ticket-signing nonce** inside
+   SQLite while the reader is stopped. The site-wide secret in `keys.php`
+   is unchanged. Ticket HMAC keys derive from both values. This invalidates
+   all old signed tickets on reactivation, including cookies copied before
+   a legacy-only logout while Fast Gate was disabled.
+6. Enable the WordPress Fast Gate synchronization/revocation option, then
    switch the SQLite `serving` marker ON. Only after both steps may
    standalone media requests return image bytes.
 
@@ -88,13 +100,23 @@ sequence. Media-protection setting OFF is also blocked while Fast Gate
 routing is armed; deactivating the plugin attempts a verified fallback before
 removing its managed media rule.
 
+**Interrupted operation:** the controller uses a DB-unique token lock.
+Subsequent phases recheck that the same worker still holds the token,
+and a late worker cannot delete a newer recovery lock. An explicit
+admin/CLI recovery may claim the lock only if it is **at least 15 minutes
+old**, after the administrator confirms no earlier PHP worker is still
+running. Recovery stops SQLite serving first, restores the existing
+legacy Rewrite, then disables Fast Gate synchronization. Failed
+restoration retains the non-serving gate and requires operator action.
+The lock is never silently stolen by ordinary requests.
+
 ## HTTP security probe design
 
 The standalone gate accepts a probe only if the request provides an
 `X-ESP-Gate-Route-Probe: <nonce>:<HMAC>` header, where the 128-bit random nonce
 and two domain-separated HMACs use the existing site-wide signing secret.
-A valid request returns **204 with no file bytes**, plus a signed
-acknowledgement header. The header is never itself an authorization cookie.
+The physical upload probe returns **204 with no file bytes** from the gate
+script, plus a signed acknowledgement header. The header is never itself an authorization cookie.
 Without the secret, a fabricated 204 from WordPress/another handler will
 not pass the authenticated response check.
 
@@ -109,10 +131,16 @@ The child PR extends the existing reproducible real WordPress 7.1.3,
 MySQL 8, SQLite3 and Apache Actions lifecycle:
 
 - a deliberately failed route probe and verified rollback to WordPress/PHP;
+- a simulated stale lock plus an installed non-serving gate Rewrite,
+  followed by explicit recovery to the WordPress/PHP route;
+- no HTTP probe-file remnants after success or forced failure;
 - successful production-class controller installation and HTTP traffic
   (public, protected, unknown media);
 - real WordPress login after activation producing a signed media ticket;
 - restore the WordPress/PHP media route and confirm existing login works;
+- ordinary legacy-mode logout while Fast Gate is disabled, followed by
+  reactivation: a retained old signed ticket returns 403, while a new
+  WordPress login gets a usable ticket from the new signing generation;
 - direct HTTP SQLite denial and the existing security regression suite.
 
 **Before production rollout:** CI must pass on the actual child-branch

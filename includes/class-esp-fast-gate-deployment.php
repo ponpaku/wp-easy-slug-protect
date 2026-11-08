@@ -173,22 +173,49 @@ final class ESP_Fast_Gate_Deployment {
         if (!function_exists('wp_remote_get')) { return false; }
         $uploads = wp_upload_dir(null, false);
         $base = $uploads['baseurl'] ?? null;
-        if (!is_string($base) || !preg_match('~^https?://~i', $base)) {
+        $root = realpath($uploads['basedir'] ?? '');
+        if (!$root || !is_dir($root) || !is_string($base) ||
+            !preg_match('~^https?://~i', $base)) {
             return false;
         }
-        $nonce = bin2hex(random_bytes(16));
-        $proof = hash_hmac('sha256', 'route|' . $nonce, $keys['sig']);
-        $url = rtrim($base,'/') . '/esp-fast-gate-route-' . $nonce . '.jpg';
-        $args = [
-            'timeout'=>8, 'redirection'=>0, 'sslverify'=>true,
-            'headers'=>['X-ESP-Gate-Route-Probe'=>$nonce . ':' . $proof],
-        ];
-        $response = wp_remote_get($url, $args);
-        if (is_wp_error($response) || wp_remote_retrieve_response_code($response) !== 204 ||
-            !hash_equals(hash_hmac('sha256', 'ack|' . $nonce, $keys['sig']),
-                (string)wp_remote_retrieve_header($response, 'X-ESP-Gate-Route-Ack'))) {
-            return false;
+        try {
+            $nonce = bin2hex(random_bytes(16));
+        } catch (\Throwable $e) { return false; }
+        $filename = 'esp-fast-gate-route-' . $nonce . '.jpg';
+        $probe_file = $root . '/' . $filename;
+        // An absent-file probe is insufficient: a reverse proxy may pass
+        // 404s to Apache while delivering EXISTING uploads as static files.
+        // A new non-secret physical file must still reach the signed
+        // standalone PHP handler before serving can be enabled.
+        $handle = @fopen($probe_file, 'x');
+        if ($handle === false) { return false; }
+        $probe_ok = false;
+        $removed = false;
+        try {
+            $bytes = "ESP_ROUTE_PROBE\n";
+            if (@fwrite($handle, $bytes) === strlen($bytes) &&
+                @fflush($handle) && @fclose($handle)) {
+                $handle = null;
+                $proof = hash_hmac('sha256', 'route|' . $nonce, $keys['sig']);
+                $url = rtrim($base,'/') . '/' . $filename;
+                $response = wp_remote_get($url, [
+                    'timeout'=>8, 'redirection'=>0, 'sslverify'=>true,
+                    'headers'=>['X-ESP-Gate-Route-Probe'=>$nonce . ':' . $proof],
+                ]);
+                $probe_ok = !is_wp_error($response) &&
+                    wp_remote_retrieve_response_code($response) === 204 &&
+                    hash_equals(
+                        hash_hmac('sha256', 'ack|' . $nonce, $keys['sig']),
+                        (string)wp_remote_retrieve_header(
+                            $response, 'X-ESP-Gate-Route-Ack'));
+            }
+        } catch (\Throwable $e) {
+            $probe_ok = false;
+        } finally {
+            if (is_resource($handle)) { @fclose($handle); }
+            $removed = @unlink($probe_file);
         }
+        if (!$removed || !$probe_ok) { return false; }
 
         // Directory-level denial is tested against the ACTUAL HTTP server,
         // not inferred from an .htaccess file existing on disk.
