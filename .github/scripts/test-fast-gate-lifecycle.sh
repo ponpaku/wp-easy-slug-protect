@@ -470,6 +470,25 @@ sleep 1
 # Real Apache PHP needs write access to the existing ESP-managed
 # uploads/.htaccess; the initial WordPress WP-CLI install ran as the runner.
 sudo chown -R 33:33 "$uploads"
+# This fixture bind-mounts the SAME WordPress tree at both the runner's
+# absolute ESP_WP_ROOT (used by WP-CLI provisioning) and /var/www/html
+# (used by Apache). Rebind the disposable keys.php uploads root to Apache's
+# realpath before strict product activation; never weaken production root
+# validation or alter the signing/identity secrets.
+docker exec --user www-data "$container" php -r '
+$private="/var/www/html/wp-content/esp-fast-gate-v2";
+$file=$private."/keys.php";
+$keys=require $file;
+$root=realpath("/var/www/html/wp-content/uploads");
+if (!is_array($keys) || !is_string($root)) exit(1);
+$keys["root"]=$root;
+$php="<?php\nreturn ".var_export($keys,true).";\n";
+$tmp=$private."/keys.php.ci-new";
+if (file_put_contents($tmp,$php,LOCK_EX)!==strlen($php) ||
+    !chmod($tmp,0600) ||
+    !rename($tmp,$file)) exit(1);
+echo "FG_DEPLOY_ROOT mapped disposable dual-bind fixture for Apache\n";
+'
 # Check that no test-only server-level rewrite remains before deployment.
 grep -Fq 'RewriteRule ^(.+)$' "$uploads/.htaccess"
 ! grep -Fq '# Fast Gate: no static-file existence shortcut' "$uploads/.htaccess"

@@ -60,9 +60,11 @@ try {
         exit;
     }
     $store = ESP_Fast_Gate_Store::open($private . '/gate-ledger.sqlite', false);
+    $ticket_signing_key = $store ? $store->ticket_signing_key($keys['sig']) : null;
+    if ($ticket_signing_key === null) { esp_fast_gate_status(503); }
     $decision = ESP_Fast_Gate_Server::authorize(
         $_SERVER['REQUEST_URI'] ?? '', $_COOKIE, $keys['site'],
-        $keys['root'], $keys['prefix'], $keys['sig'], $keys['id'], $store
+        $keys['root'], $keys['prefix'], $ticket_signing_key, $keys['id'], $store
     );
     if ($decision['status'] !== 200) {
         esp_fast_gate_status($decision['status']);

@@ -289,9 +289,11 @@ final class ESP_Fast_Gate_WP {
         $ref = ESP_Fast_Gate_Token::session_ref($keys['site'],
             (string)$path, $kind, (string)$user, (string)$token, $keys['id']);
         if (!$ref || $db->is_revoked($ref) !== false) { return; }
+        $ticket_key = $db->ticket_signing_key($keys['sig']);
+        if ($ticket_key === null) { return; }
         $ticket = ESP_Fast_Gate_Token::issue(
             $keys['site'], (string)$path, $kind, (string)$user, (string)$token,
-            (int)$version, (int)$expires, $keys['sig'], $keys['id']
+            (int)$version, (int)$expires, $ticket_key, $keys['id']
         );
         if ($ticket !== null) {
             ESP_Cookie::get_instance()->queue_gate_ticket((string)$path, $ticket,

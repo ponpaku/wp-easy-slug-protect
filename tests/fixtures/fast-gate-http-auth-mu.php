@@ -31,7 +31,8 @@ add_action('init', static function () {
     }
     $action = (string)$_GET['esp_fg_ci_auth'];
     if (in_array($action, [
-        'deploy-prepare','deploy-enable-fail-probe','deploy-enable','deploy-disable','deploy-status'
+        'deploy-prepare','deploy-enable-fail-probe','deploy-enable','deploy-disable',
+        'deploy-status','deploy-legacy-logout'
     ], true)) {
         // Deployment endpoint is a disposable fixture only. Unlike the auth
         // fixture it never forces the active option or serving flag.
@@ -59,6 +60,17 @@ add_action('init', static function () {
             $result=ESP_Fast_Gate_Deployment::enable();
         } elseif ($action === 'deploy-disable') {
             $result=ESP_Fast_Gate_Deployment::disable();
+        } elseif ($action === 'deploy-legacy-logout') {
+            if (ESP_Fast_Gate_WP::active() ||
+                ESP_Fast_Gate_Deployment::route_fast()) {
+                $result=new WP_Error('esp_ci_legacy_logout_requires_off');
+            } else {
+                $path=ESP_Option::get_current_setting('path')['fg_path'] ?? null;
+                $logout=new ESP_Logout();
+                $method=new ReflectionMethod('ESP_Logout','logout_from_path');
+                $result=$path && $method->invoke($logout,$path) === true;
+                ESP_Cookie::get_instance()->set_pending_cookies();
+            }
         }
         $response=['action'=>$action,'success'=>$result===true,
             'error'=>$result instanceof WP_Error?$result->get_error_code():null]

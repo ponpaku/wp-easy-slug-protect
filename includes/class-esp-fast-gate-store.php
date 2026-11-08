@@ -134,6 +134,52 @@ final class ESP_Fast_Gate_Store {
         });
     }
 
+    /**
+     * Derive the signing key from a fresh per-activation nonce. An operator
+     * can temporarily disable Fast Gate while users log out using legacy
+     * MySQL sessions (without SQLite revocations). Rotating on EVERY
+     * re-activation invalidates those old copied signed tickets.
+     * The nonce is not itself secret; the site key remains in keys.php.
+     */
+    public function ticket_signing_key($site_key) {
+        if (!is_string($site_key) || strlen($site_key) < 32 ||
+            !$this->schema_ok()) { return null; }
+        try {
+            $nonce = $this->db->querySingle(
+                "SELECT v FROM meta WHERE k='ticket_nonce'");
+            if ($nonce === null) {
+                // Compatible with PR #81's not-yet-activated disposable
+                // benchmarks and direct authorization unit tests.
+                return $site_key;
+            }
+            if (!is_string($nonce) ||
+                !preg_match('/^[a-f0-9]{64}$/D', $nonce)) { return null; }
+            return hash_hmac('sha256',
+                "ESP_FAST_GATE_SIGNING_EPOCH_V1\0" . $nonce, $site_key);
+        } catch (\Throwable $e) { return null; }
+    }
+
+    /** Must run with the HTTP reader STOPPED, after final catalog validation. */
+    public function rotate_ticket_signing_key() {
+        if (!$this->ready() || $this->serving()) { return false; }
+        try {
+            $nonce = bin2hex(random_bytes(32));
+        } catch (\Throwable $e) { return false; }
+        return $this->tx(function () use ($nonce) {
+            if ($this->db->querySingle(
+                "SELECT v FROM meta WHERE k='serving'") !== '0') {
+                throw new \RuntimeException('cannot rotate while serving');
+            }
+            $stmt = $this->db->prepare(
+                "INSERT INTO meta(k,v) VALUES('ticket_nonce', :nonce)
+                 ON CONFLICT(k) DO UPDATE SET v=excluded.v");
+            $stmt->bindValue(':nonce', $nonce, SQLITE3_TEXT);
+            if (!$stmt->execute()) {
+                throw new \RuntimeException('ticket nonce generation');
+            }
+        });
+    }
+
     public function set_path($path, $version, $blocked = false) {
         if (!is_string($path) || $path === '' || !is_int($version) || $version < 0) {
             return false;

@@ -253,12 +253,19 @@ final class ESP_Fast_Gate_Deployment {
                     self::rollback_enable($db);
                     return self::error('catalog_recheck_failed');
                 }
-                // 4. Start WP mutation/logout synchronization before serving.
+                // 4. Every re-activation must invalidate tickets copied
+                // before a legacy-mode logout. Legacy WP logout does not
+                // append SQLite revocations while Fast Gate is disabled.
+                if (!$db->rotate_ticket_signing_key()) {
+                    self::rollback_enable($db);
+                    return self::error('ticket_generation_failed');
+                }
+                // 5. Start WP mutation/logout synchronization before serving.
                 if (!self::write_active(true)) {
                     self::rollback_enable($db);
                     return self::error('active_option_failed');
                 }
-                // 5. Only now permit the standalone reader to serve media.
+                // 6. Only now permit the standalone reader to serve media.
                 if (!$db->set_serving(true)) {
                     self::rollback_enable($db);
                     return self::error('serving_start_failed');
