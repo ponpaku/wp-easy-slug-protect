@@ -1,10 +1,10 @@
 # Issue #80 / PR #81 — v0.7.41 → Fast Gate v2 validation record
 
 **Status: CI PASS, not cleared for production activation.**  
-**Verified commit:** [f8fe25ad1a8dc56c06c902e2ebe3770173d75941](https://github.com/ponpaku/wp-easy-slug-protect/commit/f8fe25ad1a8dc56c06c902e2ebe3770173d75941)  
-**Latest execution:** 2026-11-08 04:47 UTC (2026-11-08 13:47 JST).  
-**Latest CI:** https://github.com/ponpaku/wp-easy-slug-protect/actions/runs/42448161466  
-**Prior independent passing runs:** https://github.com/ponpaku/wp-easy-slug-protect/actions/runs/42444437752 and https://github.com/ponpaku/wp-easy-slug-protect/actions/runs/42426598832  
+**Verified commit:** [92639c42517da981a399ea7a0fc00457189dffca](https://github.com/ponpaku/wp-easy-slug-protect/commit/92639c42517da981a399ea7a0fc00457189dffca)  
+**Latest execution:** 2026-11-08 04:54 UTC (2026-11-08 13:54 JST).  
+**Latest CI:** https://github.com/ponpaku/wp-easy-slug-protect/actions/runs/42448563405  
+**Prior independent passing runs:** https://github.com/ponpaku/wp-easy-slug-protect/actions/runs/42448161466, https://github.com/ponpaku/wp-easy-slug-protect/actions/runs/42444437752, and https://github.com/ponpaku/wp-easy-slug-protect/actions/runs/42426598832  
 **Evidence:** Artifact `esp-fast-gate-v2-lifecycle-actual` (raw HTTP samples, comparison.json, stages.log, timings.csv, Apache logs; 14-day artifact retention).
 
 > This is a reproducible baseline for a **Draft**, not a release approval. A prior passing run recorded one invalid **-448 ms** `gate_build_cli` interval because the CI runner wall clock stepped backward. The latest successful run replaced it with Python `time.monotonic_ns` for CLI operation timing, confirmed a positive **460 ms** catalog build duration and also exercised standalone `wp esp gate-ledger gc`. The HTTP test uses the separately monotonic `time.perf_counter_ns`. The earlier invalid interval was never used in speed comparisons.
@@ -91,7 +91,7 @@ distribution ZIP**. It calls existing `ESP_Auth::process_login()`,
 real HTTP `Set-Cookie` and subsequent `Cookie` headers. Fast Gate routing
 remains a disposable Apache VirtualHost rule, **not a product feature**.
 
-The real WordPress HTTP scenarios passed **57 assertions**:
+The real WordPress HTTP scenarios passed **73 assertions**:
 
 - Normal session login issues both WordPress's session cookie and signed gate
   cookie; protected GET returns identical image bytes.
@@ -110,12 +110,23 @@ The real WordPress HTTP scenarios passed **57 assertions**:
   malformed Range requests are denied. HEAD and a valid single byte Range
   operate correctly.
 
+- **Injected actual MySQL DELETE failure** for both login kinds, separately:
+  the disposable WordPress test-only driver substitutes a failing SQL
+  DELETE against a missing table for the session or Remember Me row.
+  The original credential is confirmed to **remain in MySQL**, but the
+  old ticket receives HTTP 403 because SQLite revocation was recorded
+  first. WordPress logout reports failure (409 from the disposable
+  driver); it never silently treats the missing SQL deletion as success.
+  This verifies the intended partial-failure security contract without
+  changing production database schemas or using a mocked DB.
+
 The **8-worker mixed concurrency check** made 128 actual standalone HTTP GETs
 (64 authenticated and 64 anonymous) against the same protected file. Each
 authenticated request returned HTTP 200 with the expected body digest; each
 anonymous request returned HTTP 403. Local-runner latency observations:
-authenticated median **6.0817 ms**, p95 **8.1745 ms**; anonymous median
-**5.6955 ms**, p95 **8.4564 ms**. The 128-request burst is not a sustained
+authenticated median **3.1649 ms**, p95 **5.1485 ms**; anonymous median
+**3.0181 ms**, p95 **4.9853 ms** in the latest run. The earlier run recorded
+6.0817 / 8.1745 ms and 5.6955 / 8.4564 ms respectively. The 128-request burst is not a sustained
 throughput or max-worker benchmark.
 
 Sequential small-file benchmark on the same latest run (60 successful GETs
@@ -126,6 +137,8 @@ per mode and file; median/p95 in ms):
 | Protected, authorized | 18.0826 | 1.5654 | 11.551× | 19.8066 | 1.6449 |
 | Public | 16.9135 | 1.4580 | 11.600× | 21.1004 | 1.5238 |
 
+The latest passing run also measured protected sequential 8.7178 → 1.0303 ms (8.461×) and public 8.5255 → 0.9338 ms (9.130×) median. The observed speedup varies with the CI runner and request scheduling; do not extrapolate to production.
+
 Each HTTP result is checked for the distinct standalone response headers,
 matching file digest, no unauthorized disclosure, and fail-closed behavior.
 All metrics are loopback results from one shared Actions runner, not
@@ -135,7 +148,7 @@ production estimates. Raw test output is archived in
 ## Remaining release blockers / evidence limits
 
 1. **Not production-enabled.** The Apache route in this experiment is installed **only inside disposable CI**. Automatic activation, rollback and Rewrite bypass prevention remain separate engineering gates. LiteSpeed and Nginx Fast Gate routing were not benchmarked.
-2. **Browser UI / failure injection remain separate.** HTTP requests now exercise real WordPress password authentication, Remember Me refresh, session+Remember logout and password generation changes (with real MySQL and saved/returned cookies). However, the test uses a disposable test-only HTTP endpoint rather than the shipped shortcodes, browser UI, real nonce submission/redirects, and does not inject an actual logout SQL deletion failure. Those remain acceptance cases.
+2. **Browser UI / advanced failure injection remain separate.** HTTP requests now exercise real WordPress password authentication, Remember Me refresh, both-kind logout, password generation changes and actual SQL DELETE failures (with real MySQL and saved/returned cookies). However, the test uses a disposable endpoint rather than the shipped shortcodes, browser UI, real nonce submission/redirects and broader concurrent SQL/SQLite failures. Those remain acceptance cases.
 3. **No hard-kill / power-loss guarantee.** The SQLite WAL test exits a PHP process with a pending transaction; it does not simulate SIGKILL during fsync, a disk crash, corruption, external backup restore, or multi-host storage.
 4. **WP-Cron was explicitly executed via WP-CLI.** It verifies registered events and real Cron callbacks, not unattended triggering under low site traffic, cron daemon scheduling, or long-term orphan maintenance. The scheduled event's continuity and dedicated CLI GC both passed in the latest run.
 5. **No sustained load/scale conclusion:** 245 attachments, one protected path, tiny JPEG; an 8-worker/128-request parallel authorization test now passes, but larger files, >=100k attachments, higher parallelism, CPU/memory/I/O, p95/p99 under saturation and a runtime proof that the hot path boots neither WordPress nor MySQL remain to be assessed.
