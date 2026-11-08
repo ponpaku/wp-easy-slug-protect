@@ -224,6 +224,11 @@ if($phase==='verify'){
         'restore failed or B retained a stale denial');
     fg_race_assert($db->set_serving(false),
         'cannot stop test-only gate after race');
+    // A full catalog rebuild is forbidden while the active option is ON.
+    // Remove the test-only override before exercising its real contract.
+    remove_filter('pre_option_'.ESP_Fast_Gate_WP::ACTIVE_OPTION,$active);
+    fg_race_assert(!ESP_Fast_Gate_WP::active(),
+        'cannot disable test-only gate before catalog rebuild');
     $rebuilt=ESP_Fast_Gate_WP::build_catalog();
     if (!$rebuilt) {
         $state_table=ESP_Media_Index::state_table();
