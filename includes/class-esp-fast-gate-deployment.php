@@ -26,6 +26,11 @@ final class ESP_Fast_Gate_Deployment {
         add_action('admin_post_esp_fast_gate_recover', [self::class, 'admin_recover']);
         add_filter('pre_update_option_' . ESP_Config::OPTION_KEY,
             [self::class, 'guard_media_disable'], 4, 2);
+        // Before #81's runtime UPDATING marker and WordPress file swap:
+        // a live standalone reader must not survive code replacement while
+        // the WordPress-side SQLite revocation bridge is unavailable.
+        add_filter('upgrader_pre_install',
+            [self::class, 'before_plugin_upgrade'], 5, 2);
     }
 
     public static function route_fast() {
@@ -448,7 +453,9 @@ final class ESP_Fast_Gate_Deployment {
                 'Apache/2.4 (WP-CLI target)' : 'LiteSpeed (WP-CLI target)';
         }
         try {
-            if (!self::route_fast() && !ESP_Fast_Gate_WP::active()) { return true; }
+            $existing = ESP_Fast_Gate_WP::ledger(false);
+            if (!self::route_fast() && !ESP_Fast_Gate_WP::active() &&
+                (!$existing || !$existing->serving())) { return true; }
             if (!self::server_supported()) { return self::error('unsupported_server'); }
             if (!self::lock()) { return self::error('transition_locked'); }
             try {
@@ -479,6 +486,37 @@ final class ESP_Fast_Gate_Deployment {
                 $_SERVER['SERVER_SOFTWARE'] = $original_server;
             }
         }
+    }
+
+    /**
+     * Keep already-issued tickets and SQLite authorization synchronized
+     * across plugin code updates. A supported HTTP updater transparently
+     * restores the existing WordPress/PHP media route before the files
+     * change. Unknown/serverless updater contexts refuse the install until
+     * an administrator disables Fast Gate from a verified HTTP context.
+     */
+    public static function before_plugin_upgrade($response, $extra) {
+        if (is_wp_error($response) || !is_array($extra) ||
+            (isset($extra['type']) && $extra['type'] !== 'plugin') ||
+            (isset($extra['action']) && $extra['action'] !== 'update') ||
+            ($extra['plugin'] ?? null) !==
+                plugin_basename(ESP_PATH . 'easy-slug-protect.php')) {
+            return $response;
+        }
+        $db = ESP_Fast_Gate_WP::ledger(false);
+        $serving = $db && $db->serving();
+        if (!self::route_fast() && !ESP_Fast_Gate_WP::active() && !$serving) {
+            return $response;
+        }
+        if (!self::server_supported()) {
+            return new WP_Error('esp_gate_upgrade_needs_http_disable',
+                '高速ゲートを管理画面から無効化した後、プラグインの更新を再実行してください。');
+        }
+        if (self::disable() !== true) {
+            return new WP_Error('esp_gate_upgrade_legacy_restore_failed',
+                '従来のメディア配信経路へ安全に切り替えられないため、プラグインの更新を中止しました。');
+        }
+        return $response;
     }
 
     public static function register_admin() {

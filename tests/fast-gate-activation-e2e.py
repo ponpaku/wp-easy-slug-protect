@@ -135,6 +135,18 @@ with fresh_opener.open(BASE + "/wp-content/uploads/fg-life-protected.jpg",
                        timeout=12) as res:
     check(res.status == 200 and len(res.read()) > 100,
           "new generation ticket authorizes the protected image")
+unknown_updater = command("upgrade-no-server", 409)
+check(unknown_updater["error"] == "esp_gate_upgrade_needs_http_disable" and
+      unknown_updater["route"] == "fast" and unknown_updater["serving"],
+      "unknown-server updater cannot replace PHP while Fast Gate is live")
+upgrade = command("upgrade-preflight", 200)
+check(upgrade["success"] and upgrade["route"] == "legacy" and
+      not upgrade["active"] and not upgrade["serving"],
+      "verified updater pre-install restores WordPress route before code swap")
+with fresh_opener.open(BASE + "/wp-content/uploads/fg-life-protected.jpg",
+                       timeout=12) as res:
+    check(res.status == 200 and len(res.read()) > 100,
+          "WordPress credential remains valid after upgrade route fallback")
 last = command("disable", 200)
 check(last["success"] and last["route"] == "legacy" and
       not last["serving"] and not last["active"],
@@ -146,4 +158,5 @@ print("FG_VERIFIED_DEPLOYMENT_HTTP " + json.dumps(
     {"checks_passed": passed, "activation": "passed",
      "failed_probe_rollback": "passed", "disable_to_legacy": "passed",
      "generation_rotation_after_legacy_logout": "passed",
-     "stale_lock_recovery": "passed"}))
+     "stale_lock_recovery": "passed",
+     "upgrade_preinstall_fallback": "passed"}))

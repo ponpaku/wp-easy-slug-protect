@@ -33,7 +33,8 @@ add_action('init', static function () {
     if (in_array($action, [
         'deploy-prepare','deploy-enable-fail-probe','deploy-enable','deploy-disable',
         'deploy-status','deploy-legacy-logout',
-        'deploy-inject-stale-lock','deploy-recover'
+        'deploy-inject-stale-lock','deploy-recover',
+        'deploy-upgrade-preflight','deploy-upgrade-no-server'
     ], true)) {
         // Deployment endpoint is a disposable fixture only. Unlike the auth
         // fixture it never forces the active option or serving flag.
@@ -65,6 +66,22 @@ add_action('init', static function () {
             }
         } elseif ($action === 'deploy-recover') {
             $result=ESP_Fast_Gate_Deployment::recover();
+        } elseif (in_array($action,
+            ['deploy-upgrade-preflight','deploy-upgrade-no-server'], true)) {
+            // Run the product pre-install callback without installing files.
+            // One case simulates a WP-Cron/CLI update lacking server context.
+            $previous=$_SERVER['SERVER_SOFTWARE'] ?? null;
+            if ($action === 'deploy-upgrade-no-server') {
+                unset($_SERVER['SERVER_SOFTWARE']);
+            }
+            try {
+                $result=ESP_Fast_Gate_Deployment::before_plugin_upgrade(
+                    true, ['type'=>'plugin','action'=>'update','plugin'=>
+                        plugin_basename(ESP_PATH.'easy-slug-protect.php')]);
+            } finally {
+                if ($previous === null) { unset($_SERVER['SERVER_SOFTWARE']); }
+                else { $_SERVER['SERVER_SOFTWARE']=$previous; }
+            }
         } elseif ($action === 'deploy-enable-fail-probe') {
             $failure = static function ($pre,$args,$url) {
                 if (strpos($url,'/esp-fast-gate-route-') !== false) {

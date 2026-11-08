@@ -110,6 +110,29 @@ legacy Rewrite, then disables Fast Gate synchronization. Failed
 restoration retains the non-serving gate and requires operator action.
 The lock is never silently stolen by ordinary requests.
 
+## Plugin updates
+
+The plugin must not replace the PHP gate or authorization bridge while the
+standalone reader is still serving. On a matching
+`upgrader_pre_install` event for Easy Slug Protect, before the existing
+`esp_runtime_state=UPDATING` marker and actual filesystem replacement:
+
+- In a verified Apache/LiteSpeed HTTP context, the deployment controller
+  first **stops serving and restores the existing legacy WordPress/PHP
+  Rewrite**, then permits the normal updater to continue.
+- In WP-Cron/WP-CLI or unknown server contexts where the legacy route
+  cannot be verified, the installation is **rejected with a WordPress
+  error**, leaving the running gate unchanged. The administrator can disable
+  the Fast Gate from the supported HTTP settings page and retry the update.
+- After the update, Fast Gate remains OFF. The administrator can explicitly
+  prepare/enable it again, which also rotates the signing nonce.
+
+This prevents a new-version PHP file swap from silently stranding the
+standalone reader with old policy and no WordPress-side revocation updates.
+This is a guard for the normal core plugin updater path; bypassing WordPress
+with direct filesystem/FTP replacement remains an unsupported operation while
+Fast Gate is active.
+
 ## HTTP security probe design
 
 The standalone gate accepts a probe only if the request provides an
@@ -134,6 +157,9 @@ MySQL 8, SQLite3 and Apache Actions lifecycle:
 - a simulated stale lock plus an installed non-serving gate Rewrite,
   followed by explicit recovery to the WordPress/PHP route;
 - no HTTP probe-file remnants after success or forced failure;
+- a plugin-update pre-install hook that restores the legacy media route
+  before code replacement, and rejects an unknown-server update while
+  leaving the live reader unaffected;
 - successful production-class controller installation and HTTP traffic
   (public, protected, unknown media);
 - real WordPress login after activation producing a signed media ticket;
