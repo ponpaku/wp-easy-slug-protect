@@ -17,9 +17,16 @@ jobs:
         uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.php }}
+          extensions: sqlite3
           coverage: none
       - name: Lint PHP source files
         run: find . -name '*.php' -print0 | xargs -0 -n1 php -l
+      - name: Test Fast Gate v2 token and SQLite fail-closed core
+        run: php tests/security-fast-gate-core-test.php
+      - name: Test Fast Gate v2 automatic PHP-key provisioning
+        run: php tests/security-fast-gate-provision-test.php
+      - name: Test Fast Gate Remember Me stale/missing credential handling
+        run: php tests/security-fast-gate-remember-test.php
       - name: Lint admin JavaScript
         run: node --check admin/esp-admin.js
       - name: Test login attempt reservation behavior
@@ -87,6 +94,13 @@ jobs:
           ESP_TEST_DB_PASSWORD: test-password
           ESP_TEST_DB_NAME: esp_test
         run: php tests/security-mysql-integration.php
+      - name: Verify Remember Me refresh race against real MySQL
+        env:
+          ESP_TEST_DB_HOST: 127.0.0.1
+          ESP_TEST_DB_USER: root
+          ESP_TEST_DB_PASSWORD: test-password
+          ESP_TEST_DB_NAME: esp_test
+        run: php tests/security-fast-gate-remember-mysql.php
       - name: Exercise dedicated media index and safety states in MySQL
         env:
           ESP_TEST_DB_HOST: 127.0.0.1
@@ -124,6 +138,60 @@ jobs:
           coverage: none
       - name: Real WordPress schema, release and upgrader fixtures
         run: bash .github/scripts/test-wordpress-updates.sh
+  fast-gate-real-wordpress:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
+          MYSQL_DATABASE: esp_fast_gate_wp
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mysqli, sqlite3
+          coverage: none
+      - name: Exercise Fast Gate v2 with REAL WordPress, MySQL and SQLite
+        env:
+          ESP_ALLOW_DISPOSABLE_DB: "1"
+        run: bash .github/scripts/test-fast-gate-wordpress.sh
+  fast-gate-upgrade-lifecycle:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
+          MYSQL_DATABASE: esp_fg_lifecycle
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mysqli, sqlite3
+          coverage: none
+      - name: Upgrade released ZIP, verify lifecycle and measure Apache HTTP
+        env:
+          ESP_ALLOW_DISPOSABLE_DB: "1"
+        run: bash .github/scripts/test-fast-gate-lifecycle.sh
+      - name: Archive Fast Gate lifecycle timings and HTTP comparisons
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp-fast-gate-v2-lifecycle-actual
+          path: ${{ runner.temp }}/esp-fast-gate-lifecycle/*
+          if-no-files-found: warn
+          retention-days: 14
   wordpress-apache-http:
     runs-on: ubuntu-latest
     services:

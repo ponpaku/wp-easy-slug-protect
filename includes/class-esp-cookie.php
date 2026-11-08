@@ -143,6 +143,20 @@ class ESP_Cookie {
     public function clear_all_cookies_for_path($path_settings) {
         $this->clear_session_cookie($path_settings['id']);
         $this->clear_remember_cookies_for_path($path_settings);
+        $this->clear_gate_ticket($path_settings['id']);
+    }
+
+    /** A signed, short-lived Fast Gate ticket is separate from the WP login token. */
+    public function queue_gate_ticket($path_id, $ticket, $expires) {
+        $this->pending_cookies['esp_gate_' . $path_id] = [
+            'value' => $ticket, 'expires' => $expires,
+        ];
+    }
+
+    public function clear_gate_ticket($path_id) {
+        $this->pending_cookies['esp_gate_' . $path_id] = [
+            'value' => '', 'expires' => time() - HOUR_IN_SECONDS,
+        ];
     }
 
     /**
@@ -151,6 +165,7 @@ class ESP_Cookie {
      * @param string $path_id パスID
      */
     public function clear_session_cookie($path_id) {
+        $this->clear_gate_ticket($path_id);
         $this->pending_cookies['esp_auth_' . $path_id] = [
             'value' => '',
             'expires' => time() - HOUR_IN_SECONDS
@@ -164,6 +179,7 @@ class ESP_Cookie {
      */
     public function clear_remember_cookies_for_path($path_settings) {
         $path_id = $path_settings['id'];
+        $this->clear_gate_ticket($path_id);
         foreach (["esp_remember_id_{$path_id}", "esp_remember_token_{$path_id}"] as $name) {
             $this->pending_cookies[$name] = [
                 'value' => '',
