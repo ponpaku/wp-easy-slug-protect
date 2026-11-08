@@ -12,11 +12,11 @@ container="esp-fg-bench-${GITHUB_RUN_ID:-local}-$$"
 started=0
 race_pid=""
 cleanup() {
+    rc=$?
     if [[ -n "$race_pid" ]]; then
         kill "$race_pid" >/dev/null 2>&1 || true
         wait "$race_pid" >/dev/null 2>&1 || true
     fi
-    rc=$?
     if [[ $started -eq 1 ]]; then
         docker logs "$container" >"$report_root/apache.log" 2>&1 || true
         docker rm -f "$container" >/dev/null 2>&1 || true
@@ -33,6 +33,7 @@ trap cleanup EXIT
 # WordPress release CDN sometimes returns intermittent 504 on Actions.
 # Fall back to its separately hosted tagged source archive, and assert the
 # exact WordPress core version after extraction (never use "latest").
+echo "FG_DOWNLOAD WordPress core exact release 7.1.3"
 wordpress_archive="$root/wp-7.1.3.tar.gz"
 if curl --fail --silent --show-error --location --retry 3 --retry-all-errors \
     --retry-delay 2 https://wordpress.org/wordpress-7.1.3.tar.gz \
@@ -51,16 +52,22 @@ grep -Eq "wp_version = '7\\.1\\.3';" "$root/wordpress/wp-includes/version.php" |
     echo "Downloaded WordPress source has an unexpected version" >&2
     exit 1
 }
-curl -fsSL --retry 2 \
+echo "FG_DOWNLOAD WP-CLI PHAR"
+curl -fsSL --retry 6 --retry-all-errors --retry-delay 2 \
     https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar \
     -o "$root/wp-cli.phar"
+echo "FG_DOWNLOAD WP-CLI downloaded"
 mkdir -p "$root/release"
-curl -fsSL --retry 2 \
+echo "FG_DOWNLOAD published v0.7.41 ZIP"
+curl -fsSL --retry 6 --retry-all-errors --retry-delay 2 \
     https://github.com/ponpaku/wp-easy-slug-protect/releases/download/v0.7.41/easy-slug-protect-0.7.41.zip \
     -o "$root/release/easy-slug-protect-0.7.41.zip"
-curl -fsSL --retry 2 \
+echo "FG_DOWNLOAD release ZIP downloaded"
+echo "FG_DOWNLOAD published SHA256 manifest"
+curl -fsSL --retry 6 --retry-all-errors --retry-delay 2 \
     https://github.com/ponpaku/wp-easy-slug-protect/releases/download/v0.7.41/easy-slug-protect-0.7.41.zip.sha256 \
     -o "$root/release/easy-slug-protect-0.7.41.zip.sha256"
+echo "FG_DOWNLOAD SHA256 manifest downloaded"
 (cd "$root/release"; sha256sum -c easy-slug-protect-0.7.41.zip.sha256)
 echo 'FG_LIFECYCLE Verified genuine published v0.7.41 ZIP digest' | tee -a "$report_root/stages.log"
 
