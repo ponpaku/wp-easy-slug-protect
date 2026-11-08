@@ -69,8 +69,20 @@ if($phase==='setup'){
     // baseline catalog with BOTH, then detach B via a real metadata update.
     fg_race_assert(update_attached_file($owner_b,$p_abs),
         'B cannot claim shared path through WordPress');
-    fg_race_assert(ESP_Media_Index::reindex_attachment($owner_b),
-        'B index did not publish shared owner');
+    ESP_Media_Index::finish_noop_writes();
+    $state_table=ESP_Media_Index::state_table();
+    $pre_index=$wpdb->get_row($wpdb->prepare(
+        "SELECT status,pending_count,revision FROM $state_table
+         WHERE attachment_id=%d", $owner_b),ARRAY_A);
+    fg_race_assert((int)($pre_index['pending_count']??-1)===0,
+        'B metadata update left unfinished pending writers: '.
+        wp_json_encode($pre_index));
+    $indexed=ESP_Media_Index::reindex_attachment($owner_b);
+    $index_state=$wpdb->get_row($wpdb->prepare(
+        "SELECT status,pending_count,revision FROM $state_table
+         WHERE attachment_id=%d",$owner_b),ARRAY_A);
+    fg_race_assert($indexed,
+        'B index did not publish shared owner: '.wp_json_encode($index_state));
     $ambiguous=ESP_Media_Index::resolve($p_abs);
     fg_race_assert($ambiguous['status']==='ambiguous',
         'real MySQL shared ownership was not ambiguous');
