@@ -29,12 +29,12 @@ def check(ok, text):
 
 def command(action, status):
     code, body, _ = request("/?esp_fg_ci_auth=deploy-" + action)
-    check(code == status, f"{action} HTTP code {code}; expected {status}")
     try:
         data = json.loads(body)
     except Exception as e:
         raise RuntimeError(f"Deployment {action} non-JSON {code}: {body[:180]!r}") from e
-    print("FG_DEPLOY_ACTION " + json.dumps(data), flush=True)
+    print("FG_DEPLOY_ACTION HTTP=" + str(code) + " " + json.dumps(data), flush=True)
+    check(code == status, f"{action} HTTP code {code}; expected {status}; {data}")
     return data
 
 
