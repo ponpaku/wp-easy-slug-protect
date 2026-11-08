@@ -457,9 +457,11 @@ APACHE
 docker exec "$container" apache2ctl configtest
 docker exec "$container" apache2ctl graceful
 sleep 1
+# Real Apache PHP needs write access to the existing ESP-managed
+# uploads/.htaccess; the initial WordPress WP-CLI install ran as the runner.
+sudo chown -R 33:33 "$uploads"
 # Check that no test-only server-level rewrite remains before deployment.
-grep -Fq 'RewriteRule ^(.+)
- "$uploads/.htaccess"
+grep -Fq 'RewriteRule ^(.+)$' "$uploads/.htaccess"
 ! grep -Fq '# Fast Gate: no static-file existence shortcut' "$uploads/.htaccess"
 python3 tests/fast-gate-activation-e2e.py \
     | tee -a "$report_root/stages.log"
