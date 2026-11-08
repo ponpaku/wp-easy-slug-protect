@@ -408,4 +408,38 @@ result={'environment':'GitHub Actions shared runner, disposable Apache 2.4/PHP 8
 (r/'comparison.json').write_text(json.dumps(result,indent=2)+'\n')
 print('FG_HTTP_COMPARISON '+json.dumps(result))
 PY
-echo 'PASS: real v0.7.41 to PR, staged index/ledger, CLI/manual/Cron/crash/WAL, and Apache HTTP performance'
+# Exercise the REAL product activation controller, not the test-only
+# VirtualHost rule used for the independent throughput benchmark above.
+# The WordPress install URL is localhost:8096. Give Apache a local listener
+# on the same port so wp_remote_get() loopback can probe its installed route.
+docker exec "$container" sh -c "printf 'Listen 80\nListen 8096\n' > /etc/apache2/ports.conf"
+docker exec -i "$container" tee /etc/apache2/sites-enabled/000-default.conf \
+    >/dev/null <<'APACHE'
+<VirtualHost *:80>
+    ServerName localhost
+    DocumentRoot /var/www/html
+    ErrorLog ${APACHE_LOG_DIR}/error.log
+    CustomLog ${APACHE_LOG_DIR}/access.log combined
+</VirtualHost>
+<VirtualHost *:8096>
+    ServerName localhost
+    DocumentRoot /var/www/html
+    ErrorLog ${APACHE_LOG_DIR}/error.log
+    CustomLog ${APACHE_LOG_DIR}/access.log combined
+</VirtualHost>
+APACHE
+docker exec "$container" apache2ctl configtest
+docker exec "$container" apache2ctl graceful
+sleep 1
+# Check that no test-only server-level rewrite remains before deployment.
+grep -Fq 'RewriteRule ^(.+)
+ "$uploads/.htaccess"
+! grep -Fq '# Fast Gate: no static-file existence shortcut' "$uploads/.htaccess"
+python3 tests/fast-gate-activation-e2e.py \
+    | tee -a "$report_root/stages.log"
+# After the actual product deactivation, the managed ESP Rewrite must be
+# restored and the separate option marker must not remain "fast".
+! grep -Fq '# Fast Gate: no static-file existence shortcut' "$uploads/.htaccess"
+grep -Fq 'index.php?esp-media=' "$uploads/.htaccess"
+echo 'PASS: released upgrade, ledger/Cron/WAL, HTTP benchmark, AND verified product activation/rollback'
+

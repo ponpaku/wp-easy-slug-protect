@@ -30,6 +30,43 @@ add_action('init', static function () {
         exit;
     }
     $action = (string)$_GET['esp_fg_ci_auth'];
+    if (in_array($action, [
+        'deploy-enable-fail-probe','deploy-enable','deploy-disable','deploy-status'
+    ], true)) {
+        // Deployment endpoint is a disposable fixture only. Unlike the auth
+        // fixture it never forces the active option or serving flag.
+        $state = static function () {
+            $db = ESP_Fast_Gate_WP::ledger(false);
+            return ['active'=>ESP_Fast_Gate_WP::active(),
+                'route'=>ESP_Fast_Gate_Deployment::route_fast()?'fast':'legacy',
+                'serving'=>$db && $db->serving(),
+                'prepared'=>ESP_Fast_Gate_Deployment::prepared()];
+        };
+        $result = true;
+        if ($action === 'deploy-enable-fail-probe') {
+            $failure = static function ($pre,$args,$url) {
+                if (strpos($url,'/esp-fast-gate-route-') !== false) {
+                    return new WP_Error('esp_ci_http_probe_forced_failure');
+                }
+                return $pre;
+            };
+            add_filter('pre_http_request',$failure,10,3);
+            try { $result=ESP_Fast_Gate_Deployment::enable(); }
+            finally { remove_filter('pre_http_request',$failure,10); }
+        } elseif ($action === 'deploy-enable') {
+            $result=ESP_Fast_Gate_Deployment::enable();
+        } elseif ($action === 'deploy-disable') {
+            $result=ESP_Fast_Gate_Deployment::disable();
+        }
+        $response=['action'=>$action,'success'=>$result===true,
+            'error'=>$result instanceof WP_Error?$result->get_error_code():null]
+            +$state();
+        status_header($result===true?200:409);
+        header('Cache-Control: no-store');
+        header('Content-Type: application/json');
+        echo wp_json_encode($response);
+        exit;
+    }
     $supported = ['session', 'remember', 'redirect-session',
         'redirect-remember', 'refresh', 'logout',
         'logout-fail-session', 'logout-fail-remember', 'rotate'];
