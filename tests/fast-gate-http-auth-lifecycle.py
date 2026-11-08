@@ -221,6 +221,22 @@ action(both_jar, "logout")
 gate(403, first_session_ticket)
 gate(403, remember_ticket)
 
+# Force real MySQL DELETE errors for each login kind separately. The
+# canonical credential remains in MySQL but the pre-delete SQLite revocation
+# MUST still reject the previously valid signed gate ticket.
+for kind in ("session", "remember"):
+    failing_jar = http.cookiejar.CookieJar()
+    action(failing_jar, kind)
+    pre_failure = cookie_header(failing_jar)
+    gate(200, pre_failure)
+    failure = action(failing_jar, "logout-fail-" + kind, expect=False)
+    check(failure.get("injected_delete_failed") is True,
+          f"Real MySQL {kind} DELETE failure injected")
+    check(failure.get("target_row_retained") is True,
+          f"Real MySQL {kind} credential survived failed deletion")
+    gate(403, pre_failure)
+    check(True, f"Revocation persists despite failed {kind} SQL DELETE")
+
 # Change the canonical WordPress password generation with real option
 # hooks and an active test-only gate. Old tickets must fail; a fresh
 # WordPress login must issue a new version and succeed.
