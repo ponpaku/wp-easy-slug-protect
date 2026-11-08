@@ -50,10 +50,17 @@ stage() {
 measure() {
     local name="$1"; shift
     local start end
-    start="$(date +%s%3N)"
+    # Wall-clock time can step backward on shared CI runners.
+    # A monotonic counter across processes avoids negative elapsed times.
+    start="$(python3 -c 'import time; print(time.monotonic_ns()//1000000)')"
     "$@"
-    end="$(date +%s%3N)"
-    printf '%s,%s\n' "$name" "$(( end-start ))" | tee -a "$report_root/timings.csv"
+    end="$(python3 -c 'import time; print(time.monotonic_ns()//1000000)')"
+    local elapsed="$(( end-start ))"
+    if (( elapsed < 0 )); then
+        echo "Invalid negative monotonic elapsed time for $name" >&2
+        return 1
+    fi
+    printf '%s,%s\n' "$name" "$elapsed" | tee -a "$report_root/timings.csv"
 }
 printf 'stage,elapsed_ms\n' >"$report_root/timings.csv"
 
@@ -137,6 +144,11 @@ measure gate_cron_repair_gc env ESP_FG_CI_FORCE_GATE=1 \
     php "$root/wp-cli.phar" --allow-root --path="$ESP_WP_ROOT" \
     cron event run esp_media_index_v1_batch
 stage cron-check
+# Confirm recurring Cron registration survives execution and the standalone
+# WP-CLI GC operates on the same completed ledger without dropping any
+# unconfirmed revocation.
+wp cron event list --field=hook | grep -Fxq esp_media_index_v1_batch
+measure gate_gc_cli wp esp gate-ledger gc
 # Ordinary WordPress still cannot have an active Fast Gate option.
 stage catalog-status
 

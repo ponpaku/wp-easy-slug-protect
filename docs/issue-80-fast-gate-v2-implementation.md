@@ -123,6 +123,16 @@ or clean reinitialization with key handling will be required before launch.
    demonstrably zero MySQL queries per media request.
 8. **Issues #67/#79**: existing media index correctness issues are unresolved.
 
+## Released v0.7.41 upgrade and measured operations
+
+The real published v0.7.41 ZIP → Draft PR ZIP compatibility and isolated
+Apache/SQLite operations test has passed in Actions run
+[42426598832](https://github.com/ponpaku/wp-easy-slug-protect/actions/runs/42426598832).
+It also caught and fixed a release packaging omission of `gate/`.
+See [full lifecycle/measurement record](issue-80-fast-gate-v2-lifecycle-validation.md)
+for verified cases, timings, harness limitations and remaining production blockers.
+The test uses test-only Rewrite routing and does **not** enable Fast Gate for production.
+
 ## Review request
 
 Review protocol correctness, cookie forgery/expiry, key isolation, accidental
