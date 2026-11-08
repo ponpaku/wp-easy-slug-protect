@@ -31,7 +31,7 @@ add_action('init', static function () {
     }
     $action = (string)$_GET['esp_fg_ci_auth'];
     if (in_array($action, [
-        'deploy-enable-fail-probe','deploy-enable','deploy-disable','deploy-status'
+        'deploy-prepare','deploy-enable-fail-probe','deploy-enable','deploy-disable','deploy-status'
     ], true)) {
         // Deployment endpoint is a disposable fixture only. Unlike the auth
         // fixture it never forces the active option or serving flag.
@@ -43,7 +43,9 @@ add_action('init', static function () {
                 'prepared'=>ESP_Fast_Gate_Deployment::prepared()];
         };
         $result = true;
-        if ($action === 'deploy-enable-fail-probe') {
+        if ($action === 'deploy-prepare') {
+            $result=ESP_Fast_Gate_Deployment::prepare();
+        } elseif ($action === 'deploy-enable-fail-probe') {
             $failure = static function ($pre,$args,$url) {
                 if (strpos($url,'/esp-fast-gate-route-') !== false) {
                     return new WP_Error('esp_ci_http_probe_forced_failure');

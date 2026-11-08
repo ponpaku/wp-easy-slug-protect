@@ -122,8 +122,20 @@ final class ESP_Fast_Gate_Deployment {
         if (self::route_fast() || ESP_Fast_Gate_WP::active()) {
             return self::error('already_routed');
         }
-        if (!ESP_Media_Index::enabled() || !ESP_Media_Index::ready()) {
-            return self::error('index_not_ready');
+        // Preparing the Fast Gate is an explicit administrator opt-in to the
+        // *existing* incremental media index. Do not require a separate hidden
+        // option change or undocumented WP-CLI command.
+        if (!ESP_Media_Index::ready()) {
+            ESP_Media_Index::run_batch();
+            if (!ESP_Media_Index::ready()) {
+                return self::error('index_build_pending');
+            }
+        }
+        if (!ESP_Media_Index::enabled()) {
+            update_option(ESP_Media_Index::ENABLE_OPTION, '1', false);
+            if (!ESP_Media_Index::enabled()) {
+                return self::error('index_enable_failed');
+            }
         }
         $dir = ESP_Fast_Gate_WP::private_dir();
         if (!$dir && !ESP_Fast_Gate_WP::provision()) {

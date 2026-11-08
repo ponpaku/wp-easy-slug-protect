@@ -34,13 +34,19 @@ def command(action, status):
         data = json.loads(body)
     except Exception as e:
         raise RuntimeError(f"Deployment {action} non-JSON {code}: {body[:180]!r}") from e
+    print("FG_DEPLOY_ACTION " + json.dumps(data), flush=True)
     return data
 
 
 before = command("status", 200)
 check(before["route"] == "legacy" and before["serving"] is False and
-      before["active"] is False and before["prepared"] is True,
-      "before activation must be prepared and fully disabled")
+      before["active"] is False,
+      "before preparation must be fully disabled")
+print("FG_DEPLOY_STATUS_BEFORE " + json.dumps(before), flush=True)
+prepared = command("prepare", 200)
+check(prepared["success"] is True and prepared["prepared"] is True,
+      "explicit preparation must opt-in the index and verify catalog")
+print("FG_DEPLOY_PREPARED " + json.dumps(prepared), flush=True)
 
 failed = command("enable-fail-probe", 409)
 check(failed["error"] == "esp_gate_http_probe_failed" and
