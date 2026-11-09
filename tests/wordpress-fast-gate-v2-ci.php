@@ -71,6 +71,17 @@ foreach ([$public_file,$private_file] as $file) {
     fg_wp_assert(file_put_contents($file, $jpeg) === strlen($jpeg),
         'cannot write fixture image');
 }
+// WordPress metadata may retain image derivatives that were pruned or not
+// copied during migration. The index must keep ownership evidence for those
+// paths, but the initial SQLite catalog must never make them public.
+$missing_derivatives = [
+    'public' => 'fg-real-missing-public-derivative.jpg',
+    'private' => 'fg-real-missing-private-derivative.jpg',
+];
+foreach ($missing_derivatives as $name) {
+    fg_wp_assert(!file_exists($uploads['basedir'] . '/' . $name),
+        'missing-derivative test fixture must be physically absent');
+}
 $ids = [];
 foreach (['public'=>$public_file,'private'=>$private_file] as $kind=>$file) {
     $id = wp_insert_attachment([
@@ -85,7 +96,14 @@ foreach (['public'=>$public_file,'private'=>$private_file] as $kind=>$file) {
     update_attached_file($id, $file);
     fg_wp_assert(realpath(get_attached_file($id)) === realpath($file),
         'attached_file ' . $kind);
-    $meta = ['file' => basename($file), 'sizes'=>[], 'width'=>2, 'height'=>2];
+    $meta = [
+        'file' => basename($file),
+        'sizes' => ['missing'=>[
+            'file' => $missing_derivatives[$kind],
+            'width' => 1, 'height' => 1, 'mime-type' => 'image/jpeg',
+        ]],
+        'width' => 2, 'height' => 2,
+    ];
     fg_wp_assert((bool)wp_update_attachment_metadata($id,$meta),
         'wp_update_attachment_metadata ' . $kind);
 }
@@ -116,6 +134,15 @@ fg_wp_assert($ledger->get_media($public_name)['policy'] === 'public',
     'initial public SQLite policy');
 fg_wp_assert($ledger->get_media($private_name)['policy'] === 'protected',
     'initial protected SQLite policy');
+foreach ($missing_derivatives as $kind => $name) {
+    fg_wp_assert(ESP_Media_Index::resolve($uploads['basedir'].'/'.$name)['status'] === 'error',
+        'resolver must never authorize a physically missing derivative');
+    $entry = $ledger->get_media($name);
+    fg_wp_assert($entry !== null && $entry['policy'] === 'deny' &&
+        $entry['path_id'] === '',
+        'initial catalog must explicitly deny missing derivative: ' . $kind);
+}
+fg_wp_stage('MISSING_WORDPRESS_DERIVATIVES_DENIED_DURING_CATALOG_BUILD');
 fg_wp_stage('REAL_SQLITE_CATALOG_BUILT_INACTIVE');
 
 // The production active-option remains prohibited. ONLY the current PHP
@@ -137,6 +164,19 @@ fg_wp_assert($allowed['status']===200 && $denied['status']===403,
     'standalone public/protected policies');
 fg_wp_assert($wpdb->num_queries===$before_queries,
     'standalone media authorization invoked MySQL');
+// A missing derivative could reappear through FTP or a delayed thumbnail
+// worker, bypassing WordPress metadata hooks. The deny entry must NOT become
+// an authorization just because the file now exists.
+$reborn = $uploads['basedir'] . '/' . $missing_derivatives['public'];
+fg_wp_assert(file_put_contents($reborn, $jpeg) === strlen($jpeg),
+    'materialize missing derivative outside WordPress metadata hooks');
+$reborn_status = ESP_Fast_Gate_Server::authorize(
+    $prefix.$missing_derivatives['public'], [], $site,
+    $keys['root'], $prefix, $keys['sig'], $keys['id'], $ledger);
+fg_wp_assert($reborn_status['status'] === 403,
+    'newly materialized previously missing derivative must remain denied');
+fg_wp_assert(unlink($reborn), 'remove disposable reborn-derivative fixture');
+fg_wp_stage('MISSING_DERIVATIVE_REAPPEARANCE_REMAINS_DENIED');
 fg_wp_stage('STANDALONE_GATE_ZERO_MYSQL');
 
 fg_wp_assert((bool)update_post_meta($ids['public'], ESP_Media_Index::PROTECTION_META, $path_id),
