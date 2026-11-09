@@ -454,6 +454,10 @@ class ESP_Admin_Menu {
 
                 <div class="esp-section">
                     <h2><?php _e('メディア配信設定', $text_domain); ?></h2>
+                    <p class="description">
+                        <?php esc_html_e('高速配信への切替は、通常の設定を保存した後に下部の高速ゲートから行えます。', $text_domain); ?>
+                        <a href="#esp-fast-gate"><?php esc_html_e('高速ゲートの設定へ', $text_domain); ?></a>
+                    </p>
                     <table class="form-table">
                         <tr>
                             <th scope="row"><?php _e('メディア保護', $text_domain); ?></th>
@@ -689,6 +693,13 @@ class ESP_Admin_Menu {
 
                 <?php submit_button(); ?>
             </form>
+            <?php
+            // Keep deployment actions separate from the options.php settings
+            // form. Nested forms would lose nonces and could save settings.
+            if (class_exists('ESP_Fast_Gate_Deployment')) {
+                ESP_Fast_Gate_Deployment::render_settings_section();
+            }
+            ?>
         </div>
         <?php
     }
