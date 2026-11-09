@@ -233,7 +233,20 @@ final class ESP_Fast_Gate_WP {
             $id_owner = isset($record['attachment_id']) ? (int)$record['attachment_id'] : 0;
             if (!ESP_Media_Index::valid_path($file) || $id_owner <= 0) { return false; }
             $owners[$id_owner][] = $file;
-            $result = ESP_Media_Index::resolve($root . '/' . $file);
+            // Index ownership is derived from WordPress metadata, which may
+            // list derivatives that are no longer present on disk. A missing
+            // or non-file path must never abort the entire initial catalog:
+            // persist an explicit deny and retain owner mapping so a later
+            // owner mutation can fence/reconcile it. This mirrors the live
+            // publish_owner() policy; never interpret an arbitrary resolve()
+            // error as safe to ignore when a regular file exists.
+            $absolute = $root . '/' . $file;
+            $real = realpath($absolute);
+            if ($real === false || !is_file($real)) {
+                $catalog[$file] = ['policy' => 'deny', 'path_id' => ''];
+                continue;
+            }
+            $result = ESP_Media_Index::resolve($absolute);
             if ($result['status'] === 'error') { return false; }
             if ($result['status'] === 'ambiguous' ||
                 $result['status'] === 'unresolved') {
