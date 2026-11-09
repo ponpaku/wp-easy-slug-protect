@@ -1082,23 +1082,28 @@ final class ESP_Media_Index {
     public static function reindex_attachment($id, $repair = false) {
         global $wpdb;
         if ($id <= 0 || !self::installed()) { return false; }
+        $stage = 'lock';
         $state = self::table(self::state_table());
         $files = self::table(self::files_table());
         $namespace = self::lock_namespace();
-        if ($namespace === null) { return false; }
+        if ($namespace === null) { return self::failed_step('reindex', 'namespace', $id); }
         $lock_name = 'esp63_' .
             substr(hash('sha256', $namespace . "\0" . $id), 0, 40);
         $lock = $wpdb->get_var($wpdb->prepare('SELECT GET_LOCK(%s, 2)', $lock_name));
-        if ($wpdb->last_error !== '' || (string)$lock !== '1') { return false; }
+        if ($wpdb->last_error !== '' || (string)$lock !== '1') {
+            return self::failed_step('reindex', 'lock', $id);
+        }
         try {
+            $stage = 'state_read';
             $row = $wpdb->get_row($wpdb->prepare(
                 "SELECT status,revision,pending_count FROM $state WHERE attachment_id=%d",
                 $id), ARRAY_A);
             if ($wpdb->last_error !== '') { throw new RuntimeException('state read'); }
             if ($row && (int)$row['pending_count'] !== 0) {
-                return false;
+                return self::failed_step('reindex', 'pending_write', $id);
             }
             if (!$row) {
+                $stage = 'state_insert';
                 $sql = $wpdb->prepare("INSERT INTO $state
                     (attachment_id,status,revision,active_generation,pending_count,changed_at)
                     VALUES (%d,'dirty',1,0,0,%d)", $id, time());
@@ -1107,6 +1112,7 @@ final class ESP_Media_Index {
                 }
                 $revision = 1;
             } else {
+                $stage = 'state_fence';
                 $revision = (int)$row['revision'];
                 // In autocommit mode the dirty marker becomes visible before
                 // any DELETE/INSERT, even if a later database operation fails.
@@ -1120,11 +1126,13 @@ final class ESP_Media_Index {
                 }
                 ++$revision;
             }
+            $stage = 'post_type';
             $type = $wpdb->get_var($wpdb->prepare(
                 "SELECT post_type FROM {$wpdb->posts} WHERE ID=%d", $id));
             if ($wpdb->last_error !== '') { throw new RuntimeException('post query'); }
             $paths = []; $protection = '';
             if ($type === 'attachment') {
+                $stage = 'meta_read';
                 $values = $wpdb->get_results($wpdb->prepare(
                     "SELECT meta_key,meta_value FROM {$wpdb->postmeta}
                      WHERE post_id=%d AND meta_key IN (%s,%s,%s)
@@ -1148,10 +1156,12 @@ final class ESP_Media_Index {
                         $protection = $value['meta_value'];
                     }
                 }
+                $stage = 'meta_validate';
                 if (!is_string($protection) || strlen($protection) > 191 ||
                     !is_string($attached) || !self::valid_path($attached)) {
                     throw new RuntimeException('invalid attachment metadata');
                 }
+                $stage = 'derivatives_validate';
                 $paths = self::enumerate($attached, $metadata);
                 if (!is_array($paths) || !$paths) {
                     throw new RuntimeException('invalid derivative metadata');
@@ -1160,6 +1170,7 @@ final class ESP_Media_Index {
             // Stage new rows alongside the old live generation. Never remove
             // old owner evidence while the state is dirty: another public
             // attachment could otherwise appear to be the only owner.
+            $stage = 'file_insert';
             foreach ($paths as $path) {
                 $sql = $wpdb->prepare("INSERT INTO $files
                     (path_hash,file_path,attachment_id,generation,protected_path_id)
@@ -1171,6 +1182,7 @@ final class ESP_Media_Index {
             }
             // If the source changed while rebuilding, revision or pending
             // will differ, and the state must stay dirty until another pass.
+            $stage = 'state_publish';
             $published = $wpdb->query($wpdb->prepare(
                 "UPDATE $state SET status='ready',active_generation=%d,changed_at=%d,
                  failure_count=0,retry_after=0
@@ -1189,6 +1201,9 @@ final class ESP_Media_Index {
             }
             return true;
         } catch (\Throwable $e) {
+            // Never persist raw exception text: it could include SQL or paths.
+            self::record_failure('reindex', $stage, $id,
+                $wpdb->last_error !== '' ? 'db_error' : 'exception');
             // Never undo another plugin's transaction. The committed dirty
             // marker already blocks authorization; a worker can retry.
             error_log('ESP: Media index rebuild incomplete for attachment ' . $id);
@@ -1282,38 +1297,45 @@ final class ESP_Media_Index {
         $state = self::table(self::state_table());
         $files = self::table(self::files_table());
         $namespace = self::lock_namespace();
-        if ($namespace === null) { return false; }
+        if ($namespace === null) { return self::failed_step('orphan', 'namespace', $id); }
         $lock_name = 'esp63_' .
             substr(hash('sha256', $namespace . "\0" . $id), 0, 40);
         $lock = $wpdb->get_var($wpdb->prepare('SELECT GET_LOCK(%s, 2)', $lock_name));
-        if ($wpdb->last_error !== '' || (string)$lock !== '1') { return false; }
+        if ($wpdb->last_error !== '' || (string)$lock !== '1') {
+            return self::failed_step('orphan', 'lock', $id);
+        }
         try {
+            $stage = 'post_type';
             $type = $wpdb->get_var($wpdb->prepare(
                 "SELECT post_type FROM {$wpdb->posts} WHERE ID=%d", $id));
-            if ($wpdb->last_error !== '') { return false; }
+            if ($wpdb->last_error !== '') { return self::failed_step('orphan', $stage, $id); }
             if ($type === 'attachment') { return true; } // was restored; let normal scan handle it
             // Even legacy file-only orphans need a state row to serialize
             // against a concurrent transaction inserting a promotion ticket.
             // INSERT IGNORE waits for an uncommitted row with this primary key.
+            $stage = 'state_insert';
             $created = $wpdb->query($wpdb->prepare(
                 "INSERT IGNORE INTO $state
                  (attachment_id,status,revision,pending_count,changed_at)
                  VALUES (%d,'dirty',0,0,%d)", $id, time()));
-            if ($created === false || $wpdb->last_error !== '') { return false; }
+            if ($created === false || $wpdb->last_error !== '') { return self::failed_step('orphan', $stage, $id); }
             // Pending writes retain their reservation; an UPDATE blocked by
             // an external transaction rechecks this predicate after COMMIT.
+            $stage = 'state_fence';
             $changed = $wpdb->query($wpdb->prepare(
                 "UPDATE $state SET status='dirty',revision=revision+1,
                  retry_after=0 WHERE attachment_id=%d AND pending_count=0", $id));
-            if ($changed === false || $wpdb->last_error !== '') { return false; }
+            if ($changed === false || $wpdb->last_error !== '') { return self::failed_step('orphan', $stage, $id); }
             if ($changed !== 1) { return true; }
+            $stage = 'file_delete';
             if ($wpdb->query($wpdb->prepare(
                 "DELETE FROM $files WHERE attachment_id=%d", $id)) === false) {
-                return false;
+                return self::failed_step('orphan', $stage, $id);
             }
+            $stage = 'state_delete';
             $deleted = $wpdb->query($wpdb->prepare(
                 "DELETE FROM $state WHERE attachment_id=%d AND pending_count=0", $id));
-            if ($deleted === false || $wpdb->last_error !== '') { return false; }
+            if ($deleted === false || $wpdb->last_error !== '') { return self::failed_step('orphan', $stage, $id); }
             if (class_exists('ESP_Fast_Gate_WP')) {
                 do_action('esp_media_index_published', $id);
             }
@@ -1339,7 +1361,9 @@ final class ESP_Media_Index {
              WHERE p.ID IS NULL AND s.attachment_id>0
                AND s.pending_count=0
              ORDER BY s.attachment_id ASC LIMIT %d", self::BATCH_SIZE));
-        if (!is_array($orphans) || $wpdb->last_error !== '') { return false; }
+        if (!is_array($orphans) || $wpdb->last_error !== '') {
+            return self::failed_step('orphan', 'list_query', 0);
+        }
         foreach ($orphans as $id) {
             if (!self::purge_orphan((int)$id)) { return false; }
         }
@@ -1498,6 +1522,59 @@ final class ESP_Media_Index {
         return $valid;
     }
 
+    /**
+     * Bounded, non-sensitive failure evidence for manual staging diagnosis.
+     * Never store SQL, paths, raw metadata, credentials or exception messages.
+     * A failed diagnostics write must not influence media authorization.
+     */
+    private static function record_failure($operation, $stage, $id, $reason) {
+        if (!function_exists('get_option') || !function_exists('update_option')) {
+            return;
+        }
+        try {
+            $valid = '/\A[a-z0-9_]{1,48}\z/D';
+            foreach ([$operation, $stage, $reason] as $part) {
+                if (!is_string($part) || !preg_match($valid, $part)) { return; }
+            }
+            // The pseudonym allows correlation across retries without revealing IDs.
+            $salt = function_exists('wp_salt') ? wp_salt('auth') : '';
+            $key = substr(hash_hmac('sha256', (string) (int) $id,
+                (string) $salt), 0, 16);
+            $option = 'esp_media_index_v1_failure_diagnostics';
+            $stored = get_option($option, []);
+            $entries = is_array($stored) ? $stored : [];
+            $now = time();
+            foreach ($entries as $index => $entry) {
+                if (is_array($entry) && ($entry['object_key'] ?? '') === $key &&
+                    ($entry['operation'] ?? '') === $operation &&
+                    ($entry['stage'] ?? '') === $stage &&
+                    ($entry['reason'] ?? '') === $reason) {
+                    unset($entries[$index]);
+                    $first = isset($entry['first_at']) && is_int($entry['first_at'])
+                        ? $entry['first_at'] : $now;
+                    $count = min(1000000, max(0, (int) ($entry['count'] ?? 0)) + 1);
+                    break;
+                }
+            }
+            if (!isset($count)) { $count = 1; $first = $now; }
+            $entries[] = [
+                'operation' => $operation, 'stage' => $stage, 'reason' => $reason,
+                'object_key' => $key, 'first_at' => $first, 'last_at' => $now,
+                'count' => $count,
+            ];
+            update_option($option, array_slice(array_values($entries), -24), false);
+        } catch (\Throwable $ignored) {
+            // Diagnostic failures never affect the security state machine.
+        }
+    }
+
+    private static function failed_step($operation, $stage, $id) {
+        global $wpdb;
+        self::record_failure($operation, $stage, $id,
+            is_object($wpdb) && $wpdb->last_error !== '' ? 'db_error' : 'failed');
+        return false;
+    }
+
     /** Bounded incremental backfill and continuous audit; never HTTP path. */
     /** Names include the actual DB and prefix: GET_LOCK is server-scoped. */
     private static function lock_namespace() {
@@ -1557,7 +1634,10 @@ final class ESP_Media_Index {
              WHERE attachment_id>0 AND status='dirty'
                AND pending_count=0 AND retry_after<=%d
              ORDER BY changed_at ASC LIMIT %d", time(), self::BATCH_SIZE));
-        if (!is_array($dirty_ids) || $wpdb->last_error !== '') { return; }
+        if (!is_array($dirty_ids) || $wpdb->last_error !== '') {
+            self::failed_step('scan', 'dirty_list', 0);
+            return;
+        }
         foreach ($dirty_ids as $id) {
             if (!self::rebuild_in_batch((int)$id)) { return; }
         }
