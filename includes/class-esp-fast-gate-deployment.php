@@ -145,6 +145,27 @@ final class ESP_Fast_Gate_Deployment {
                 return self::error('index_enable_failed');
             }
         }
+        // READY establishes complete initial coverage, not the absence of
+        // subsequently dirtied/deleted attachments. The SQLite export refuses
+        // ANY unsettled owner. An explicit administrator prepare can first
+        // perform one bounded repair batch (including orphan purging).
+        $index_status = ESP_Media_Index::build_status(false);
+        if (!empty($index_status['error'])) {
+            return self::error('index_status_unavailable');
+        }
+        if (!empty($index_status['repairable_dirty'])) {
+            ESP_Media_Index::run_batch();
+        }
+        // Recheck from SQL, not cached progress counts: pending writers,
+        // backoff rows and a busy scan worker must not be silently omitted.
+        global $wpdb;
+        $state = ESP_Media_Index::state_table();
+        $unfinished = $wpdb->get_var("SELECT attachment_id FROM $state
+            WHERE attachment_id>0 AND (status<>'ready' OR pending_count<>0)
+            LIMIT 1");
+        if ($wpdb->last_error !== '' || $unfinished !== null) {
+            return self::error('index_repair_pending');
+        }
         $dir = ESP_Fast_Gate_WP::private_dir();
         if (!$dir && !ESP_Fast_Gate_WP::provision()) {
             return self::error('provision_failed');
