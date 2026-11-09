@@ -12,7 +12,8 @@ from playwright.sync_api import sync_playwright
 
 
 BASE = "http://127.0.0.1:8096"
-ADMIN = BASE + "/wp-admin/options-general.php?page=esp-fast-gate"
+ADMIN = BASE + "/wp-admin/admin.php?page=esp-settings"
+SECTION = "#esp-fast-gate"
 ARTIFACTS = Path(os.environ["ESP_FG_UI_ARTIFACTS"])
 ARTIFACTS.mkdir(parents=True, exist_ok=True)
 checks = []
@@ -25,24 +26,28 @@ def check(condition, message):
 
 
 def screenshot(page, name):
-    if "options-general.php?page=esp-fast-gate" in page.url:
-        page.screenshot(path=str(ARTIFACTS / (name + ".png")), full_page=True)
+    if "admin.php?page=esp-settings" in page.url and page.locator(SECTION).count():
+        page.locator(SECTION).screenshot(path=str(ARTIFACTS / (name + ".png")))
 
 
 def state(page, expected):
-    text = page.locator("div.wrap").inner_text()
+    text = page.locator(SECTION).inner_text()
     check("状態: " + expected in text, "settings state: " + expected)
 
 
 def action(page, name, result, expected_state):
     selector = 'form:has(input[name="action"][value="esp_fast_gate_' + name + '"])'
-    button = page.locator(selector).locator('input[type="submit"]')
+    button = page.locator(SECTION).locator(selector).locator('input[type="submit"]')
     check(button.count() == 1 and button.is_visible(), name + " button visible")
     with page.expect_navigation(wait_until="domcontentloaded"):
         button.click()
-    check(page.url.startswith(ADMIN + "&esp_fg_result="), name + " redirects to settings")
-    notice = page.locator("div.wrap .notice p")
-    check(notice.count() == 1 and notice.inner_text() == result,
+    check(page.url.startswith(ADMIN + "&esp_fg_result=")
+          and page.url.endswith("#esp-fast-gate"),
+          name + " redirects to the ESP settings section")
+    notice = page.locator(SECTION + " .notice p")
+    expected_notice = ("操作が完了しました。" if result == "success"
+                       else "操作に失敗しました。エラーコード: " + result)
+    check(notice.count() == 1 and notice.inner_text() == expected_notice,
           name + " notice: " + result)
     state(page, expected_state)
 
@@ -81,9 +86,21 @@ def main():
                 check("/wp-admin/" in page.url, "WordPress administrator signed in")
 
                 page.goto(ADMIN, wait_until="domcontentloaded")
-                check(page.get_by_role("heading", name="Fast Gate v2").count() == 1,
-                      "Fast Gate settings page heading")
-                check("Apache / LiteSpeed 専用" in page.locator("div.wrap").inner_text(),
+                check(page.get_by_role("heading", name="Easy Slug Protect 設定").count() == 1,
+                      "primary ESP settings page heading")
+                check(page.get_by_role("heading", name="高速ゲート（Fast Gate v2）").count() == 1,
+                      "Fast Gate appears as a section within the ESP settings page")
+                check(page.locator("#esp-settings-form").count() == 1,
+                      "existing ESP options.php settings form remains intact")
+                check(page.locator("#esp-settings-form " + SECTION).count() == 0,
+                      "deployment forms are NOT nested in the options.php form")
+                check(page.locator(SECTION + " form").count() == 3,
+                      "each deployment action has a separate administrator form")
+                check(page.locator("#adminmenu a[href*='page=esp-fast-gate']").count() == 0,
+                      "no separate WordPress Settings Fast Gate menu")
+                check(page.locator("a[href='#esp-fast-gate']").count() == 1,
+                      "media settings links to the Fast Gate section")
+                check("Apache / LiteSpeed 専用" in page.locator(SECTION).inner_text(),
                       "supported server warning is visible")
                 state(page, "準備完了（従来方式で配信中）")
                 screenshot(page, "01-initial")
@@ -114,7 +131,7 @@ def main():
                 page.goto(ADMIN, wait_until="domcontentloaded")
                 state(page, "停止中（配信を拒否しています）")
                 check("15分未満のロックは解除しません" in
-                      page.locator("div.wrap").inner_text(),
+                      page.locator(SECTION).inner_text(),
                       "stale lock recovery instructions visible")
                 screenshot(page, "03-stale-transition")
                 action(page, "recover", "success", "準備完了（従来方式で配信中）")
@@ -144,6 +161,7 @@ def main():
                     "real_admin_forms": ["prepare", "enable", "disable", "recover"],
                     "failed_probe_notice": "passed",
                     "stale_lock_recovery_ui": "passed",
+                    "integrated_in_esp_settings": True,
                     "screenshots": 6,
                 }), flush=True)
             except Exception:
