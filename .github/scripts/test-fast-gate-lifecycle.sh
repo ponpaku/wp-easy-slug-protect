@@ -494,6 +494,11 @@ grep -Fq 'RewriteRule ^(.+)$' "$uploads/.htaccess"
 ! grep -Fq '# Fast Gate: no static-file existence shortcut' "$uploads/.htaccess"
 python3 tests/fast-gate-activation-e2e.py \
     | tee -a "$report_root/stages.log"
+# The browser drives the shipped WordPress admin forms against the same
+# disposable real Apache site and stores only settings-page screenshots.
+ESP_FG_UI_ARTIFACTS="$report_root/admin-ui" \
+    python3 tests/fast-gate-admin-ui-e2e.py \
+    | tee -a "$report_root/stages.log"
 # The live-route probes use a genuine non-secret uploads file. They must
 # remove it on successful verification AND injected failure.
 if find "$uploads" -maxdepth 1 -type f -name 'esp-fast-gate-route-*.jpg' \
