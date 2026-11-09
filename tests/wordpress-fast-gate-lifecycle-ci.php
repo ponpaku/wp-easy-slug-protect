@@ -181,8 +181,54 @@ if($phase==='manual-build'){
     fg_life_check($db->get_media($public)['policy']==='public' &&
         $db->get_media($private)['policy']==='protected',
         'catalog policy incorrect');
+
+    // PR #83: the global media index can remain READY while a deleted
+    // attachment leaves a repairable dirty state row. Catalog export must
+    // never silently skip it; administrator preparation repairs it first.
+    $state_table = ESP_Media_Index::state_table();
+    $pending_id = 987654320;
+    $orphan_id = 987654321;
+    foreach ([$pending_id, $orphan_id] as $candidate_id) {
+        fg_life_check($wpdb->get_var($wpdb->prepare(
+            "SELECT ID FROM {$wpdb->posts} WHERE ID=%d", $candidate_id)) === null,
+            'regression ID unexpectedly exists');
+    }
+    fg_life_check($wpdb->insert($state_table, [
+        'attachment_id' => $pending_id,
+        'status' => 'dirty',
+        'pending_count' => 1,
+        'changed_at' => time(),
+    ], ['%d','%s','%d','%d']) === 1,
+        'seed pending index writer');
+    $blocked_prepare = ESP_Fast_Gate_Deployment::prepare();
+    fg_life_check(is_wp_error($blocked_prepare) &&
+        $blocked_prepare->get_error_code() === 'esp_gate_index_repair_pending',
+        'prepare must reject pending index writers without claiming success');
+    fg_life_check($wpdb->delete($state_table,
+        ['attachment_id'=>$pending_id], ['%d']) === 1,
+        'remove disposable pending fixture');
+
+    fg_life_check($wpdb->insert($state_table, [
+        'attachment_id' => $orphan_id,
+        'status' => 'dirty',
+        'pending_count' => 0,
+        'changed_at' => time(),
+    ], ['%d','%s','%d','%d']) === 1,
+        'seed orphan dirty owner while global index READY');
+    fg_life_check(ESP_Media_Index::ready() &&
+        ESP_Media_Index::build_status(false)['repairable_dirty'] === true,
+        'repairable orphan must be visible without revoking global READY');
+    fg_life_check($db->set_ready(false), 'mark SQLite catalog unprepared for rebuild');
+    fg_life_check(ESP_Fast_Gate_Deployment::prepare() === true,
+        'administrator prepare must reconcile orphan before catalog build');
+    fg_life_check($wpdb->get_var($wpdb->prepare(
+        "SELECT attachment_id FROM $state_table WHERE attachment_id=%d",
+        $orphan_id)) === null, 'orphan removed by bounded repair');
+    fg_life_check($db->ready() && !$db->serving() &&
+        ESP_Fast_Gate_Deployment::prepared(),
+        'repaired catalog ready without changing media route or serving');
     fg_life_emit('MANUAL_BUILD_COMPLETE',['elapsed_ms'=>round((microtime(true)-$start)*1000,1),
-        'counts'=>$counts]);
+        'counts'=>$db->counts(), 'repairable_orphan_reconciled'=>true]);
     exit;
 }
 if($phase==='interrupt-build'){
