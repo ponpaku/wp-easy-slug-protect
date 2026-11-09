@@ -180,7 +180,14 @@ jobs:
           php-version: '8.3'
           extensions: mysqli, sqlite3
           coverage: none
-      - name: Upgrade released ZIP, verify lifecycle and measure Apache HTTP
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install pinned Playwright and Chromium for real admin UI test
+        run: |
+          python3 -m pip install --disable-pip-version-check playwright==1.56.0
+          python3 -m playwright install --with-deps chromium
+      - name: Upgrade released ZIP, verify lifecycle, Apache HTTP and Chromium admin UI
         env:
           ESP_ALLOW_DISPOSABLE_DB: "1"
         run: bash .github/scripts/test-fast-gate-lifecycle.sh
