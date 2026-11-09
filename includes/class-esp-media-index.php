@@ -1202,8 +1202,9 @@ final class ESP_Media_Index {
             return true;
         } catch (\Throwable $e) {
             // Never persist raw exception text: it could include SQL or paths.
-            self::record_failure('reindex', $stage, $id,
-                $wpdb->last_error !== '' ? 'db_error' : 'exception');
+            $reason = $wpdb->last_error !== '' ? 'db_error' : 'exception';
+            $codes = $reason === 'db_error' ? self::failure_db_codes() : [];
+            self::record_failure('reindex', $stage, $id, $reason, $codes);
             // Never undo another plugin's transaction. The committed dirty
             // marker already blocks authorization; a worker can retry.
             error_log('ESP: Media index rebuild incomplete for attachment ' . $id);
@@ -1523,11 +1524,40 @@ final class ESP_Media_Index {
     }
 
     /**
+     * Capture ONLY MySQL's numeric error identifier and standard SQLSTATE.
+     * Must be called before any get_option/update_option/query, which would
+     * overwrite the driver diagnostics. Never collect error text or SQL.
+     */
+    private static function failure_db_codes() {
+        global $wpdb;
+        if (!is_object($wpdb) || !isset($wpdb->dbh) ||
+            !($wpdb->dbh instanceof \mysqli) ||
+            !function_exists('mysqli_errno') || !function_exists('mysqli_sqlstate')) {
+            return [];
+        }
+        try {
+            $errno = mysqli_errno($wpdb->dbh);
+            $sqlstate = mysqli_sqlstate($wpdb->dbh);
+            $codes = [];
+            if (is_int($errno) && $errno > 0 && $errno <= 65535) {
+                $codes['mysql_errno'] = $errno;
+            }
+            if (is_string($sqlstate) &&
+                preg_match('/\A[A-Z0-9]{5}\z/D', $sqlstate)) {
+                $codes['sqlstate'] = $sqlstate;
+            }
+            return $codes;
+        } catch (\Throwable $ignored) {
+            return [];
+        }
+    }
+
+    /**
      * Bounded, non-sensitive failure evidence for manual staging diagnosis.
      * Never store SQL, paths, raw metadata, credentials or exception messages.
      * A failed diagnostics write must not influence media authorization.
      */
-    private static function record_failure($operation, $stage, $id, $reason) {
+    private static function record_failure($operation, $stage, $id, $reason, $db_codes = []) {
         if (!function_exists('get_option') || !function_exists('update_option')) {
             return;
         }
@@ -1540,6 +1570,14 @@ final class ESP_Media_Index {
             $salt = function_exists('wp_salt') ? wp_salt('auth') : '';
             $key = substr(hash_hmac('sha256', (string) (int) $id,
                 (string) $salt), 0, 16);
+            $errno = is_array($db_codes) && isset($db_codes['mysql_errno']) &&
+                is_int($db_codes['mysql_errno']) &&
+                $db_codes['mysql_errno'] > 0 && $db_codes['mysql_errno'] <= 65535
+                ? $db_codes['mysql_errno'] : null;
+            $sqlstate = is_array($db_codes) && isset($db_codes['sqlstate']) &&
+                is_string($db_codes['sqlstate']) &&
+                preg_match('/\A[A-Z0-9]{5}\z/D', $db_codes['sqlstate'])
+                ? $db_codes['sqlstate'] : null;
             $option = 'esp_media_index_v1_failure_diagnostics';
             $stored = get_option($option, []);
             $entries = is_array($stored) ? $stored : [];
@@ -1548,7 +1586,9 @@ final class ESP_Media_Index {
                 if (is_array($entry) && ($entry['object_key'] ?? '') === $key &&
                     ($entry['operation'] ?? '') === $operation &&
                     ($entry['stage'] ?? '') === $stage &&
-                    ($entry['reason'] ?? '') === $reason) {
+                    ($entry['reason'] ?? '') === $reason &&
+                    ($entry['mysql_errno'] ?? null) === $errno &&
+                    ($entry['sqlstate'] ?? null) === $sqlstate) {
                     unset($entries[$index]);
                     $first = isset($entry['first_at']) && is_int($entry['first_at'])
                         ? $entry['first_at'] : $now;
@@ -1557,11 +1597,14 @@ final class ESP_Media_Index {
                 }
             }
             if (!isset($count)) { $count = 1; $first = $now; }
-            $entries[] = [
+            $entry = [
                 'operation' => $operation, 'stage' => $stage, 'reason' => $reason,
                 'object_key' => $key, 'first_at' => $first, 'last_at' => $now,
                 'count' => $count,
             ];
+            if ($errno !== null) { $entry['mysql_errno'] = $errno; }
+            if ($sqlstate !== null) { $entry['sqlstate'] = $sqlstate; }
+            $entries[] = $entry;
             update_option($option, array_slice(array_values($entries), -24), false);
         } catch (\Throwable $ignored) {
             // Diagnostic failures never affect the security state machine.
@@ -1570,8 +1613,10 @@ final class ESP_Media_Index {
 
     private static function failed_step($operation, $stage, $id) {
         global $wpdb;
-        self::record_failure($operation, $stage, $id,
-            is_object($wpdb) && $wpdb->last_error !== '' ? 'db_error' : 'failed');
+        $reason = is_object($wpdb) && $wpdb->last_error !== ''
+            ? 'db_error' : 'failed';
+        $codes = $reason === 'db_error' ? self::failure_db_codes() : [];
+        self::record_failure($operation, $stage, $id, $reason, $codes);
         return false;
     }
 
