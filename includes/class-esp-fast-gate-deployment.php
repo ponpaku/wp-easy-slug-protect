@@ -19,7 +19,6 @@ final class ESP_Fast_Gate_Deployment {
     public static function register() {
         add_filter('pre_update_option_' . self::ROUTE_OPTION,
             [self::class, 'guard_route_option'], 5, 2);
-        add_action('admin_menu', [self::class, 'register_admin']);
         add_action('admin_post_esp_fast_gate_prepare', [self::class, 'admin_prepare']);
         add_action('admin_post_esp_fast_gate_enable', [self::class, 'admin_enable']);
         add_action('admin_post_esp_fast_gate_disable', [self::class, 'admin_disable']);
@@ -519,18 +518,18 @@ final class ESP_Fast_Gate_Deployment {
         return $response;
     }
 
-    public static function register_admin() {
-        add_options_page('Fast Gate v2', 'Fast Gate', 'manage_options',
-            'esp-fast-gate', [self::class,'render_admin']);
-    }
-
-    public static function render_admin() {
+    /**
+     * Part of the primary Easy Slug Protect settings page, intentionally
+     * OUTSIDE its options.php form: each deployment action posts separately
+     * with its own nonce and capability check.
+     */
+    public static function render_settings_section() {
         if (!current_user_can('manage_options')) { wp_die('Forbidden'); }
         $db = ESP_Fast_Gate_WP::ledger(false);
         $state = self::route_fast() ? (ESP_Fast_Gate_WP::active() &&
             $db && $db->serving() ? 'running' : 'stopped') :
             (self::prepared() ? 'prepared' : 'unprepared');
-        echo '<div class="wrap"><h1>Fast Gate v2</h1><p>';
+        echo '<div class="esp-section" id="esp-fast-gate"><h2>高速ゲート（Fast Gate v2）</h2><p>';
         $states = [
             'running'=>'稼働中',
             'stopped'=>'停止中（配信を拒否しています）',
@@ -543,7 +542,12 @@ final class ESP_Fast_Gate_Deployment {
         $result = isset($_GET['esp_fg_result']) ?
             sanitize_key(wp_unslash($_GET['esp_fg_result'])) : '';
         if ($result !== '') {
-            echo '<div class="notice notice-info"><p>' . esc_html($result) . '</p></div>';
+            $succeeded = $result === 'success';
+            $notice = $succeeded ? 'notice-success' : 'notice-error';
+            $message = $succeeded ? '操作が完了しました。' :
+                '操作に失敗しました。エラーコード: ' . $result;
+            echo '<div class="notice ' . esc_attr($notice) .
+                ' inline" role="status"><p>' . esc_html($message) . '</p></div>';
         }
         $actions = [
             'prepare'=>'台帳を準備する',
@@ -580,7 +584,7 @@ final class ESP_Fast_Gate_Deployment {
         $message = $result === true ? 'success' :
             ($result instanceof WP_Error ? $result->get_error_code() : 'failed');
         wp_safe_redirect(add_query_arg('esp_fg_result', $message,
-            admin_url('options-general.php?page=esp-fast-gate')));
+            admin_url('admin.php?page=esp-settings')) . '#esp-fast-gate');
         exit;
     }
 
