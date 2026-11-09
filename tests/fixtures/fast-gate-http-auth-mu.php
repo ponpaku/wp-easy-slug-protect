@@ -9,6 +9,22 @@
 if (!defined('ABSPATH')) { exit; }
 
 add_action('init', static function () {
+    // Test-only fault injection for an actual administrator form submission.
+    // Scoped to the disposable DB, explicitly enabled fixture and one request.
+    // It never intercepts normal media traffic or production deployments.
+    if (getenv('ESP_FG_CI_HTTP_AUTH') === '1' &&
+        defined('DB_NAME') && DB_NAME === 'esp_fg_lifecycle' &&
+        ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' &&
+        ($_POST['action'] ?? '') === 'esp_fast_gate_enable' &&
+        ($_SERVER['HTTP_X_ESP_CI_FAIL_PROBE'] ?? '') === '1') {
+        add_filter('pre_http_request',
+            static function ($pre, $args, $url) {
+                if (strpos($url, '/esp-fast-gate-route-') !== false) {
+                    return new WP_Error('esp_ci_ui_probe_forced_failure');
+                }
+                return $pre;
+            }, 10, 3);
+    }
     if (!isset($_GET['esp_fg_ci_auth']) &&
         !isset($_GET['esp_fg_ci_redirect_landed'])) { return; }
     if (getenv('ESP_FG_CI_HTTP_AUTH') !== '1' ||
