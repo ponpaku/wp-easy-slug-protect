@@ -6,7 +6,7 @@ does not change any `Cache-Control` behavior.
 
 ## Scope and user entrypoints
 
-- WordPress administrator: **Settings → Fast Gate**, with actions **Prepare
+- WordPress administrator: **Easy Slug Protect → Settings → 高速ゲート（Fast Gate v2）** (the section inside the existing ESP settings page, not a separate WordPress Settings menu), with actions **Prepare
   ledger**, **Enable verified gate**, **Disable / restore WordPress route**,
   and explicit **Recover interrupted transition** (visible when a deployment
   lock remains).
