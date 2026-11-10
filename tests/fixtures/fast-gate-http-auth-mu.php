@@ -48,6 +48,7 @@ add_action('init', static function () {
     $action = (string)$_GET['esp_fg_ci_auth'];
     if (in_array($action, [
         'deploy-prepare','deploy-enable-fail-probe','deploy-enable','deploy-disable',
+        'deploy-enable-private-404','deploy-enable-private-exposed',
         'deploy-status','deploy-legacy-logout',
         'deploy-inject-stale-lock','deploy-recover',
         'deploy-upgrade-preflight','deploy-upgrade-no-server'
@@ -108,6 +109,29 @@ add_action('init', static function () {
             add_filter('pre_http_request',$failure,10,3);
             try { $result=ESP_Fast_Gate_Deployment::enable(); }
             finally { remove_filter('pre_http_request',$failure,10); }
+        } elseif (in_array($action, [
+            'deploy-enable-private-404','deploy-enable-private-exposed',
+        ], true)) {
+            // In the real Apache fixture the private store is 403. Simulate a
+            // host that hides restricted files as 404, or an unsafe host that
+            // exposes them as 200. Only the actual private URL family is
+            // intercepted; the signed direct gate and uploads rewrite still
+            // have to pass real HTTP checks.
+            $code = $action === 'deploy-enable-private-404' ? 404 : 200;
+            $mask = static function ($pre,$args,$url) use ($code) {
+                if (strpos($url, '/esp-fast-gate-v2/') === false) {
+                    return $pre;
+                }
+                return [
+                    'headers'=>[], 'body'=>'',
+                    'response'=>['code'=>$code,
+                        'message'=>$code===404?'Not Found':'OK'],
+                    'cookies'=>[],
+                ];
+            };
+            add_filter('pre_http_request',$mask,10,3);
+            try { $result=ESP_Fast_Gate_Deployment::enable(); }
+            finally { remove_filter('pre_http_request',$mask,10); }
         } elseif ($action === 'deploy-enable') {
             $result=ESP_Fast_Gate_Deployment::enable();
         } elseif ($action === 'deploy-disable') {
