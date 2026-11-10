@@ -242,14 +242,88 @@ final class ESP_Fast_Gate_Deployment {
         }
         if (!$removed || !$probe_ok) { return false; }
 
-        // Directory-level denial is tested against the ACTUAL HTTP server,
-        // not inferred from an .htaccess file existing on disk.
-        $private_url = content_url('/esp-fast-gate-v2/gate-ledger.sqlite');
-        $private = wp_remote_get($private_url, [
+        // Some servers intentionally conceal private resources with 404
+        // instead of 403. Validate that this site's content URL reaches the
+        // authenticated standalone handler, AND that an existing disposable
+        // file inside the private directory cannot be retrieved. A bare 404
+        // for the ledger alone proves neither the URL mapping nor denial.
+        return self::private_http_probe($keys, $nonce);
+    }
+
+    private static function private_http_probe($keys, $nonce) {
+        if (!defined('WP_CONTENT_DIR') || !defined('ESP_PATH')) { return false; }
+        $content = realpath(WP_CONTENT_DIR);
+        $gate = realpath(ESP_PATH . 'gate/fast-gate.php');
+        $dir = ESP_Fast_Gate_WP::private_dir();
+        if (!$content || !$gate || !$dir ||
+            strncmp($gate, rtrim($content, '/') . '/', strlen(rtrim($content, '/') . '/')) !== 0 ||
+            !is_file($dir . '/gate-ledger.sqlite') ||
+            !is_file($dir . '/keys.php')) {
+            return false;
+        }
+        // Positive control: use content_url() to reach the real, signed gate
+        // entrypoint. This also checks the URL origin and content-root mapping
+        // without requiring arbitrary write access to WP_CONTENT_DIR.
+        $relative_gate = substr($gate, strlen(rtrim($content, '/') . '/'));
+        $direct = content_url('/' . str_replace(DIRECTORY_SEPARATOR, '/', $relative_gate));
+        $proof = hash_hmac('sha256', 'route|' . $nonce, $keys['sig']);
+        $request = [
             'timeout'=>8, 'redirection'=>0, 'sslverify'=>true,
-        ]);
-        return !is_wp_error($private) &&
-            wp_remote_retrieve_response_code($private) === 403;
+            'limit_response_size'=>128,
+            'headers'=>['X-ESP-Gate-Route-Probe'=>$nonce . ':' . $proof,
+                        'Cache-Control'=>'no-cache'],
+        ];
+        $response = wp_remote_get($direct, $request);
+        if (is_wp_error($response) ||
+            wp_remote_retrieve_response_code($response) !== 204 ||
+            !hash_equals(hash_hmac('sha256', 'ack|' . $nonce, $keys['sig']),
+                (string)wp_remote_retrieve_header($response, 'X-ESP-Gate-Route-Ack'))) {
+            return false;
+        }
+
+        // Negative control: a real, harmless file placed in the SAME private
+        // directory as the ledger must be inaccessible via its public URL.
+        // Test the ledger and keys too; 404 is accepted only alongside this
+        // positive/negative control pair, never by itself.
+        $marker_name = 'esp-gate-private-check-' . $nonce . '.txt';
+        $marker = $dir . '/' . $marker_name;
+        $handle = @fopen($marker, 'x');
+        if ($handle === false) { return false; }
+        $denied = false;
+        $removed = false;
+        try {
+            $bytes = "ESP_PRIVATE_HTTP_CHECK\n";
+            if (@fwrite($handle, $bytes) !== strlen($bytes) ||
+                !@fflush($handle) || !@fclose($handle)) {
+                return false;
+            }
+            $handle = null;
+            $urls = [
+                content_url('/esp-fast-gate-v2/' . $marker_name),
+                content_url('/esp-fast-gate-v2/gate-ledger.sqlite'),
+                content_url('/esp-fast-gate-v2/keys.php'),
+            ];
+            $denied = true;
+            foreach ($urls as $url) {
+                $private = wp_remote_get($url, [
+                    'timeout'=>8, 'redirection'=>0, 'sslverify'=>true,
+                    'limit_response_size'=>128,
+                    'headers'=>['Cache-Control'=>'no-cache'],
+                ]);
+                $code = is_wp_error($private) ? 0 :
+                    wp_remote_retrieve_response_code($private);
+                if ($code !== 403 && $code !== 404) {
+                    $denied = false;
+                    break;
+                }
+            }
+        } catch (\\Throwable $e) {
+            $denied = false;
+        } finally {
+            if (is_resource($handle)) { @fclose($handle); }
+            $removed = @unlink($marker);
+        }
+        return $removed && $denied;
     }
 
     private static function clear_lock_cache() {
