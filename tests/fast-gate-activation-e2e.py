@@ -75,7 +75,17 @@ check(recovered["success"] and recovered["route"] == "legacy" and
 check(request("/wp-content/uploads/fg-life-public.jpg")[0] == 200,
       "legacy HTTP recovered after interrupted transition")
 
-enabled = command("enable", 200)
+# A private HTTP 200 must block activation and restore legacy safely.
+# A host using 404 to conceal existing private files is acceptable ONLY
+# after the product's signed direct gate + disposable private-file denial.
+exposed = command("enable-private-exposed", 409)
+check(exposed["error"] == "esp_gate_http_probe_failed" and
+      exposed["route"] == "legacy" and exposed["active"] is False and
+      exposed["serving"] is False,
+      "publicly exposed private path must fail activation and roll back")
+check(request("/wp-content/uploads/fg-life-public.jpg")[0] == 200,
+      "legacy route restored after unsafe private response")
+enabled = command("enable-private-404", 200)
 check(enabled["success"] is True and enabled["route"] == "fast" and
       enabled["active"] is True and enabled["serving"] is True,
       "verified activation must synchronize route, hooks and serving")
