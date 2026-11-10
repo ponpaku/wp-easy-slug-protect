@@ -317,7 +317,7 @@ final class ESP_Fast_Gate_Deployment {
                     break;
                 }
             }
-        } catch (\\Throwable $e) {
+        } catch (\Throwable $e) {
             $denied = false;
         } finally {
             if (is_resource($handle)) { @fclose($handle); }
