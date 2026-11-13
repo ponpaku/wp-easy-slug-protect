@@ -169,7 +169,8 @@ add_action('init', static function () {
     }
     $supported = ['session', 'remember', 'redirect-session',
         'redirect-remember', 'refresh', 'logout',
-        'logout-fail-session', 'logout-fail-remember', 'rotate'];
+        'logout-fail-session', 'logout-fail-remember', 'rotate',
+        'login-page-setup'];
     if (!in_array($action, $supported, true)) {
         status_header(404);
         exit;
@@ -187,7 +188,27 @@ add_action('init', static function () {
     }
     $ok = false;
     $result = ['action' => $action];
-    if (in_array($action,
+    if ($action === 'login-page-setup') {
+        // Create the login page only after the legacy anonymous benchmark
+        // completed. Changing login_page in seed-release would invalidate
+        // the old-mode 403 baseline and mask regressions in other scenarios.
+        $login_id = wp_insert_post([
+            'post_type' => 'page',
+            'post_status' => 'publish',
+            'post_title' => 'FG CI Login',
+            'post_name' => 'fg-ci-login',
+            'post_content' => '[esp_login_form path_id="fg_path"]',
+        ], true);
+        $settings = get_option(ESP_Config::OPTION_KEY);
+        if (!is_wp_error($login_id) && (int)$login_id > 0 &&
+            is_array($settings) &&
+            isset($settings['path']['fg_path'])) {
+            $settings['path']['fg_path']['login_page'] = (int)$login_id;
+            $ok = update_option(ESP_Config::OPTION_KEY, $settings);
+            $result['login_page_id'] = (int)$login_id;
+        }
+        $result['login_page_configured'] = $ok;
+    } elseif (in_array($action,
         ['session','remember','redirect-session','redirect-remember'], true)) {
         if (in_array($action, ['remember','redirect-remember'], true)) {
             $_POST['esp_remember'] = '1';
