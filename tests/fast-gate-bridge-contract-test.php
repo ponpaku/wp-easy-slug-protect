@@ -136,6 +136,44 @@ $ledger->serves = false;
 check(ESP_Fast_Gate_Server::authorize($uri, $cookies, $site,
     $tmp, $prefix, $ticket_key, $id_key, $ledger)['status'] === 503,
     'nonserving gate cannot bridge');
+// Real SQLite snapshot contract: MySQL-valid refs are NOT authorized
+// once their pre-delete revocation has committed.
+if (class_exists('SQLite3')) {
+    require_once __DIR__ . '/../includes/class-esp-fast-gate-store.php';
+    $sqlite_file = tempnam(sys_get_temp_dir(), 'esp-bridge-sqlite-');
+    check(is_string($sqlite_file), 'SQLite fixture allocated');
+    $writer = ESP_Fast_Gate_Store::open($sqlite_file, true);
+    check($writer && $writer->install(), 'SQLite bridge ledger installed');
+    check($writer->set_path($path, 1), 'SQLite path version installed');
+    check($writer->replace_media([
+        $relative => ['policy'=>'protected', 'path_id'=>$path]
+    ]), 'SQLite protected media installed');
+    check($writer->set_ready(true) && $writer->set_serving(true),
+        'SQLite bridge ledger serving');
+    $live_ref = ESP_Fast_Gate_Token::session_ref(
+        $site, $path, 'session', '', $auth_cookie, $id_key);
+    check($writer->bridge_allowed($relative, $path, 1, [$live_ref]) === true,
+        'SQLite snapshot authorizes an unrevoked live session');
+    check($writer->bridge_allowed($relative, $path, 1, ['invalid']) === null,
+        'SQLite undecidable revocation never grants image permission');
+    check($writer->bridge_allowed('not-registered.jpg', $path, 1, [$live_ref]) === false,
+        'SQLite unindexed media cannot bridge');
+    check($writer->revoke_many([$live_ref], time()),
+        'SQLite logout revocation persisted before MySQL deletion');
+    check($writer->bridge_allowed($relative, $path, 1, [$live_ref]) === false,
+        'SQLite previously committed logout blocks MySQL-valid session');
+    $other_ref = hash('sha256', 'another verified session');
+    check($writer->block_path($path), 'SQLite protection path blocked');
+    check($writer->bridge_allowed($relative, $path, 1, [$other_ref]) === false,
+        'SQLite blocked path does not bridge');
+    check($writer->set_serving(false), 'SQLite gate stopped');
+    check($writer->bridge_allowed($relative, $path, 1, [$other_ref]) === false,
+        'SQLite disabled gate does not bridge');
+    unset($writer);
+    @unlink($sqlite_file);
+    @unlink($sqlite_file . '-wal');
+    @unlink($sqlite_file . '-shm');
+}
 unlink($tmp . '/' . $relative);
 rmdir($tmp . '/2026/11'); rmdir($tmp . '/2026'); rmdir($tmp);
 echo "Fast Gate bridge policy contract PASS\n";
