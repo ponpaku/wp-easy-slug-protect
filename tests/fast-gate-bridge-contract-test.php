@@ -83,6 +83,13 @@ file_put_contents($tmp . '/' . $relative, 'media');
 $ledger = new BridgeMockLedger($relative, $path);
 $auth_cookie = str_repeat('A', 64);
 $cookies = ['esp_auth_' . $path => $auth_cookie];
+$present_remember = ['esp_remember_id_' . $path => 'remember_2',
+    'esp_remember_token_' . $path => str_repeat('R', 64)];
+$present_refs = ESP_Fast_Gate_Token::present_refs($site, $path,
+    $cookies + $present_remember, $id_key);
+check(count($present_refs) === 2 &&
+    $present_refs[0] !== $present_refs[1],
+    'Session and Remember identity both survive candidate collection');
 $uri = '/wp-content/uploads/' . $relative;
 $prefix = '/wp-content/uploads/';
 $decision = ESP_Fast_Gate_Server::authorize($uri, $cookies, $site,
@@ -158,6 +165,12 @@ if (class_exists('SQLite3')) {
         'SQLite undecidable revocation never grants image permission');
     check($writer->bridge_allowed('not-registered.jpg', $path, 1, [$live_ref]) === false,
         'SQLite unindexed media cannot bridge');
+    $remember_ref = $present_refs[1];
+    check($writer->revoke_many([$remember_ref], time()),
+        'SQLite second credential revoked before MySQL deletion');
+    check($writer->bridge_allowed($relative, $path, 1,
+        [$live_ref, $remember_ref]) === false,
+        'SQLite denies mixed credentials even if first MySQL session is valid');
     check($writer->revoke_many([$live_ref], time()),
         'SQLite logout revocation persisted before MySQL deletion');
     check($writer->bridge_allowed($relative, $path, 1, [$live_ref]) === false,
