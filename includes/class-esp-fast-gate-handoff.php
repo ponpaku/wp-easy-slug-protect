@@ -37,42 +37,6 @@ final class ESP_Fast_Gate_Handoff {
         return true;
     }
 
-    /**
-     * Return a home-relative path for ESP's login redirect_to parameter.
-     * ESP_Core::sanitize_path() then sends that path to home_url(), so the
-     * WordPress home prefix must not appear twice on subdirectory sites.
-     * Callers must urlencode() before passing the value to add_query_arg().
-     *
-     * $home_path is the validated, origin-relative bridge path ("/" or
-     * "/blog/") from bridge_path_config(), never an untrusted request Host.
-     */
-    public static function login_return_path($uploads_baseurl, $relative,
-                                              $home_path = '/') {
-        if (!is_string($uploads_baseurl) || !self::valid_relative($relative) ||
-            !is_string($home_path) ||
-            !preg_match('~^/(?:[A-Za-z0-9._-]+/)*$~D', $home_path) ||
-            strpos($home_path, '..') !== false) {
-            return null;
-        }
-        $url = parse_url($uploads_baseurl);
-        if (!is_array($url) || !isset($url['scheme'], $url['host'], $url['path']) ||
-            !in_array(strtolower($url['scheme']), ['http', 'https'], true) ||
-            !is_string($url['path']) || $url['path'] === '' ||
-            $url['path'][0] !== '/' ||
-            isset($url['query']) || isset($url['fragment'])) {
-            return null;
-        }
-        $absolute = rtrim($url['path'], '/') . '/' .
-            implode('/', array_map('rawurlencode', explode('/', $relative)));
-        if ($home_path !== '/') {
-            if (strncmp($absolute, $home_path, strlen($home_path)) !== 0) {
-                return null;
-            }
-            $absolute = '/' . substr($absolute, strlen($home_path));
-        }
-        return $absolute;
-    }
-
     private static function valid_context($site, $path, $relative, $method, $purpose, $key) {
         return is_string($site) && preg_match('/^[A-Za-z0-9_-]{1,191}$/D', $site) &&
             is_string($path) && preg_match('/^[A-Za-z0-9_-]{1,191}$/D', $path) &&
