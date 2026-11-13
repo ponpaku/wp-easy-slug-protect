@@ -457,6 +457,10 @@ print("FG_BRIDGE_LOGIN_DIAGNOSTIC " + json.dumps({
     "handoff_status": nav_code, "wp_status": wp_code,
     "login_status": login_code, "return_path_matches": True
 }))
+login_teardown = action(http.cookiejar.CookieJar(), "login-page-teardown")
+check(login_teardown.get("login_page_restored_to_zero") is True,
+      "Disposable login-page setting restored before activation lifecycle")
+gate(403)
 
 Path(args.output).write_text(
     json.dumps(results, indent=2, ensure_ascii=False) + "\n"
