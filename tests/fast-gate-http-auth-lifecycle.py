@@ -244,26 +244,35 @@ check("esp_gate_fg_path" in get_cookies(legacy_jar),
 gate(200, cookie_header(legacy_jar))
 check(True, "Subsequent old-session image served by standalone Fast Gate")
 
-# HEAD handoff also retains the method and must not include media bytes.
+# Verify HEAD at the HTTP boundary explicitly. urllib versions can change
+# redirect handling semantics; the server must accept a HEAD handoff whose
+# second request remains HEAD. Never send media bytes in either response.
 head_jar = http.cookiejar.CookieJar()
 for c in session_jar:
     if c.name == "esp_auth_fg_path":
         head_jar.set_cookie(c)
-head_hops = RedirectRecorder()
-head_opener = urllib.request.build_opener(
-    urllib.request.HTTPCookieProcessor(head_jar), head_hops
+class StopHeadRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+head_cookie = cookie_header(head_jar)
+head_gate_status, _, head_gate_headers, _ = fetch(
+    protected, head_cookie, method="HEAD",
+    opener=urllib.request.build_opener(StopHeadRedirect())
 )
+check(head_gate_status == 307 and "Location" in head_gate_headers,
+      "Old-session HEAD request received a signed 307 handoff")
+from urllib.parse import urljoin
 head_status, head_body, head_headers, _ = fetch(
-    protected, method="HEAD", opener=head_opener
+    urljoin(base, head_gate_headers["Location"]),
+    head_cookie, method="HEAD"
 )
 print("FG_BRIDGE_HEAD_DIAGNOSTIC " + json.dumps({
+    "gate_status": head_gate_status,
     "status": head_status, "body_len": len(head_body),
-    "redirect_codes": [h[0] for h in head_hops.hops],
     "content_type": head_headers.get("Content-Type"),
 }))
-check(head_status == 200 and head_body == b"" and
-      len(head_hops.hops) == 1 and head_hops.hops[0][0] == 307,
-      "Old-session HEAD handoff preserved HEAD and streamed no bytes")
+check(head_status == 200 and head_body == b"",
+      "WordPress HEAD handoff accepted HEAD without streaming bytes")
 
 # Range is relevant for PDFs and video. Verify this HTTP client's Range
 # header survives the handoff and WordPress returns only requested bytes.
