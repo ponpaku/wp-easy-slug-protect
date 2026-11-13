@@ -37,6 +37,27 @@ final class ESP_Fast_Gate_Handoff {
         return true;
     }
 
+    /**
+     * Return a same-origin, site-absolute media path for ESP's redirect_to.
+     * add_query_arg() does not encode new values: callers must urlencode()
+     * this path. ESP_Core::sanitize_path() expects a path, not a URL.
+     */
+    public static function login_return_path($uploads_baseurl, $relative) {
+        if (!is_string($uploads_baseurl) || !self::valid_relative($relative)) {
+            return null;
+        }
+        $url = parse_url($uploads_baseurl);
+        if (!is_array($url) || !isset($url['scheme'], $url['host'], $url['path']) ||
+            !in_array(strtolower($url['scheme']), ['http', 'https'], true) ||
+            !is_string($url['path']) || $url['path'] === '' ||
+            $url['path'][0] !== '/' ||
+            isset($url['query']) || isset($url['fragment'])) {
+            return null;
+        }
+        $file = implode('/', array_map('rawurlencode', explode('/', $relative)));
+        return rtrim($url['path'], '/') . '/' . $file;
+    }
+
     private static function valid_context($site, $path, $relative, $method, $purpose, $key) {
         return is_string($site) && preg_match('/^[A-Za-z0-9_-]{1,191}$/D', $site) &&
             is_string($path) && preg_match('/^[A-Za-z0-9_-]{1,191}$/D', $path) &&
