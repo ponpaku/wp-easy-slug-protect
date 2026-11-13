@@ -417,6 +417,47 @@ gate(200, new_cookie)
 action(new_jar, "logout")
 gate(403, new_cookie)
 
+# Exercise the actual anonymous top-level image navigation after all
+# baseline anonymous 403 and signed-session tests have finished. Unlike the
+# earlier fixture, this leaves the pre-upgrade legacy anonymous behavior
+# unchanged and tests the complete three-response browser path.
+login_setup = action(http.cookiejar.CookieJar(), "login-page-setup")
+check(login_setup.get("login_page_configured") is True,
+      "Disposable WordPress login page configured after legacy HTTP checks")
+
+class StopAnonymousRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+from urllib.parse import urljoin, urlsplit, parse_qs
+stop_redirect = urllib.request.build_opener(StopAnonymousRedirect())
+nav_code, _, nav_headers, _ = fetch(
+    protected,
+    headers={"Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document"},
+    opener=stop_redirect
+)
+check(nav_code == 307 and "Location" in nav_headers,
+      "Anonymous top-level media opens Gate login handoff with 307")
+handoff_url = urljoin(base, nav_headers["Location"])
+wp_code, _, wp_headers, _ = fetch(handoff_url, opener=stop_redirect)
+check(wp_code == 302 and "Location" in wp_headers,
+      "WordPress handoff delegates login redirect to shared media handler")
+login_url = urljoin(base, wp_headers["Location"])
+query = parse_qs(urlsplit(login_url).query)
+check(query.get("redirect_to") == [protected] and
+      "redirect_to=https%3A%2F%2F" in login_url,
+      "Existing media redirect encodes original absolute image URL")
+login_code, login_html, _, _ = fetch(login_url)
+check(login_code == 200 and b"esp-login-form" in login_html,
+      "Actual configured ESP login form renders HTTP 200 (not 404)")
+# The new login redirect is only an anonymous navigation helper: a regular
+# embedded image request without credentials must still fail closed.
+gate(403)
+print("FG_BRIDGE_LOGIN_DIAGNOSTIC " + json.dumps({
+    "handoff_status": nav_code, "wp_status": wp_code,
+    "login_status": login_code, "return_path_matches": True
+}))
+
 Path(args.output).write_text(
     json.dumps(results, indent=2, ensure_ascii=False) + "\n"
 )
