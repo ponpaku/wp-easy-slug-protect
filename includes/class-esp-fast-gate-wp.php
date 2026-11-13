@@ -496,6 +496,11 @@ final class ESP_Fast_Gate_WP {
         header('X-LiteSpeed-Cache-Control: no-store');
         header('Referrer-Policy: no-referrer');
         header('X-Content-Type-Options: nosniff');
+        // Mirror the standalone Gate's restriction for directly opened SVG.
+        // An authenticated media URL is not a privileged script origin.
+        if (strtolower(pathinfo($file, PATHINFO_EXTENSION)) === 'svg') {
+            header("Content-Security-Policy: sandbox; default-src 'none'");
+        }
         (new ESP_Media_Deriver())->deliver($file, true, true);
         self::bridge_error(503); // Covers pre-body delivery failures.
     }
