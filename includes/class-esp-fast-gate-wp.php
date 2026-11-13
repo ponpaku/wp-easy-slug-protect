@@ -445,10 +445,14 @@ final class ESP_Fast_Gate_WP {
             $permalink = get_permalink($page_id);
             $safe = $permalink ? wp_validate_redirect($permalink, '') : '';
             if (!$safe) { self::bridge_error(403); }
-            $encoded_file = implode('/', array_map('rawurlencode',
-                explode('/', $relative)));
-            $source_url = rtrim($uploads['baseurl'], '/') . '/' . $encoded_file;
-            $login_url = add_query_arg('redirect_to', $source_url, $safe);
+            // ESP_Core::sanitize_path() consumes a site-absolute path.
+            // WordPress add_query_arg() does not encode new query values.
+            // Sending the raw https://uploads URL can break login routing.
+            $return_path = ESP_Fast_Gate_Handoff::login_return_path(
+                $uploads['baseurl'], $relative);
+            if ($return_path === null) { self::bridge_error(403); }
+            $login_url = add_query_arg('redirect_to',
+                urlencode($return_path), $safe);
             nocache_headers();
             header('Cache-Control: private, no-store, max-age=0');
             header('X-LiteSpeed-Cache-Control: no-store');
