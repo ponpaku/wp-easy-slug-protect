@@ -449,7 +449,7 @@ final class ESP_Fast_Gate_WP {
             // WordPress add_query_arg() does not encode new query values.
             // Sending the raw https://uploads URL can break login routing.
             $return_path = ESP_Fast_Gate_Handoff::login_return_path(
-                $uploads['baseurl'], $relative);
+                $uploads['baseurl'], $relative, $bridge_path);
             if ($return_path === null) { self::bridge_error(403); }
             $login_url = add_query_arg('redirect_to',
                 urlencode($return_path), $safe);
