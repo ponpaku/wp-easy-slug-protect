@@ -41,6 +41,30 @@ check(ESP_Fast_Gate_Handoff::issue($site, $path, '../x.jpg',
 check(ESP_Fast_Gate_Handoff::issue($site, $path, 'foo%2fbar.jpg',
     'GET', $ticket_key) === null, 'encoded separator');
 
+// Issue #89: login handoff redirect_to must match ESP's path-only contract.
+// Passing a raw absolute URL through add_query_arg() leaves unencoded
+// :// and / characters; the LiteSpeed clone returned 404 for that form.
+$login_target = ESP_Fast_Gate_Handoff::login_return_path(
+    'https://followers-clone.example.test/wp-content/uploads',
+    '2026/09/dsc_0009.jpg');
+check($login_target === '/wp-content/uploads/2026/09/dsc_0009.jpg',
+    'login redirect_to is a site-absolute media path, not an absolute URL');
+check(urlencode($login_target) ===
+    '%2Fwp-content%2Fuploads%2F2026%2F09%2Fdsc_0009.jpg',
+    'login redirect_to query value is fully URL-encoded');
+check(ESP_Fast_Gate_Handoff::login_return_path(
+    'https://example.test/blog/wp-content/uploads',
+    '2026/09/a photo.jpg') ===
+    '/blog/wp-content/uploads/2026/09/a%20photo.jpg',
+    'login redirect preserves subdirectory and percent-encodes file segments');
+check(ESP_Fast_Gate_Handoff::login_return_path(
+    'https://example.test/wp-content/uploads', '../private.jpg') === null,
+    'login redirect rejects traversal');
+check(ESP_Fast_Gate_Handoff::login_return_path(
+    'https://example.test/wp-content/uploads?redirect=evil',
+    '2026/09/a.jpg') === null, 'login redirect rejects query-bearing upload roots');
+
+
 $cases = [
     ['bytes=0-0', 100, 206, 0, 0],
     ['bytes=5-', 100, 206, 5, 99],
