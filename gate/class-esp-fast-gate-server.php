@@ -50,24 +50,8 @@ final class ESP_Fast_Gate_Server {
      * rescued by another cookie during an interrupted logout.
      */
     private static function bridge_refs($cookies, $site, $path, $idkey) {
-        $refs = [];
-        $session = $cookies['esp_auth_' . $path] ?? null;
-        if (is_string($session) && strlen($session) >= 32 &&
-            strlen($session) <= 256) {
-            $ref = ESP_Fast_Gate_Token::session_ref(
-                $site, $path, 'session', '', $session, $idkey);
-            if ($ref !== null) { $refs[] = $ref; }
-        }
-        $user = $cookies['esp_remember_id_' . $path] ?? null;
-        $remember = $cookies['esp_remember_token_' . $path] ?? null;
-        if (is_string($user) && strlen($user) >= 1 && strlen($user) <= 191 &&
-            is_string($remember) && strlen($remember) >= 32 &&
-            strlen($remember) <= 256) {
-            $ref = ESP_Fast_Gate_Token::session_ref(
-                $site, $path, 'remember', $user, $remember, $idkey);
-            if ($ref !== null) { $refs[] = $ref; }
-        }
-        return $refs;
+        return ESP_Fast_Gate_Token::present_refs(
+            $site, $path, $cookies, $idkey);
     }
 
     public static function authorize($uri, $cookies, $site, $root,
