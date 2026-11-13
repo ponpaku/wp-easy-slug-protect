@@ -75,7 +75,19 @@ if ($phase === 'seed-release') {
         !class_exists('ESP_Fast_Gate_WP', false), 'not genuine v0.7.41 release');
     $settings=get_option(ESP_Config::OPTION_KEY);
     fg_life_check(is_array($settings), 'release settings missing');
-    $settings['path']=['fg_path'=>fg_life_settings()];
+    // A real published ESP login page lets the Apache HTTP suite validate
+    // the entire anonymous image URL -> Gate 307 -> WP login 302 -> page 200
+    // chain and the exact encoded redirect_to value.
+    $login_page=wp_insert_post([
+        'post_type'=>'page', 'post_status'=>'publish',
+        'post_title'=>'FG CI Login', 'post_name'=>'fg-ci-login',
+        'post_content'=>'[esp_login_form path_id="fg_path"]',
+    ], true);
+    fg_life_check(!is_wp_error($login_page) && (int)$login_page>0,
+        'disposable login page created');
+    $path_settings=fg_life_settings();
+    $path_settings['login_page']=(int)$login_page;
+    $settings['path']=['fg_path'=>$path_settings];
     fg_life_check(update_option(ESP_Config::OPTION_KEY,$settings),
         'release settings failed to save');
     fg_life_check(ESP_Updater::during_activation(static function() {
