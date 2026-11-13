@@ -335,8 +335,15 @@ if($phase==='http-prepare'){
     $keys=require ESP_Fast_Gate_WP::private_dir().'/keys.php';
     fg_life_check(($keys['prefix'] ?? null)==='/wp-content/uploads/',
         'provisioned URL prefix does not match real Apache document root');
+    // Simulate a production activation epoch before creating the ticket.
+    // Active Fast Gate never accepts a legacy nonce-less signing key.
+    fg_life_check($db->rotate_ticket_signing_key(),
+        'could not establish test activation signing epoch');
+    $ticket_key=$db->ticket_signing_key_strict($keys['sig']);
+    fg_life_check(is_string($ticket_key),
+        'failed to derive activation-scoped ticket signing key');
     $ticket=ESP_Fast_Gate_Token::issue($keys['site'],'fg_path','session','',
-        $token,1,$expires,$keys['sig'],$keys['id']);
+        $token,1,$expires,$ticket_key,$keys['id']);
     fg_life_check(is_string($ticket),'failed to issue test-only signed ticket');
     $out=getenv('ESP_FG_COOKIE_FILE');
     fg_life_check(is_string($out)&&$out!=='','missing private test cookie path');
