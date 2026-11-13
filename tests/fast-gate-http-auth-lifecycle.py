@@ -236,7 +236,9 @@ gate(403, signed_cookie_only(session))
 # credential may be safely rechecked by WordPress and have the ticket repaired.
 gate(200, mutate_token(session))
 bad_session = dict(session)
-bad_session["esp_auth_fg_path"] = "x" * 64
+# The disposable setup deliberately mints an all-"x" credential; do NOT
+# use that value as the supposed forgery here.
+bad_session["esp_auth_fg_path"] = "never-minted-token-" + "z" * 64
 gate(403, "; ".join(f"{k}={v}" for k, v in bad_session.items()))
 gate(405, session_header, method="POST")
 check(gate(200, session_header, method="HEAD") == b"",
