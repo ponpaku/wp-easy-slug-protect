@@ -38,12 +38,20 @@ final class ESP_Fast_Gate_Handoff {
     }
 
     /**
-     * Return a same-origin, site-absolute media path for ESP's redirect_to.
-     * add_query_arg() does not encode new values: callers must urlencode()
-     * this path. ESP_Core::sanitize_path() expects a path, not a URL.
+     * Return a home-relative path for ESP's login redirect_to parameter.
+     * ESP_Core::sanitize_path() then sends that path to home_url(), so the
+     * WordPress home prefix must not appear twice on subdirectory sites.
+     * Callers must urlencode() before passing the value to add_query_arg().
+     *
+     * $home_path is the validated, origin-relative bridge path ("/" or
+     * "/blog/") from bridge_path_config(), never an untrusted request Host.
      */
-    public static function login_return_path($uploads_baseurl, $relative) {
-        if (!is_string($uploads_baseurl) || !self::valid_relative($relative)) {
+    public static function login_return_path($uploads_baseurl, $relative,
+                                              $home_path = '/') {
+        if (!is_string($uploads_baseurl) || !self::valid_relative($relative) ||
+            !is_string($home_path) ||
+            !preg_match('~^/(?:[A-Za-z0-9._-]+/)*$~D', $home_path) ||
+            strpos($home_path, '..') !== false) {
             return null;
         }
         $url = parse_url($uploads_baseurl);
@@ -54,8 +62,15 @@ final class ESP_Fast_Gate_Handoff {
             isset($url['query']) || isset($url['fragment'])) {
             return null;
         }
-        $file = implode('/', array_map('rawurlencode', explode('/', $relative)));
-        return rtrim($url['path'], '/') . '/' . $file;
+        $absolute = rtrim($url['path'], '/') . '/' .
+            implode('/', array_map('rawurlencode', explode('/', $relative)));
+        if ($home_path !== '/') {
+            if (strncmp($absolute, $home_path, strlen($home_path)) !== 0) {
+                return null;
+            }
+            $absolute = '/' . substr($absolute, strlen($home_path));
+        }
+        return $absolute;
     }
 
     private static function valid_context($site, $path, $relative, $method, $purpose, $key) {
