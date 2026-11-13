@@ -4,6 +4,9 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+// This delivery adapter is also exercised directly by standalone PHP tests.
+require_once __DIR__ . '/class-esp-fast-gate-range.php';
+
 /**
  * メディアファイルの配信処理を担当するクラス
  */
