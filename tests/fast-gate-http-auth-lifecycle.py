@@ -298,6 +298,42 @@ for kind in ("session", "remember"):
     gate(403, pre_failure)
     check(True, f"Revocation persists despite failed {kind} SQL DELETE")
 
+# A short-lived handoff can be replayed while still in its 60-second
+# validity window. If one of two presented sessions was revoked *after* the
+# handoff was issued but before WordPress authorization, the other MySQL-valid
+# session must NOT rescue the revoked one.
+class StopAtRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+handoff_jar = http.cookiejar.CookieJar()
+action(handoff_jar, "session")
+action(handoff_jar, "remember")
+handoff_sources = {k: v for k, v in get_cookies(handoff_jar).items()
+                   if k != "esp_gate_fg_path"}
+handoff_source_header = "; ".join(f"{k}={v}" for k, v in handoff_sources.items())
+pending_status, _, pending_headers, _ = fetch(
+    protected, handoff_source_header,
+    opener=urllib.request.build_opener(StopAtRedirect())
+)
+check(pending_status == 307 and "Location" in pending_headers,
+      "Gate produced signed handoff before mixed-session revocation")
+from urllib.parse import urljoin
+pending_url = urljoin(base, pending_headers["Location"])
+remember_only = http.cookiejar.CookieJar()
+for c in handoff_jar:
+    if c.name in {"esp_remember_id_fg_path", "esp_remember_token_fg_path"}:
+        remember_only.set_cookie(c)
+failure = action(remember_only, "logout-fail-remember", expect=False)
+check(failure.get("injected_delete_failed") is True and
+      failure.get("target_row_retained") is True,
+      "Revoked Remember identity remains in MySQL after deliberate failure")
+replay_status, _, _, _ = fetch(pending_url, handoff_source_header)
+check(replay_status == 403,
+      "Replay of pre-revocation handoff cannot rescue revoked Remember")
+gate(403, handoff_source_header)
+
 # Change the canonical WordPress password generation with real option
 # hooks and an active test-only gate. Old tickets must fail; a fresh
 # WordPress login must issue a new version and succeed.
