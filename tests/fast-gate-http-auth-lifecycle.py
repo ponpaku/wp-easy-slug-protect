@@ -207,9 +207,34 @@ session_header = cookie_header(session_jar)
 payload = gate(200, session_header)
 check(len(payload) > 100, "Real WordPress session serves protected bytes")
 
-gate(403, "esp_auth_fg_path=" + session["esp_auth_fg_path"])
+# A client authenticated before Fast Gate activation holds only the old
+# ESP session cookie. The first image request follows Gate 307 -> WordPress,
+# confirms the live MySQL credential, receives a fresh Gate cookie, and
+# downloads the original media in the SAME WordPress response.
+legacy_jar = http.cookiejar.CookieJar()
+for old_cookie in session_jar:
+    if old_cookie.name == "esp_auth_fg_path":
+        legacy_jar.set_cookie(old_cookie)
+recorder = RedirectRecorder()
+legacy_opener = urllib.request.build_opener(
+    urllib.request.HTTPCookieProcessor(legacy_jar), recorder
+)
+bridge_status, bridge_body, bridge_headers, _ = fetch(
+    protected, opener=legacy_opener
+)
+check(bridge_status == 200 and bridge_body == payload,
+      "Old ESP session first image restored by WordPress direct delivery")
+check(len(recorder.hops) == 1 and recorder.hops[0][0] == 307,
+      "Only one Gate-to-WordPress handoff redirect was required")
+check("esp_gate_fg_path" in get_cookies(legacy_jar),
+      "WordPress handoff issued browser-accepted Fast Gate cookie")
+gate(200, cookie_header(legacy_jar))
+check(True, "Subsequent old-session image served by standalone Fast Gate")
+
 gate(403, signed_cookie_only(session))
-gate(403, mutate_token(session))
+# An invalid Gate ticket alone cannot authenticate. A still-valid source
+# credential may be safely rechecked by WordPress and have the ticket repaired.
+gate(200, mutate_token(session))
 bad_session = dict(session)
 bad_session["esp_auth_fg_path"] = "x" * 64
 gate(403, "; ".join(f"{k}={v}" for k, v in bad_session.items()))
