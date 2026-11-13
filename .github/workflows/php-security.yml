@@ -23,6 +23,8 @@ jobs:
         run: find . -name '*.php' -print0 | xargs -0 -n1 php -l
       - name: Test Fast Gate v2 token and SQLite fail-closed core
         run: php tests/security-fast-gate-core-test.php
+      - name: Test Fast Gate bridge handoff, revocation and Range contract
+        run: php tests/fast-gate-bridge-contract-test.php
       - name: Test Fast Gate v2 automatic PHP-key provisioning
         run: php tests/security-fast-gate-provision-test.php
       - name: Test Fast Gate Remember Me stale/missing credential handling
