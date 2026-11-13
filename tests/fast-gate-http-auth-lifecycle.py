@@ -202,6 +202,39 @@ def parallel_access(valid_cookie):
 # a test-only HTTP endpoint for driving existing authentication methods.
 gate(403)  # known protected file, no cookies
 
+# Real anonymous top-level navigation must reach the configured ESP login
+# page, with an encoded home-relative media return path. The previous bridge
+# passed an unencoded absolute URL to add_query_arg(), which failed as 404
+# on the LiteSpeed clone. This contract prevents that URL format regression.
+class StopLoginRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+from urllib.parse import urljoin, urlsplit, parse_qs
+no_redirects = urllib.request.build_opener(StopLoginRedirect())
+nav_status, _, nav_headers, _ = fetch(
+    protected, headers={
+        "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document"
+    }, opener=no_redirects
+)
+check(nav_status == 307 and "Location" in nav_headers,
+      "Anonymous direct media navigation reaches signed WP login handoff")
+login_handoff_url = urljoin(base, nav_headers["Location"])
+login_status, _, login_headers, _ = fetch(
+    login_handoff_url, opener=no_redirects
+)
+check(login_status == 302 and "Location" in login_headers,
+      "Valid login handoff redirects to configured ESP login page")
+login_url = urljoin(base, login_headers["Location"])
+return_query = parse_qs(urlsplit(login_url).query)
+check(return_query.get("redirect_to") ==
+      ["/wp-content/uploads/fg-life-protected.jpg"] and
+      "redirect_to=%2Fwp-content%2Fuploads%2F" in login_url,
+      "Login redirect_to is URL-encoded home-relative uploads path")
+login_page_status, login_page_body, _, _ = fetch(login_url)
+check(login_page_status == 200 and b"esp-login-form" in login_page_body,
+      "Configured ESP login page renders HTTP 200 with media return path")
+
 # The actual shipped redirect function emits queued cookies before
 # returning a 302; the redirected WordPress GET receives both credentials.
 for kind in ("session", "remember"):
