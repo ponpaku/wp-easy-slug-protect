@@ -54,9 +54,13 @@ check(urlencode($login_target) ===
     'login redirect_to query value is fully URL-encoded');
 check(ESP_Fast_Gate_Handoff::login_return_path(
     'https://example.test/blog/wp-content/uploads',
-    '2026/09/a photo.jpg') ===
-    '/blog/wp-content/uploads/2026/09/a%20photo.jpg',
-    'login redirect preserves subdirectory and percent-encodes file segments');
+    '2026/09/a photo.jpg', '/blog/') ===
+    '/wp-content/uploads/2026/09/a%20photo.jpg',
+    'login redirect is home-relative on subdirectory installs');
+check(ESP_Fast_Gate_Handoff::login_return_path(
+    'https://example.test/media/uploads',
+    '2026/09/a.jpg', '/blog/') === null,
+    'login redirect rejects uploads outside the configured home prefix');
 check(ESP_Fast_Gate_Handoff::login_return_path(
     'https://example.test/wp-content/uploads', '../private.jpg') === null,
     'login redirect rejects traversal');
