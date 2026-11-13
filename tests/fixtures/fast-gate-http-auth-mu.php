@@ -8,6 +8,16 @@
  */
 if (!defined('ABSPATH')) { exit; }
 
+// The temporary benchmark uses a deliberately non-production serving flag.
+// Only the handoff callback needs the corresponding WordPress active marker.
+// This is scoped to the disposable DB and container flag, not to other URLs.
+if (getenv('ESP_FG_CI_HTTP_AUTH') === '1' &&
+    defined('DB_NAME') && DB_NAME === 'esp_fg_lifecycle' &&
+    isset($_GET['esp_gate_bridge'])) {
+    add_filter('pre_option_esp_fast_gate_v2_active',
+        static function () { return '1'; }, 1);
+}
+
 add_action('init', static function () {
     // Test-only fault injection for an actual administrator form submission.
     // Scoped to the disposable DB, explicitly enabled fixture and one request.
