@@ -67,6 +67,19 @@ class RedirectRecorder(urllib.request.HTTPRedirectHandler):
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         self.hops.append((code, newurl, headers.get_all("Set-Cookie") or []))
+        # 307/308 preserve the method. urllib's redirect implementation
+        # can follow a HEAD as GET on the CI Python version; enforce the
+        # wire-level RFC contract instead of turning this into a false
+        # product regression. The server must still authorize the HEAD.
+        if code in (307, 308) and req.get_method() == "HEAD":
+            return urllib.request.Request(
+                newurl,
+                headers={k: v for k, v in req.headers.items()
+                         if k.lower() not in ("content-length", "content-type")},
+                method="HEAD",
+                origin_req_host=req.origin_req_host,
+                unverifiable=True,
+            )
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
