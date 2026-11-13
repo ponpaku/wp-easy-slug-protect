@@ -45,8 +45,34 @@ final class ESP_Fast_Gate_Server {
         return in_array($extension, self::EXT, true) ? $decoded : null;
     }
 
+    /** Identify plausible old ESP credentials, never trust them as proof.
+     * Check ALL present credential refs: an already-revoked ref must not be
+     * rescued by another cookie during an interrupted logout.
+     */
+    private static function bridge_refs($cookies, $site, $path, $idkey) {
+        $refs = [];
+        $session = $cookies['esp_auth_' . $path] ?? null;
+        if (is_string($session) && strlen($session) >= 32 &&
+            strlen($session) <= 256) {
+            $ref = ESP_Fast_Gate_Token::session_ref(
+                $site, $path, 'session', '', $session, $idkey);
+            if ($ref !== null) { $refs[] = $ref; }
+        }
+        $user = $cookies['esp_remember_id_' . $path] ?? null;
+        $remember = $cookies['esp_remember_token_' . $path] ?? null;
+        if (is_string($user) && strlen($user) >= 1 && strlen($user) <= 191 &&
+            is_string($remember) && strlen($remember) >= 32 &&
+            strlen($remember) <= 256) {
+            $ref = ESP_Fast_Gate_Token::session_ref(
+                $site, $path, 'remember', $user, $remember, $idkey);
+            if ($ref !== null) { $refs[] = $ref; }
+        }
+        return $refs;
+    }
+
     public static function authorize($uri, $cookies, $site, $root,
-                                     $prefix, $sig, $idkey, $store, $now = null) {
+                                     $prefix, $sig, $idkey, $store, $now = null,
+                                     $fetch_mode = null, $fetch_dest = null) {
         $relative = self::relative_path($uri, $prefix);
         if ($relative === null) { return ['status' => 403]; }
         if (!is_array($cookies) || !is_string($root) ||
@@ -67,7 +93,28 @@ final class ESP_Fast_Gate_Server {
                 $ticket, $site, $path, $cookies, $state['version'],
                 $sig, $idkey, $now
             );
-            if (!$data) { return ['status' => 403]; }
+            if (!$data) {
+                $refs = self::bridge_refs($cookies, $site, $path, $idkey);
+                if (!$refs) {
+                    // UX-only distinction, NEVER an authorization decision.
+                    // Embedded images must not receive login HTML.
+                    if ($fetch_mode === 'navigate' &&
+                        $fetch_dest === 'document') {
+                        return ['status' => 307, 'relative' => $relative,
+                            'path_id' => $path, 'purpose' => 'login'];
+                    }
+                    return ['status' => 403];
+                }
+                foreach ($refs as $ref) {
+                    // A known revocation, or inability to determine its
+                    // status, must never enter the recovery bridge.
+                    if ($store->is_revoked($ref) !== false) {
+                        return ['status' => 403];
+                    }
+                }
+                return ['status' => 307, 'relative' => $relative,
+                    'path_id' => $path, 'purpose' => 'auth'];
+            }
             if ($store->is_revoked($data['ref']) !== false) {
                 return ['status' => 403];
             }

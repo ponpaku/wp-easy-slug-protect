@@ -12,6 +12,7 @@ final class ESP_Fast_Gate_WP {
     private static $touched = [];
 
     public static function register() {
+        add_action('template_redirect', [self::class, 'handle_bridge'], 0);
         add_filter('pre_update_option_' . ESP_Config::OPTION_KEY,
             [self::class, 'before_settings_save'], 5, 2);
         add_filter('pre_update_option_' . self::ACTIVE_OPTION,
@@ -27,6 +28,32 @@ final class ESP_Fast_Gate_WP {
         if (defined('WP_CLI') && WP_CLI && class_exists('WP_CLI')) {
             \WP_CLI::add_command('esp gate-ledger', 'ESP_Fast_Gate_CLI');
         }
+    }
+
+    /**
+     * Accept only matching scheme/host/port for the public home and uploads.
+     * Encoded or unusual home paths are unsupported until audited, rather than
+     * relying on HTTP Host or guessing a WordPress URL from an uploads path.
+     */
+    public static function bridge_path_config() {
+        $home = parse_url(home_url('/'));
+        $uploads = wp_upload_dir(null, false);
+        $media = isset($uploads['baseurl']) ? parse_url($uploads['baseurl']) : false;
+        if (!is_array($home) || !is_array($media) ||
+            !isset($home['host'], $home['scheme'], $media['host'], $media['scheme']) ||
+            strtolower($home['host']) !== strtolower($media['host']) ||
+            strtolower($home['scheme']) !== strtolower($media['scheme']) ||
+            ($home['port'] ?? null) !== ($media['port'] ?? null)) {
+            return null;
+        }
+        $path = $home['path'] ?? '/';
+        if (!is_string($path) || !preg_match('~^/(?:[A-Za-z0-9._-]+/)*$~D', $path) ||
+            strpos($path, '..') !== false ||
+            !isset($media['path']) ||
+            strncmp($media['path'], $path, strlen($path)) !== 0) {
+            return null;
+        }
+        return $path;
     }
 
     /**
@@ -302,7 +329,7 @@ final class ESP_Fast_Gate_WP {
         $ref = ESP_Fast_Gate_Token::session_ref($keys['site'],
             (string)$path, $kind, (string)$user, (string)$token, $keys['id']);
         if (!$ref || $db->is_revoked($ref) !== false) { return; }
-        $ticket_key = $db->ticket_signing_key($keys['sig']);
+        $ticket_key = $db->ticket_signing_key_strict($keys['sig']);
         if ($ticket_key === null) { return; }
         $ticket = ESP_Fast_Gate_Token::issue(
             $keys['site'], (string)$path, $kind, (string)$user, (string)$token,
@@ -312,6 +339,165 @@ final class ESP_Fast_Gate_WP {
             ESP_Cookie::get_instance()->queue_gate_ticket((string)$path, $ticket,
                 min((int)$expires, time() + ESP_Fast_Gate_Token::MAX_AGE));
         }
+    }
+
+    /**
+     * Generate a ticket for an already-verified MySQL credential.
+     * The caller MUST enforce the final SQLite bridge_allowed() snapshot
+     * before actually sending this ticket or any media body.
+     */
+    private static function bridge_ticket($credential, $path, $version,
+                                          $keys, $db, $ticket_key) {
+        $ref = ESP_Fast_Gate_Token::session_ref($keys['site'], $path,
+            $credential['kind'], $credential['user'], $credential['token'],
+            $keys['id']);
+        if ($ref === null) { return null; }
+        $ticket = ESP_Fast_Gate_Token::issue($keys['site'], $path,
+            $credential['kind'], $credential['user'], $credential['token'],
+            $version, $credential['expires'], $ticket_key, $keys['id']);
+        return $ticket === null ? null : ['ticket' => $ticket, 'ref' => $ref];
+    }
+
+    private static function bridge_error($status) {
+        if (!headers_sent()) {
+            status_header($status);
+            header('Cache-Control: private, no-store, max-age=0');
+            header('X-LiteSpeed-Cache-Control: no-store');
+            header('Referrer-Policy: no-referrer');
+            header('X-Content-Type-Options: nosniff');
+        }
+        exit;
+    }
+
+    /** Explicit endpoint: handoff is routing evidence, not authorization. */
+    public static function handle_bridge() {
+        if (!isset($_GET['esp_gate_bridge'])) { return; }
+        $method = $_SERVER['REQUEST_METHOD'] ?? '';
+        if ($method !== 'GET' && $method !== 'HEAD') {
+            header('Allow: GET, HEAD');
+            self::bridge_error(405);
+        }
+        if (count($_GET) !== 1 || !is_string($_GET['esp_gate_bridge']) ||
+            strlen($_GET['esp_gate_bridge']) > 4096 ||
+            !self::active() ||
+            !class_exists('ESP_Media_Index') || !ESP_Media_Index::enabled()) {
+            self::bridge_error(403);
+        }
+        $bridge_path = self::bridge_path_config();
+        $requested_path = parse_url((string)($_SERVER['REQUEST_URI'] ?? ''),
+            PHP_URL_PATH);
+        if ($bridge_path === null || $requested_path !== $bridge_path) {
+            self::bridge_error(403);
+        }
+        $keys = self::keys();
+        $db = self::ledger(false);
+        if (!$keys || !$db || !$db->serving() ||
+            $db->bridge_path() !== $bridge_path) { self::bridge_error(503); }
+        $ticket_key = $db->ticket_signing_key_strict($keys['sig']);
+        if ($ticket_key === null) { self::bridge_error(503); }
+        $handoff = ESP_Fast_Gate_Handoff::verify(
+            $_GET['esp_gate_bridge'], $keys['site'], $method, $ticket_key);
+        if ($handoff === null) { self::bridge_error(403); }
+
+        $relative = $handoff['file'];
+        $path = $handoff['path'];
+        $uploads = wp_upload_dir(null, false);
+        $root = !empty($uploads['basedir']) ? realpath($uploads['basedir']) : false;
+        if (!$root || !is_dir($root) ||
+            !ESP_Fast_Gate_Handoff::valid_relative($relative)) {
+            self::bridge_error(403);
+        }
+        // Match Fast Gate's symlink prohibition below the uploads root.
+        $logical = rtrim($uploads['basedir'], '/');
+        foreach (explode('/', $relative) as $segment) {
+            $logical .= '/' . $segment;
+            if (is_link($logical)) { self::bridge_error(403); }
+        }
+        $file = realpath($logical);
+        if (!$file || strncmp($file, rtrim($root, '/') . '/',
+                strlen(rtrim($root, '/') . '/')) !== 0 ||
+            !is_file($file) || !is_readable($file)) { self::bridge_error(403); }
+
+        $owner = ESP_Media_Index::resolve($file);
+        if (!is_array($owner) || ($owner['status'] ?? '') !== 'resolved' ||
+            ($owner['protected_path_id'] ?? null) !== $path) {
+            self::bridge_error(403);
+        }
+        $paths = ESP_Option::get_current_setting('path');
+        if (!is_array($paths) || !isset($paths[$path]) ||
+            !is_array($paths[$path])) { self::bridge_error(403); }
+        $current_version = (int)($paths[$path]['password_version'] ?? 0);
+        if (($handoff['purpose'] ?? '') === 'login') {
+            // Login handoffs NEVER serve any bytes. Recheck the current
+            // protected path before exposing its configured login route.
+            $entry = $db->get_media($relative);
+            $state = $db->get_path($path);
+            if (!$entry || $entry['policy'] !== 'protected' ||
+                $entry['path_id'] !== $path || !$state || $state['blocked'] ||
+                $state['version'] !== $current_version) {
+                self::bridge_error(403);
+            }
+            $page_id = (int)($paths[$path]['login_page'] ?? 0);
+            $page = $page_id > 0 ? get_post($page_id) : null;
+            if (!$page || $page->post_status !== 'publish') {
+                self::bridge_error(403);
+            }
+            $permalink = get_permalink($page_id);
+            $safe = $permalink ? wp_validate_redirect($permalink, '') : '';
+            if (!$safe) { self::bridge_error(403); }
+            $encoded_file = implode('/', array_map('rawurlencode',
+                explode('/', $relative)));
+            $source_url = rtrim($uploads['baseurl'], '/') . '/' . $encoded_file;
+            $login_url = add_query_arg('redirect_to', $source_url, $safe);
+            nocache_headers();
+            header('Cache-Control: private, no-store, max-age=0');
+            header('X-LiteSpeed-Cache-Control: no-store');
+            header('Referrer-Policy: no-referrer');
+            wp_safe_redirect($login_url, 302);
+            exit;
+        }
+        if (($handoff['purpose'] ?? '') !== 'auth') {
+            self::bridge_error(403);
+        }
+        $auth = new ESP_Auth();
+        $credentials = $auth->fast_gate_bridge_candidates($paths[$path]);
+        if ($credentials === null) { self::bridge_error(503); }
+        if (!$credentials) { self::bridge_error(403); }
+        $refs = [];
+        foreach ($credentials as $credential) {
+            $ref = ESP_Fast_Gate_Token::session_ref($keys['site'], $path,
+                $credential['kind'], $credential['user'], $credential['token'],
+                $keys['id']);
+            if ($ref === null) { self::bridge_error(403); }
+            $refs[] = $ref;
+        }
+        // In a partial logout, do not allow the other credential to override
+        // a known revocation. Check all presented MySQL-valid identities.
+        $candidate = $credentials[0];
+        // Do not extend Remember in the bridge. A concurrent logout must
+        // not turn a revoked-but-not-yet-deleted MySQL row into a renewed
+        // credential. The newly issued ticket expires no later than the
+        // already-verified MySQL expiry; sliding renewal requires a separate
+        // cross-store race design and tests.
+        $new_ticket = self::bridge_ticket($candidate, $path,
+            $current_version, $keys, $db, $ticket_key);
+        if ($new_ticket === null) { self::bridge_error(503); }
+        // This SQLite read snapshot is the final authorization point. Any
+        // prior committed revocation/fence/serving stop must reject delivery.
+        $permission = $db->bridge_allowed($relative, $path, $current_version, $refs);
+        if ($permission !== true) { self::bridge_error($permission === null ? 503 : 403); }
+
+        $cookies = ESP_Cookie::get_instance();
+        $cookies->queue_gate_ticket($path, $new_ticket['ticket'],
+            min($candidate['expires'], time() + ESP_Fast_Gate_Token::MAX_AGE));
+        if (!$cookies->set_pending_cookies()) { self::bridge_error(503); }
+
+        header('Cache-Control: private, no-store, no-cache, max-age=0, must-revalidate');
+        header('X-LiteSpeed-Cache-Control: no-store');
+        header('Referrer-Policy: no-referrer');
+        header('X-Content-Type-Options: nosniff');
+        (new ESP_Media_Deriver())->deliver($file, true, true);
+        self::bridge_error(503); // Covers pre-body delivery failures.
     }
 
     /**

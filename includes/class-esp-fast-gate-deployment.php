@@ -460,6 +460,15 @@ final class ESP_Fast_Gate_Deployment {
             if (!self::lock()) { return self::error('transition_locked'); }
             try {
                 if (!self::owns_lock()) { return self::error('transition_lock_lost'); }
+                // Persist the configured same-origin WordPress bridge route
+                // before installing the Fast Gate; never infer it from Host.
+                $bridge_path = ESP_Fast_Gate_WP::bridge_path_config();
+                if (!ESP_Fast_Gate_Handoff::crypto_available()) {
+                    return self::error('bridge_crypto_unavailable');
+                }
+                if ($bridge_path === null || !$db->set_bridge_path($bridge_path)) {
+                    return self::error('bridge_route_unsupported');
+                }
                 // 1. Install fail-closed route: serving=0 -> 503.
                 $installed = self::write_route('fast') && self::rewrite(true);
                 if (!self::owns_lock()) { return self::error('transition_lock_lost'); }

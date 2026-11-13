@@ -69,6 +69,8 @@ class Easy_Slug_Protect {
         require_once ESP_PATH . 'includes/class-esp-media-file-resolver.php';
         require_once ESP_PATH . 'includes/class-esp-media-index.php';
         require_once ESP_PATH . 'includes/class-esp-fast-gate-token.php';
+        require_once ESP_PATH . 'includes/class-esp-fast-gate-handoff.php';
+        require_once ESP_PATH . 'includes/class-esp-fast-gate-range.php';
         require_once ESP_PATH . 'includes/class-esp-fast-gate-store.php';
         require_once ESP_PATH . 'includes/class-esp-fast-gate-wp.php';
         require_once ESP_PATH . 'includes/class-esp-fast-gate-deployment.php';
