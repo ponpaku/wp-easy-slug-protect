@@ -337,6 +337,8 @@ if($phase==='http-prepare'){
         'provisioned URL prefix does not match real Apache document root');
     // Simulate a production activation epoch before creating the ticket.
     // Active Fast Gate never accepts a legacy nonce-less signing key.
+    fg_life_check($db->set_bridge_path('/'),
+        'could not configure disposable frontend authentication bridge');
     fg_life_check($db->rotate_ticket_signing_key(),
         'could not establish test activation signing epoch');
     $ticket_key=$db->ticket_signing_key_strict($keys['sig']);
