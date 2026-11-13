@@ -243,6 +243,11 @@ head_opener = urllib.request.build_opener(
 head_status, head_body, head_headers, _ = fetch(
     protected, method="HEAD", opener=head_opener
 )
+print("FG_BRIDGE_HEAD_DIAGNOSTIC " + json.dumps({
+    "status": head_status, "body_len": len(head_body),
+    "redirect_codes": [h[0] for h in head_hops.hops],
+    "content_type": head_headers.get("Content-Type"),
+}))
 check(head_status == 200 and head_body == b"" and
       len(head_hops.hops) == 1 and head_hops.hops[0][0] == 307,
       "Old-session HEAD handoff preserved HEAD and streamed no bytes")
@@ -260,6 +265,11 @@ range_opener = urllib.request.build_opener(
 range_status, range_body, range_headers, _ = fetch(
     protected, headers={"Range": "bytes=0-31"}, opener=range_opener
 )
+print("FG_BRIDGE_RANGE_DIAGNOSTIC " + json.dumps({
+    "status": range_status, "body_len": len(range_body),
+    "redirect_codes": [h[0] for h in range_hops.hops],
+    "content_range": range_headers.get("Content-Range"),
+}))
 check(range_status == 206 and range_body == payload[:32] and
       len(range_hops.hops) == 1 and range_hops.hops[0][0] == 307,
       "Old-session GET Range handoff preserved partial-media delivery")
