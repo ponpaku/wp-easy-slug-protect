@@ -170,7 +170,7 @@ add_action('init', static function () {
     $supported = ['session', 'remember', 'redirect-session',
         'redirect-remember', 'refresh', 'logout',
         'logout-fail-session', 'logout-fail-remember', 'rotate',
-        'login-page-setup'];
+        'login-page-setup', 'login-page-teardown'];
     if (!in_array($action, $supported, true)) {
         status_header(404);
         exit;
@@ -208,6 +208,17 @@ add_action('init', static function () {
             $result['login_page_id'] = (int)$login_id;
         }
         $result['login_page_configured'] = $ok;
+    } elseif ($action === 'login-page-teardown') {
+        // Do not leak this test-only login_page setting into the separate
+        // activation/rollback E2E, whose legacy anonymous baseline is 403.
+        $settings = get_option(ESP_Config::OPTION_KEY);
+        if (is_array($settings) &&
+            isset($settings['path']['fg_path']['login_page']) &&
+            (int)$settings['path']['fg_path']['login_page'] > 0) {
+            $settings['path']['fg_path']['login_page'] = 0;
+            $ok = update_option(ESP_Config::OPTION_KEY, $settings);
+        }
+        $result['login_page_restored_to_zero'] = $ok;
     } elseif (in_array($action,
         ['session','remember','redirect-session','redirect-remember'], true)) {
         if (in_array($action, ['remember','redirect-remember'], true)) {
