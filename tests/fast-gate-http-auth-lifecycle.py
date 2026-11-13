@@ -429,7 +429,7 @@ class StopAnonymousRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
 
-from urllib.parse import urljoin, urlsplit, parse_qs
+from urllib.parse import urljoin, urlsplit, parse_qs, quote
 stop_redirect = urllib.request.build_opener(StopAnonymousRedirect())
 nav_code, _, nav_headers, _ = fetch(
     protected,
@@ -445,7 +445,7 @@ check(wp_code == 302 and "Location" in wp_headers,
 login_url = urljoin(base, wp_headers["Location"])
 query = parse_qs(urlsplit(login_url).query)
 check(query.get("redirect_to") == [protected] and
-      "redirect_to=https%3A%2F%2F" in login_url,
+      "redirect_to=" + quote(protected, safe="") in login_url,
       "Existing media redirect encodes original absolute image URL")
 login_code, login_html, _, _ = fetch(login_url)
 check(login_code == 200 and b"esp-login-form" in login_html,
