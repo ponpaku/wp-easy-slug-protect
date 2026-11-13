@@ -150,6 +150,7 @@ fg_wp_stage('REAL_SQLITE_CATALOG_BUILT_INACTIVE');
 // no actual active option is changed and no Fast Gate Rewrite is installed.
 $active_filter = static function ($value) { return '1'; };
 add_filter('pre_option_' . ESP_Fast_Gate_WP::ACTIVE_OPTION, $active_filter);
+fg_wp_assert($ledger->rotate_ticket_signing_key(), 'test-only activation signing epoch');
 fg_wp_assert($ledger->set_serving(true), 'test-only SQLite serving flag');
 require_once ESP_PATH . 'gate/class-esp-fast-gate-server.php';
 $keys = require ESP_Fast_Gate_WP::private_dir() . '/keys.php';
