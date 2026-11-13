@@ -463,13 +463,19 @@ final class ESP_Fast_Gate_WP {
         $credentials = $auth->fast_gate_bridge_candidates($paths[$path]);
         if ($credentials === null) { self::bridge_error(503); }
         if (!$credentials) { self::bridge_error(403); }
-        $refs = [];
+        // Do not restrict the revocation check to MySQL-valid rows.
+        // During an interrupted logout one credential may already have been
+        // removed from MySQL while its revoked Cookie is still presented.
+        $refs = ESP_Fast_Gate_Token::present_refs(
+            $keys['site'], $path, $_COOKIE, $keys['id']);
+        if (!$refs) { self::bridge_error(403); }
         foreach ($credentials as $credential) {
             $ref = ESP_Fast_Gate_Token::session_ref($keys['site'], $path,
                 $credential['kind'], $credential['user'], $credential['token'],
                 $keys['id']);
-            if ($ref === null) { self::bridge_error(403); }
-            $refs[] = $ref;
+            if ($ref === null || !in_array($ref, $refs, true)) {
+                self::bridge_error(403);
+            }
         }
         // In a partial logout, do not allow the other credential to override
         // a known revocation. Check all presented MySQL-valid identities.
