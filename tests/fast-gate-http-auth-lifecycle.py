@@ -231,6 +231,39 @@ check("esp_gate_fg_path" in get_cookies(legacy_jar),
 gate(200, cookie_header(legacy_jar))
 check(True, "Subsequent old-session image served by standalone Fast Gate")
 
+# HEAD handoff also retains the method and must not include media bytes.
+head_jar = http.cookiejar.CookieJar()
+for c in session_jar:
+    if c.name == "esp_auth_fg_path":
+        head_jar.set_cookie(c)
+head_hops = RedirectRecorder()
+head_opener = urllib.request.build_opener(
+    urllib.request.HTTPCookieProcessor(head_jar), head_hops
+)
+head_status, head_body, head_headers, _ = fetch(
+    protected, method="HEAD", opener=head_opener
+)
+check(head_status == 200 and head_body == b"" and
+      len(head_hops.hops) == 1 and head_hops.hops[0][0] == 307,
+      "Old-session HEAD handoff preserved HEAD and streamed no bytes")
+
+# Range is relevant for PDFs and video. Verify this HTTP client's Range
+# header survives the handoff and WordPress returns only requested bytes.
+range_jar = http.cookiejar.CookieJar()
+for c in session_jar:
+    if c.name == "esp_auth_fg_path":
+        range_jar.set_cookie(c)
+range_hops = RedirectRecorder()
+range_opener = urllib.request.build_opener(
+    urllib.request.HTTPCookieProcessor(range_jar), range_hops
+)
+range_status, range_body, range_headers, _ = fetch(
+    protected, headers={"Range": "bytes=0-31"}, opener=range_opener
+)
+check(range_status == 206 and range_body == payload[:32] and
+      len(range_hops.hops) == 1 and range_hops.hops[0][0] == 307,
+      "Old-session GET Range handoff preserved partial-media delivery")
+
 gate(403, signed_cookie_only(session))
 # An invalid Gate ticket alone cannot authenticate. A still-valid source
 # credential may be safely rechecked by WordPress and have the ticket repaired.
