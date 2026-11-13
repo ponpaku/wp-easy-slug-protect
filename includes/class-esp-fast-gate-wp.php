@@ -437,28 +437,14 @@ final class ESP_Fast_Gate_WP {
                 $state['version'] !== $current_version) {
                 self::bridge_error(403);
             }
-            $page_id = (int)($paths[$path]['login_page'] ?? 0);
-            $page = $page_id > 0 ? get_post($page_id) : null;
-            if (!$page || $page->post_status !== 'publish') {
+            // The handoff only routes a verified protected media request.
+            // Login-page selection and redirect_to construction belong to
+            // the existing media plugin, not a second bridge implementation.
+            if (!ESP_Media_Protection::redirect_to_login(
+                $paths[$path], $relative)) {
                 self::bridge_error(403);
             }
-            $permalink = get_permalink($page_id);
-            $safe = $permalink ? wp_validate_redirect($permalink, '') : '';
-            if (!$safe) { self::bridge_error(403); }
-            // ESP_Core::sanitize_path() consumes a site-absolute path.
-            // WordPress add_query_arg() does not encode new query values.
-            // Sending the raw https://uploads URL can break login routing.
-            $return_path = ESP_Fast_Gate_Handoff::login_return_path(
-                $uploads['baseurl'], $relative, $bridge_path);
-            if ($return_path === null) { self::bridge_error(403); }
-            $login_url = add_query_arg('redirect_to',
-                urlencode($return_path), $safe);
-            nocache_headers();
-            header('Cache-Control: private, no-store, max-age=0');
-            header('X-LiteSpeed-Cache-Control: no-store');
-            header('Referrer-Policy: no-referrer');
-            wp_safe_redirect($login_url, 302);
-            exit;
+            exit; // ESP_Cookie::do_redirect() exits on success.
         }
         if (($handoff['purpose'] ?? '') !== 'auth') {
             self::bridge_error(403);
