@@ -4,6 +4,10 @@ require_once __DIR__ . '/../includes/class-esp-fast-gate-token.php';
 require_once __DIR__ . '/../includes/class-esp-fast-gate-handoff.php';
 require_once __DIR__ . '/../includes/class-esp-fast-gate-range.php';
 require_once __DIR__ . '/../gate/class-esp-fast-gate-server.php';
+define('ABSPATH', dirname(__DIR__) . '/');
+define('WEEK_IN_SECONDS', 604800);
+require_once __DIR__ . '/../includes/class-esp-media-protection.php';
+
 
 function check($condition, $name) {
     if (!$condition) { fwrite(STDERR, "FAIL: $name\n"); exit(1); }
@@ -41,33 +45,52 @@ check(ESP_Fast_Gate_Handoff::issue($site, $path, '../x.jpg',
 check(ESP_Fast_Gate_Handoff::issue($site, $path, 'foo%2fbar.jpg',
     'GET', $ticket_key) === null, 'encoded separator');
 
-// Issue #89: login handoff redirect_to must match ESP's path-only contract.
-// Passing a raw absolute URL through add_query_arg() leaves unencoded
-// :// and / characters; the LiteSpeed clone returned 404 for that form.
-$login_target = ESP_Fast_Gate_Handoff::login_return_path(
-    'https://followers-clone.example.test/wp-content/uploads',
-    '2026/09/dsc_0009.jpg');
-check($login_target === '/wp-content/uploads/2026/09/dsc_0009.jpg',
-    'login redirect_to is a site-absolute media path, not an absolute URL');
-check(urlencode($login_target) ===
-    '%2Fwp-content%2Fuploads%2F2026%2F09%2Fdsc_0009.jpg',
-    'login redirect_to query value is fully URL-encoded');
-check(ESP_Fast_Gate_Handoff::login_return_path(
-    'https://example.test/blog/wp-content/uploads',
-    '2026/09/a photo.jpg', '/blog/') ===
-    '/wp-content/uploads/2026/09/a%20photo.jpg',
-    'login redirect is home-relative on subdirectory installs');
-check(ESP_Fast_Gate_Handoff::login_return_path(
-    'https://example.test/media/uploads',
-    '2026/09/a.jpg', '/blog/') === null,
-    'login redirect rejects uploads outside the configured home prefix');
-check(ESP_Fast_Gate_Handoff::login_return_path(
-    'https://example.test/wp-content/uploads', '../private.jpg') === null,
-    'login redirect rejects traversal');
-check(ESP_Fast_Gate_Handoff::login_return_path(
-    'https://example.test/wp-content/uploads?redirect=evil',
-    '2026/09/a.jpg') === null, 'login redirect rejects query-bearing upload roots');
+// The SAME legacy media login redirect implementation serves both the
+// direct WordPress media handler and the authenticated Fast Gate handoff.
+// No login URL building belongs in the cryptographic handoff class.
+$fg_test_home = 'https://example.test';
+$fg_test_uploads = 'https://example.test/wp-content/uploads';
+function home_url($path = '') {
+    return rtrim($GLOBALS['fg_test_home'], '/') .
+        ($path === '' ? '' : '/' . ltrim($path, '/'));
+}
+function wp_upload_dir($time = null, $create = false) {
+    return ['baseurl' => $GLOBALS['fg_test_uploads'], 'error' => false];
+}
+function get_post($id) {
+    return (object)['post_status' => (int)$id === 123 ? 'publish' : 'draft'];
+}
+function get_permalink($id) {
+    return (int)$id === 123 ? $GLOBALS['fg_test_home'] . '/kyoshi-login/' : false;
+}
+function wp_validate_redirect($url, $fallback = '') {
+    return strpos($url, $GLOBALS['fg_test_home'] . '/') === 0 ? $url : $fallback;
+}
+function add_query_arg($key, $value, $url) {
+    return $url . '?' . rawurlencode($key) . '=' . $value;
+}
 
+$login_url = ESP_Media_Protection::media_login_redirect_url(
+    ['login_page'=>123], '2026/09/dsc_0009.jpg');
+check(is_string($login_url) &&
+    strpos($login_url, '/kyoshi-login/?redirect_to=https%3A%2F%2F') !== false &&
+    strpos($login_url, 'redirect_to=https://') === false,
+    'shared media login redirect uses encoded URL, never raw absolute query');
+parse_str(parse_url($login_url, PHP_URL_QUERY), $login_args);
+check(($login_args['redirect_to'] ?? null) ===
+    'https://example.test/wp-content/uploads/2026/09/dsc_0009.jpg',
+    'legacy and bridge use identical original-uploads return target');
+$fg_test_home = 'https://example.test/blog';
+$fg_test_uploads = 'https://example.test/blog/wp-content/uploads';
+$subdir_url = ESP_Media_Protection::media_login_redirect_url(
+    ['login_page'=>123], '2026/09/dsc_0009.jpg');
+parse_str(parse_url($subdir_url, PHP_URL_QUERY), $subdir_args);
+check(($subdir_args['redirect_to'] ?? null) ===
+    'https://example.test/blog/wp-content/uploads/2026/09/dsc_0009.jpg',
+    'shared redirect preserves WordPress subdirectory only once');
+check(ESP_Media_Protection::media_login_redirect_url(
+    ['login_page'=>456], '2026/09/dsc_0009.jpg') === null,
+    'unpublished login page fails closed');
 
 $cases = [
     ['bytes=0-0', 100, 206, 0, 0],
