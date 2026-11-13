@@ -245,8 +245,10 @@ $pending_property=(new ReflectionClass('ESP_Cookie'))->getProperty('pending_cook
 $pending=$pending_property->getValue($cookie);
 $ticket=$pending['esp_gate_'.$path_id]['value']??null;
 fg_wp_assert(is_string($ticket) && strlen($ticket)>40,'valid Remember issued gate ticket');
+$live_signing_key=$ledger->ticket_signing_key_strict($keys['sig']);
+fg_wp_assert(is_string($live_signing_key), 'fixture has live activation key');
 fg_wp_assert(ESP_Fast_Gate_Token::verify($ticket,$site,$path_id,$_COOKIE,1,
-    $keys['sig'],$keys['id'])!==null,'real WordPress-issued gate ticket verified');
+    $live_signing_key,$keys['id'])!==null,'real WordPress-issued gate ticket verified');
 fg_wp_stage('REAL_REMEMBER_AUTH_ISSUED_VERIFIED_GATE_TICKET');
 
 // R04 concurrent deletion between real WordPress SELECT and UPDATE.
