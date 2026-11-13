@@ -2,7 +2,7 @@
 /**
  * WordPress-side adapter for the Fast Gate v2 authorization protocol.
  *
- * IMPORTANT: no automatic activation or Rewrite changes in this review slice.
+ * Activation and Rewrite switching are handled explicitly by ESP_Fast_Gate_Deployment.
  * A future gate deployment must validate media coverage and HTTP routing.
  */
 final class ESP_Fast_Gate_WP {
@@ -12,6 +12,7 @@ final class ESP_Fast_Gate_WP {
     private static $touched = [];
 
     public static function register() {
+        add_action('template_redirect', [self::class, 'handle_bridge'], 0);
         add_filter('pre_update_option_' . ESP_Config::OPTION_KEY,
             [self::class, 'before_settings_save'], 5, 2);
         add_filter('pre_update_option_' . self::ACTIVE_OPTION,
@@ -27,6 +28,32 @@ final class ESP_Fast_Gate_WP {
         if (defined('WP_CLI') && WP_CLI && class_exists('WP_CLI')) {
             \WP_CLI::add_command('esp gate-ledger', 'ESP_Fast_Gate_CLI');
         }
+    }
+
+    /**
+     * Accept only matching scheme/host/port for the public home and uploads.
+     * Encoded or unusual home paths are unsupported until audited, rather than
+     * relying on HTTP Host or guessing a WordPress URL from an uploads path.
+     */
+    public static function bridge_path_config() {
+        $home = parse_url(home_url('/'));
+        $uploads = wp_upload_dir(null, false);
+        $media = isset($uploads['baseurl']) ? parse_url($uploads['baseurl']) : false;
+        if (!is_array($home) || !is_array($media) ||
+            !isset($home['host'], $home['scheme'], $media['host'], $media['scheme']) ||
+            strtolower($home['host']) !== strtolower($media['host']) ||
+            strtolower($home['scheme']) !== strtolower($media['scheme']) ||
+            ($home['port'] ?? null) !== ($media['port'] ?? null)) {
+            return null;
+        }
+        $path = $home['path'] ?? '/';
+        if (!is_string($path) || !preg_match('~^/(?:[A-Za-z0-9._-]+/)*$~D', $path) ||
+            strpos($path, '..') !== false ||
+            !isset($media['path']) ||
+            strncmp($media['path'], $path, strlen($path)) !== 0) {
+            return null;
+        }
+        return $path;
     }
 
     /**
@@ -57,6 +84,18 @@ final class ESP_Fast_Gate_WP {
     }
 
     /**
+     * Route installation precedes enabling the option. During that short
+     * transition, media/password mutations still require SQLite fencing
+     * even though the reader is deliberately stopped. No auth ticket is
+     * issued until active() AND serving() have both been enabled.
+     */
+    private static function guarding() {
+        return self::active() ||
+            (class_exists('ESP_Fast_Gate_Deployment') &&
+             ESP_Fast_Gate_Deployment::route_fast());
+    }
+
+    /**
      * OFF first revokes standalone serving. A rewrite that remains pointed
      * at the standalone script must not silently survive a disabled WP sync.
      * This hook intentionally does NOT install a fast-gate rewrite.
@@ -68,10 +107,13 @@ final class ESP_Fast_Gate_WP {
                 return $old;
             }
         }
-        // Draft only: no verified Rewrite installation/rollback exists yet.
-        // SERVER_SOFTWARE alone must never enable the hooks that can block
-        // ordinary WordPress logout or media writes without a usable ledger.
-        if ((string)$new === '1') { return $old; }
+        // An arbitrary WordPress option update is never a deployment action.
+        // Only the verified transition controller may enable media/logout hooks.
+        if ((string)$new === '1' &&
+            (!class_exists('ESP_Fast_Gate_Deployment') ||
+             !ESP_Fast_Gate_Deployment::allow_active_option_write())) {
+            return $old;
+        }
         return $new;
     }
 
@@ -218,7 +260,20 @@ final class ESP_Fast_Gate_WP {
             $id_owner = isset($record['attachment_id']) ? (int)$record['attachment_id'] : 0;
             if (!ESP_Media_Index::valid_path($file) || $id_owner <= 0) { return false; }
             $owners[$id_owner][] = $file;
-            $result = ESP_Media_Index::resolve($root . '/' . $file);
+            // Index ownership is derived from WordPress metadata, which may
+            // list derivatives that are no longer present on disk. A missing
+            // or non-file path must never abort the entire initial catalog:
+            // persist an explicit deny and retain owner mapping so a later
+            // owner mutation can fence/reconcile it. This mirrors the live
+            // publish_owner() policy; never interpret an arbitrary resolve()
+            // error as safe to ignore when a regular file exists.
+            $absolute = $root . '/' . $file;
+            $real = realpath($absolute);
+            if ($real === false || !is_file($real)) {
+                $catalog[$file] = ['policy' => 'deny', 'path_id' => ''];
+                continue;
+            }
+            $result = ESP_Media_Index::resolve($absolute);
             if ($result['status'] === 'error') { return false; }
             if ($result['status'] === 'ambiguous' ||
                 $result['status'] === 'unresolved') {
@@ -274,14 +329,176 @@ final class ESP_Fast_Gate_WP {
         $ref = ESP_Fast_Gate_Token::session_ref($keys['site'],
             (string)$path, $kind, (string)$user, (string)$token, $keys['id']);
         if (!$ref || $db->is_revoked($ref) !== false) { return; }
+        $ticket_key = $db->ticket_signing_key_strict($keys['sig']);
+        if ($ticket_key === null) { return; }
         $ticket = ESP_Fast_Gate_Token::issue(
             $keys['site'], (string)$path, $kind, (string)$user, (string)$token,
-            (int)$version, (int)$expires, $keys['sig'], $keys['id']
+            (int)$version, (int)$expires, $ticket_key, $keys['id']
         );
         if ($ticket !== null) {
             ESP_Cookie::get_instance()->queue_gate_ticket((string)$path, $ticket,
                 min((int)$expires, time() + ESP_Fast_Gate_Token::MAX_AGE));
         }
+    }
+
+    /**
+     * Generate a ticket for an already-verified MySQL credential.
+     * The caller MUST enforce the final SQLite bridge_allowed() snapshot
+     * before actually sending this ticket or any media body.
+     */
+    private static function bridge_ticket($credential, $path, $version,
+                                          $keys, $db, $ticket_key) {
+        $ref = ESP_Fast_Gate_Token::session_ref($keys['site'], $path,
+            $credential['kind'], $credential['user'], $credential['token'],
+            $keys['id']);
+        if ($ref === null) { return null; }
+        $ticket = ESP_Fast_Gate_Token::issue($keys['site'], $path,
+            $credential['kind'], $credential['user'], $credential['token'],
+            $version, $credential['expires'], $ticket_key, $keys['id']);
+        return $ticket === null ? null : ['ticket' => $ticket, 'ref' => $ref];
+    }
+
+    private static function bridge_error($status) {
+        if (!headers_sent()) {
+            status_header($status);
+            header('Cache-Control: private, no-store, max-age=0');
+            header('X-LiteSpeed-Cache-Control: no-store');
+            header('Referrer-Policy: no-referrer');
+            header('X-Content-Type-Options: nosniff');
+        }
+        exit;
+    }
+
+    /** Explicit endpoint: handoff is routing evidence, not authorization. */
+    public static function handle_bridge() {
+        if (!isset($_GET['esp_gate_bridge'])) { return; }
+        $method = $_SERVER['REQUEST_METHOD'] ?? '';
+        if ($method !== 'GET' && $method !== 'HEAD') {
+            header('Allow: GET, HEAD');
+            self::bridge_error(405);
+        }
+        if (count($_GET) !== 1 || !is_string($_GET['esp_gate_bridge']) ||
+            strlen($_GET['esp_gate_bridge']) > 4096 ||
+            !self::active() ||
+            !class_exists('ESP_Media_Index') || !ESP_Media_Index::enabled()) {
+            self::bridge_error(403);
+        }
+        $bridge_path = self::bridge_path_config();
+        $requested_path = parse_url((string)($_SERVER['REQUEST_URI'] ?? ''),
+            PHP_URL_PATH);
+        if ($bridge_path === null || $requested_path !== $bridge_path) {
+            self::bridge_error(403);
+        }
+        $keys = self::keys();
+        $db = self::ledger(false);
+        if (!$keys || !$db || !$db->serving() ||
+            $db->bridge_path() !== $bridge_path) { self::bridge_error(503); }
+        $ticket_key = $db->ticket_signing_key_strict($keys['sig']);
+        if ($ticket_key === null) { self::bridge_error(503); }
+        $handoff = ESP_Fast_Gate_Handoff::verify(
+            $_GET['esp_gate_bridge'], $keys['site'], $method, $ticket_key);
+        if ($handoff === null) { self::bridge_error(403); }
+
+        $relative = $handoff['file'];
+        $path = $handoff['path'];
+        $uploads = wp_upload_dir(null, false);
+        $root = !empty($uploads['basedir']) ? realpath($uploads['basedir']) : false;
+        if (!$root || !is_dir($root) ||
+            !ESP_Fast_Gate_Handoff::valid_relative($relative)) {
+            self::bridge_error(403);
+        }
+        // Match Fast Gate's symlink prohibition below the uploads root.
+        $logical = rtrim($uploads['basedir'], '/');
+        foreach (explode('/', $relative) as $segment) {
+            $logical .= '/' . $segment;
+            if (is_link($logical)) { self::bridge_error(403); }
+        }
+        $file = realpath($logical);
+        if (!$file || strncmp($file, rtrim($root, '/') . '/',
+                strlen(rtrim($root, '/') . '/')) !== 0 ||
+            !is_file($file) || !is_readable($file)) { self::bridge_error(403); }
+
+        $owner = ESP_Media_Index::resolve($file);
+        if (!is_array($owner) || ($owner['status'] ?? '') !== 'resolved' ||
+            ($owner['protected_path_id'] ?? null) !== $path) {
+            self::bridge_error(403);
+        }
+        $paths = ESP_Option::get_current_setting('path');
+        if (!is_array($paths) || !isset($paths[$path]) ||
+            !is_array($paths[$path])) { self::bridge_error(403); }
+        $current_version = (int)($paths[$path]['password_version'] ?? 0);
+        if (($handoff['purpose'] ?? '') === 'login') {
+            // Login handoffs NEVER serve any bytes. Recheck the current
+            // protected path before exposing its configured login route.
+            $entry = $db->get_media($relative);
+            $state = $db->get_path($path);
+            if (!$entry || $entry['policy'] !== 'protected' ||
+                $entry['path_id'] !== $path || !$state || $state['blocked'] ||
+                $state['version'] !== $current_version) {
+                self::bridge_error(403);
+            }
+            // The handoff only routes a verified protected media request.
+            // Login-page selection and redirect_to construction belong to
+            // the existing media plugin, not a second bridge implementation.
+            if (!ESP_Media_Protection::redirect_to_login(
+                $paths[$path], $relative)) {
+                self::bridge_error(403);
+            }
+            exit; // ESP_Cookie::do_redirect() exits on success.
+        }
+        if (($handoff['purpose'] ?? '') !== 'auth') {
+            self::bridge_error(403);
+        }
+        $auth = new ESP_Auth();
+        $credentials = $auth->fast_gate_bridge_candidates($paths[$path]);
+        if ($credentials === null) { self::bridge_error(503); }
+        if (!$credentials) { self::bridge_error(403); }
+        // Do not restrict the revocation check to MySQL-valid rows.
+        // During an interrupted logout one credential may already have been
+        // removed from MySQL while its revoked Cookie is still presented.
+        $refs = ESP_Fast_Gate_Token::present_refs(
+            $keys['site'], $path, $_COOKIE, $keys['id']);
+        if (!$refs) { self::bridge_error(403); }
+        foreach ($credentials as $credential) {
+            $ref = ESP_Fast_Gate_Token::session_ref($keys['site'], $path,
+                $credential['kind'], $credential['user'], $credential['token'],
+                $keys['id']);
+            if ($ref === null || !in_array($ref, $refs, true)) {
+                self::bridge_error(403);
+            }
+        }
+        // In a partial logout, do not allow the other credential to override
+        // a known revocation. Check all presented MySQL-valid identities.
+        $candidate = $credentials[0];
+        // Do not extend Remember in the bridge. A concurrent logout must
+        // not turn a revoked-but-not-yet-deleted MySQL row into a renewed
+        // credential. The newly issued ticket expires no later than the
+        // already-verified MySQL expiry; sliding renewal requires a separate
+        // cross-store race design and tests.
+        $new_ticket = self::bridge_ticket($candidate, $path,
+            $current_version, $keys, $db, $ticket_key);
+        if ($new_ticket === null) { self::bridge_error(503); }
+        // This SQLite read snapshot is the final authorization point. Any
+        // prior committed revocation/fence/serving stop must reject delivery.
+        $permission = $db->bridge_allowed($relative, $path, $current_version, $refs);
+        if ($permission !== true) { self::bridge_error($permission === null ? 503 : 403); }
+
+        $cookies = ESP_Cookie::get_instance();
+        $cookies->queue_gate_ticket($path, $new_ticket['ticket'],
+            min($candidate['expires'], time() + ESP_Fast_Gate_Token::MAX_AGE));
+        if (!$cookies->set_pending_cookies()) { self::bridge_error(503); }
+
+        header('Cache-Control: private, no-store, no-cache, max-age=0, must-revalidate');
+        header('X-LiteSpeed-Cache-Control: no-store');
+        header('Referrer-Policy: no-referrer');
+        header('X-Content-Type-Options: nosniff');
+        // Mirror the standalone Gate's restriction for directly opened SVG.
+        // An authenticated media URL is not a privileged script origin.
+        if (strtolower(pathinfo($file, PATHINFO_EXTENSION)) === 'svg') {
+            header("Content-Security-Policy: sandbox; default-src 'none'");
+        }
+        (new ESP_Media_Deriver())->deliver($file, true, true);
+        self::bridge_error(503); // Covers pre-body delivery failures.
     }
 
     /**
@@ -324,10 +541,10 @@ final class ESP_Fast_Gate_WP {
      * Missing/invalid source evidence halts serving before the WP mutation.
      */
     public static function fence_media_change($id, $meta_key = null, $new_value = null) {
-        if (!self::active()) { return true; }
+        if (!self::guarding()) { return true; }
         $db = self::ledger(true);
         if (!$db) { return false; }
-        if (!$db->ready()) { return !$db->serving(); }
+        if (!$db->ready()) { return false; }
         $candidates = self::candidate_paths((int)$id, $meta_key, $new_value);
         if ($candidates === null) {
             return $db->set_serving(false);
@@ -369,7 +586,7 @@ final class ESP_Fast_Gate_WP {
 
     /** A missed/uncancellable guard must not leave the fast gate serving. */
     public static function halt_if_active() {
-        if (!self::active()) { return true; }
+        if (!self::guarding()) { return true; }
         $db = self::ledger(true);
         return $db && $db->set_serving(false);
     }
@@ -379,7 +596,7 @@ final class ESP_Fast_Gate_WP {
      * live MySQL ownership/protection checks. Fences stay until published.
      */
     public static function refresh_owner($id) {
-        if (!self::active()) { return true; }
+        if (!self::guarding()) { return true; }
         global $wpdb;
         $id = (int)$id;
         $db = self::ledger(true);
@@ -435,7 +652,7 @@ final class ESP_Fast_Gate_WP {
      * publish, the fence remains and the shared Cron retries via index.
      */
     public static function flush_modified_owners() {
-        if (!self::active() || !self::$touched) { return; }
+        if (!self::guarding() || !self::$touched) { return; }
         $ids = array_keys(self::$touched);
         self::$touched = [];
         foreach ($ids as $id) {
@@ -445,7 +662,7 @@ final class ESP_Fast_Gate_WP {
 
     /** Expired confirmed revocations are maintained with the media index Cron. */
     public static function maintenance() {
-        if (!self::active()) { return; }
+        if (!self::guarding()) { return; }
         $db = self::ledger(true);
         if (!$db || !$db->schema_ok()) {
             error_log('ESP Fast Gate: Cron ledger unavailable');
@@ -468,7 +685,7 @@ final class ESP_Fast_Gate_WP {
 
     /** Require path-scoped pre-revocation for password changes or path removal. */
     public static function before_settings_save($new, $old) {
-        if (!self::active() || !is_array($new) || !is_array($old)) {
+        if (!self::guarding() || !is_array($new) || !is_array($old)) {
             return $new;
         }
         $old_paths = $old['path'] ?? [];
@@ -494,7 +711,7 @@ final class ESP_Fast_Gate_WP {
 
     /** Re-enable only the generation saved in the WordPress settings. */
     public static function after_settings_save($old, $new) {
-        if (!self::active() || !is_array($new)) { return; }
+        if (!self::guarding() || !is_array($new)) { return; }
         $db = self::ledger(true);
         if (!$db || !$db->ready()) { return; }
         // Only changed generations and newly created paths are published.
@@ -554,6 +771,36 @@ class ESP_Fast_Gate_CLI {
                 'live metadata, private keys, and uploads configuration.');
         }
         \WP_CLI::success('Verified media catalog built. Fast Gate is still inactive.');
+    }
+
+    public function activate($args, $assoc_args) {
+        $hint = $assoc_args['server'] ?? null;
+        $result = ESP_Fast_Gate_Deployment::enable($hint);
+        if ($result !== true) {
+            \WP_CLI::error($result instanceof WP_Error ?
+                $result->get_error_code() : 'esp_gate_activate_failed');
+        }
+        \WP_CLI::success('Fast Gate v2 verified and enabled.');
+    }
+
+    public function deactivate($args, $assoc_args) {
+        $hint = $assoc_args['server'] ?? null;
+        $result = ESP_Fast_Gate_Deployment::disable($hint);
+        if ($result !== true) {
+            \WP_CLI::error($result instanceof WP_Error ?
+                $result->get_error_code() : 'esp_gate_deactivate_failed');
+        }
+        \WP_CLI::success('Fast Gate v2 stopped and legacy media route restored.');
+    }
+
+    public function recover($args, $assoc_args) {
+        $hint = $assoc_args['server'] ?? null;
+        $result = ESP_Fast_Gate_Deployment::recover($hint);
+        if ($result !== true) {
+            \WP_CLI::error($result instanceof WP_Error ?
+                $result->get_error_code() : 'esp_gate_recover_failed');
+        }
+        \WP_CLI::success('Interrupted Fast Gate switch recovered to the legacy route.');
     }
 
     public function gc($args, $assoc_args) {

@@ -134,6 +134,124 @@ final class ESP_Fast_Gate_Store {
         });
     }
 
+    /**
+     * Derive the signing key from a fresh per-activation nonce. An operator
+     * can temporarily disable Fast Gate while users log out using legacy
+     * MySQL sessions (without SQLite revocations). Rotating on EVERY
+     * re-activation invalidates those old copied signed tickets.
+     * The nonce is not itself secret; the site key remains in keys.php.
+     */
+    public function ticket_signing_key($site_key) {
+        if (!is_string($site_key) || strlen($site_key) < 32 ||
+            !$this->schema_ok()) { return null; }
+        try {
+            $nonce = $this->db->querySingle(
+                "SELECT v FROM meta WHERE k='ticket_nonce'");
+            if ($nonce === null) {
+                // Compatible with PR #81's not-yet-activated disposable
+                // benchmarks and direct authorization unit tests.
+                return $site_key;
+            }
+            if (!is_string($nonce) ||
+                !preg_match('/^[a-f0-9]{64}$/D', $nonce)) { return null; }
+            return hash_hmac('sha256',
+                "ESP_FAST_GATE_SIGNING_EPOCH_V1\0" . $nonce, $site_key);
+        } catch (\Throwable $e) { return null; }
+    }
+
+    /** Active HTTP serving must never fall back to a pre-activation key. */
+    public function ticket_signing_key_strict($site_key) {
+        try {
+            $nonce = $this->db->querySingle(
+                "SELECT v FROM meta WHERE k='ticket_nonce'");
+            if (!is_string($nonce) ||
+                !preg_match('/^[a-f0-9]{64}$/D', $nonce)) { return null; }
+            return $this->ticket_signing_key($site_key);
+        } catch (\Throwable $e) { return null; }
+    }
+
+    /** Must run with the HTTP reader STOPPED, after final catalog validation. */
+    public function rotate_ticket_signing_key() {
+        if (!$this->ready() || $this->serving()) { return false; }
+        try {
+            $nonce = bin2hex(random_bytes(32));
+        } catch (\Throwable $e) { return false; }
+        return $this->tx(function () use ($nonce) {
+            if ($this->db->querySingle(
+                "SELECT v FROM meta WHERE k='serving'") !== '0') {
+                throw new \RuntimeException('cannot rotate while serving');
+            }
+            $stmt = $this->db->prepare(
+                "INSERT INTO meta(k,v) VALUES('ticket_nonce', :nonce)
+                 ON CONFLICT(k) DO UPDATE SET v=excluded.v");
+            $stmt->bindValue(':nonce', $nonce, SQLITE3_TEXT);
+            if (!$stmt->execute()) {
+                throw new \RuntimeException('ticket nonce generation');
+            }
+        });
+    }
+
+    /** WordPress home path, frozen at each explicit enable. Never use HTTP Host. */
+    public function set_bridge_path($path) {
+        if (!is_string($path) || strlen($path) > 512 ||
+            !preg_match('~^/(?:[A-Za-z0-9._-]+/)*$~D', $path) ||
+            strpos($path, '..') !== false || strpos($path, '%') !== false) {
+            return false;
+        }
+        return $this->tx(function () use ($path) {
+            $stmt = $this->db->prepare(
+                "INSERT INTO meta(k,v) VALUES('bridge_path', :path) " .
+                'ON CONFLICT(k) DO UPDATE SET v=excluded.v');
+            $stmt->bindValue(':path', $path, SQLITE3_TEXT);
+            if (!$stmt->execute()) { throw new \RuntimeException('bridge path'); }
+        });
+    }
+
+    public function bridge_path() {
+        try {
+            if (!$this->ready()) { return null; }
+            $path = $this->db->querySingle("SELECT v FROM meta WHERE k='bridge_path'");
+            if (!is_string($path) || strlen($path) > 512 ||
+                !preg_match('~^/(?:[A-Za-z0-9._-]+/)*$~D', $path) ||
+                strpos($path, '..') !== false || strpos($path, '%') !== false) {
+                return null;
+            }
+            return $path;
+        } catch (\Throwable $e) { return null; }
+    }
+
+    /**
+     * Linearization point for a WordPress-authenticated bridge request.
+     * A single SQLite read snapshot covers serving, media/fence, path and ALL
+     * current credential revocations. null means an unavailable ledger.
+     * Call after MySQL revalidation and immediately before output headers.
+     */
+    public function bridge_allowed($relative, $path, $version, $refs) {
+        if (!is_string($relative) || !is_string($path) || !is_int($version) ||
+            !is_array($refs) || !$refs || count($refs) > 2) { return null; }
+        try {
+            $this->db->exec('BEGIN');
+            if (!$this->serving()) { return false; }
+            $entry = $this->get_media($relative);
+            if (!$entry || $entry['policy'] !== 'protected' ||
+                $entry['path_id'] !== $path) { return false; }
+            $state = $this->get_path($path);
+            if (!$state || $state['blocked'] || $state['version'] !== $version) {
+                return false;
+            }
+            foreach ($refs as $ref) {
+                $revoked = $this->is_revoked($ref);
+                if ($revoked === null) { return null; }
+                if ($revoked) { return false; }
+            }
+            return true;
+        } catch (\Throwable $e) {
+            return null;
+        } finally {
+            try { $this->db->exec('ROLLBACK'); } catch (\Throwable $ignored) {}
+        }
+    }
+
     public function set_path($path, $version, $blocked = false) {
         if (!is_string($path) || $path === '' || !is_int($version) || $version < 0) {
             return false;

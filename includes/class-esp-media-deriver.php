@@ -4,6 +4,9 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+// This delivery adapter is also exercised directly by standalone PHP tests.
+require_once __DIR__ . '/class-esp-fast-gate-range.php';
+
 /**
  * メディアファイルの配信処理を担当するクラス
  */
@@ -15,7 +18,7 @@ class ESP_Media_Deriver {
      * @param bool $protected 認証または管理者権限を要するレスポンスか
      * @return bool 成功時true、失敗時false
      */
-    public function deliver($file_path, $protected = false) {
+    public function deliver($file_path, $protected = false, $force_php = false) {
         try {
             if (!is_string($file_path) || $file_path === '') {
                 // 無効なパスは処理しない
@@ -47,7 +50,7 @@ class ESP_Media_Deriver {
             $delivery_method = $this->determine_delivery_handler($file_path);
 
             // Webサーバー配信が可能な場合はヘッダー委譲のみで終了
-            if ($delivery_method['type'] !== 'php') {
+            if (!$force_php && $delivery_method['type'] !== 'php') {
                 if ($this->attempt_web_server_delivery($delivery_method, $file_path, $protected)) {
                     exit;
                 }
@@ -59,13 +62,13 @@ class ESP_Media_Deriver {
             // RangeはGETのみ有効。HEADはGETと同じ認可・ヘッダー判定を行い、
             // 本文を読み込まず終了する（Webサーバー委譲は上で処理済み）。
             $is_head = strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET')) === 'HEAD';
-            $range = !$is_head && isset($_SERVER['HTTP_RANGE']) ? $_SERVER['HTTP_RANGE'] : '';
+            $range = !$is_head && isset($_SERVER['HTTP_RANGE']) ? (string)$_SERVER['HTTP_RANGE'] : null;
             // 保護ファイルは、不正Rangeの416でもブラウザー・共有キャッシュへの保存を禁止。
             // 公開ファイルは成功応答だけに従来のキャッシュ方針を適用する。
             if ($protected) {
                 $this->set_cache_headers($mime_type, true);
             }
-            if ($range) {
+            if ($range !== null) {
                 // Rangeヘッダーがある場合は分割配信
                 if (!$this->deliver_with_range($file_path, $file_size, $mime_type, $range, $protected)) {
                     return false;
@@ -318,119 +321,15 @@ class ESP_Media_Deriver {
      * @return bool 成功時true
      */
     private function deliver_with_range($file_path, $file_size, $mime_type, $range, $protected) {
-        // Rangeヘッダーを単位と値に分割
-        list($size_unit, $range_orig) = explode('=', $range, 2);
-
-        if (!is_string($range_orig) || $range_orig === '') {
-            header('HTTP/1.1 416 Requested Range Not Satisfiable');
-            if (function_exists('http_response_code')) {
-                http_response_code(416);
-            }
+        $decision = ESP_Fast_Gate_Range::parse($range, (int)$file_size);
+        if ($decision === null || $decision['status'] !== 206) {
+            http_response_code(416);
             header("Content-Range: bytes */$file_size");
             return false;
         }
-
-        if ($size_unit !== 'bytes') {
-            header('HTTP/1.1 416 Requested Range Not Satisfiable');
-            if (function_exists('http_response_code')) {
-                http_response_code(416);
-            }
-            header("Content-Range: bytes */$file_size");
-            return false;
-        }
-
-        if (strpos($range_orig, ',') !== false) {
-            header('HTTP/1.1 416 Requested Range Not Satisfiable');
-            if (function_exists('http_response_code')) {
-                http_response_code(416);
-            }
-            header("Content-Range: bytes */$file_size");
-            return false;
-        }
-
-        if ($range_orig === '-') {
-            // "-"のみの要求は末尾1バイトを指す
-            $c_start = $file_size - 1;
-            $c_end = $file_size - 1;
-        } else {
-            // 範囲指定の開始・終了を抽出
-            $range_parts = explode('-', $range_orig, 2);
-            $start_part = isset($range_parts[0]) ? $range_parts[0] : '';
-            $end_part = isset($range_parts[1]) ? $range_parts[1] : '';
-
-            if ($start_part === '') {
-                if ($end_part === '' || !is_numeric($end_part)) {
-                    header('HTTP/1.1 416 Requested Range Not Satisfiable');
-                    if (function_exists('http_response_code')) {
-                        http_response_code(416);
-                    }
-                    header("Content-Range: bytes */$file_size");
-                    return false;
-                }
-
-                $suffix_length = (int) $end_part;
-                if ($suffix_length < 1) {
-                    header('HTTP/1.1 416 Requested Range Not Satisfiable');
-                    if (function_exists('http_response_code')) {
-                        http_response_code(416);
-                    }
-                    header("Content-Range: bytes */$file_size");
-                    return false;
-                }
-
-                // 要求バイト数がファイルサイズを超えないよう調整
-                $suffix_length = min($suffix_length, $file_size);
-                if ($file_size === 0 || $suffix_length === 0) {
-                    // ゼロバイトは満たせない
-                    header('HTTP/1.1 416 Requested Range Not Satisfiable');
-                    if (function_exists('http_response_code')) {
-                        http_response_code(416);
-                    }
-                    header("Content-Range: bytes */$file_size");
-                    return false;
-                }
-                $c_start = $file_size - $suffix_length;
-                $c_end = $file_size - 1;
-            } else {
-                if (!is_numeric($start_part)) {
-                    header('HTTP/1.1 416 Requested Range Not Satisfiable');
-                    if (function_exists('http_response_code')) {
-                        http_response_code(416);
-                    }
-                    header("Content-Range: bytes */$file_size");
-                    return false;
-                }
-
-                $c_start = (int) $start_part;
-                if ($end_part !== '') {
-                    if (!is_numeric($end_part)) {
-                        header('HTTP/1.1 416 Requested Range Not Satisfiable');
-                        if (function_exists('http_response_code')) {
-                            http_response_code(416);
-                        }
-                        header("Content-Range: bytes */$file_size");
-                        return false;
-                    }
-                    $c_end = (int) $end_part;
-                } else {
-                    $c_end = $file_size - 1;
-                }
-            }
-        }
-
-        // 範囲がファイルサイズの内側に収まるよう補正
-        $c_start = max(0, min($c_start, $file_size - 1));
-        $c_end = max($c_start, min($c_end, $file_size - 1));
+        $c_start = $decision['start'];
+        $c_end = $decision['end'];
         $length = $c_end - $c_start + 1;
-
-        if ($length < 1) {
-            header('HTTP/1.1 416 Requested Range Not Satisfiable');
-            if (function_exists('http_response_code')) {
-                http_response_code(416);
-            }
-            header("Content-Range: bytes */$file_size");
-            return false;
-        }
 
         header('HTTP/1.1 206 Partial Content');
         if (function_exists('http_response_code')) {

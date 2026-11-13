@@ -8,7 +8,33 @@
  */
 if (!defined('ABSPATH')) { exit; }
 
+// The temporary benchmark uses a deliberately non-production serving flag.
+// Only the handoff callback needs the corresponding WordPress active marker.
+// This is scoped to the disposable DB and container flag, not to other URLs.
+if (getenv('ESP_FG_CI_HTTP_AUTH') === '1' &&
+    defined('DB_NAME') && DB_NAME === 'esp_fg_lifecycle' &&
+    isset($_GET['esp_gate_bridge'])) {
+    add_filter('pre_option_esp_fast_gate_v2_active',
+        static function () { return '1'; }, 1);
+}
+
 add_action('init', static function () {
+    // Test-only fault injection for an actual administrator form submission.
+    // Scoped to the disposable DB, explicitly enabled fixture and one request.
+    // It never intercepts normal media traffic or production deployments.
+    if (getenv('ESP_FG_CI_HTTP_AUTH') === '1' &&
+        defined('DB_NAME') && DB_NAME === 'esp_fg_lifecycle' &&
+        ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' &&
+        ($_POST['action'] ?? '') === 'esp_fast_gate_enable' &&
+        ($_SERVER['HTTP_X_ESP_CI_FAIL_PROBE'] ?? '') === '1') {
+        add_filter('pre_http_request',
+            static function ($pre, $args, $url) {
+                if (strpos($url, '/esp-fast-gate-route-') !== false) {
+                    return new WP_Error('esp_ci_ui_probe_forced_failure');
+                }
+                return $pre;
+            }, 10, 3);
+    }
     if (!isset($_GET['esp_fg_ci_auth']) &&
         !isset($_GET['esp_fg_ci_redirect_landed'])) { return; }
     if (getenv('ESP_FG_CI_HTTP_AUTH') !== '1' ||
@@ -30,9 +56,121 @@ add_action('init', static function () {
         exit;
     }
     $action = (string)$_GET['esp_fg_ci_auth'];
+    if (in_array($action, [
+        'deploy-prepare','deploy-enable-fail-probe','deploy-enable','deploy-disable',
+        'deploy-enable-private-404','deploy-enable-private-exposed',
+        'deploy-status','deploy-legacy-logout',
+        'deploy-inject-stale-lock','deploy-recover',
+        'deploy-upgrade-preflight','deploy-upgrade-no-server'
+    ], true)) {
+        // Deployment endpoint is a disposable fixture only. Unlike the auth
+        // fixture it never forces the active option or serving flag.
+        $state = static function () {
+            $db = ESP_Fast_Gate_WP::ledger(false);
+            return ['active'=>ESP_Fast_Gate_WP::active(),
+                'route'=>ESP_Fast_Gate_Deployment::route_fast()?'fast':'legacy',
+                'serving'=>$db && $db->serving(),
+                'prepared'=>ESP_Fast_Gate_Deployment::prepared()];
+        };
+        $result = true;
+        if ($action === 'deploy-prepare') {
+            $result=ESP_Fast_Gate_Deployment::prepare();
+        } elseif ($action === 'deploy-inject-stale-lock') {
+            $db=ESP_Fast_Gate_WP::ledger(true);
+            $result=false;
+            if (!ESP_Fast_Gate_Deployment::route_fast() &&
+                !ESP_Fast_Gate_WP::active() && $db && !$db->serving() &&
+                add_option('esp_fast_gate_v2_deploy_lock',
+                    (time()-3600).':'.wp_generate_uuid4(), '', false)) {
+                $set_route=new ReflectionMethod(
+                    'ESP_Fast_Gate_Deployment','write_route');
+                $rewrite=new ReflectionMethod(
+                    'ESP_Fast_Gate_Deployment','rewrite');
+                // Simulate a crashed controller AFTER installing its 503
+                // route, BEFORE signing or serving were enabled.
+                $result=$set_route->invoke(null,'fast') === true &&
+                    $rewrite->invoke(null,true) === true;
+            }
+        } elseif ($action === 'deploy-recover') {
+            $result=ESP_Fast_Gate_Deployment::recover();
+        } elseif (in_array($action,
+            ['deploy-upgrade-preflight','deploy-upgrade-no-server'], true)) {
+            // Run the product pre-install callback without installing files.
+            // One case simulates a WP-Cron/CLI update lacking server context.
+            $previous=$_SERVER['SERVER_SOFTWARE'] ?? null;
+            if ($action === 'deploy-upgrade-no-server') {
+                unset($_SERVER['SERVER_SOFTWARE']);
+            }
+            try {
+                $result=ESP_Fast_Gate_Deployment::before_plugin_upgrade(
+                    true, ['type'=>'plugin','action'=>'update','plugin'=>
+                        plugin_basename(ESP_PATH.'easy-slug-protect.php')]);
+            } finally {
+                if ($previous === null) { unset($_SERVER['SERVER_SOFTWARE']); }
+                else { $_SERVER['SERVER_SOFTWARE']=$previous; }
+            }
+        } elseif ($action === 'deploy-enable-fail-probe') {
+            $failure = static function ($pre,$args,$url) {
+                if (strpos($url,'/esp-fast-gate-route-') !== false) {
+                    return new WP_Error('esp_ci_http_probe_forced_failure');
+                }
+                return $pre;
+            };
+            add_filter('pre_http_request',$failure,10,3);
+            try { $result=ESP_Fast_Gate_Deployment::enable(); }
+            finally { remove_filter('pre_http_request',$failure,10); }
+        } elseif (in_array($action, [
+            'deploy-enable-private-404','deploy-enable-private-exposed',
+        ], true)) {
+            // In the real Apache fixture the private store is 403. Simulate a
+            // host that hides restricted files as 404, or an unsafe host that
+            // exposes them as 200. Only the actual private URL family is
+            // intercepted; the signed direct gate and uploads rewrite still
+            // have to pass real HTTP checks.
+            $code = $action === 'deploy-enable-private-404' ? 404 : 200;
+            $mask = static function ($pre,$args,$url) use ($code) {
+                if (strpos($url, '/esp-fast-gate-v2/') === false) {
+                    return $pre;
+                }
+                return [
+                    'headers'=>[], 'body'=>'',
+                    'response'=>['code'=>$code,
+                        'message'=>$code===404?'Not Found':'OK'],
+                    'cookies'=>[],
+                ];
+            };
+            add_filter('pre_http_request',$mask,10,3);
+            try { $result=ESP_Fast_Gate_Deployment::enable(); }
+            finally { remove_filter('pre_http_request',$mask,10); }
+        } elseif ($action === 'deploy-enable') {
+            $result=ESP_Fast_Gate_Deployment::enable();
+        } elseif ($action === 'deploy-disable') {
+            $result=ESP_Fast_Gate_Deployment::disable();
+        } elseif ($action === 'deploy-legacy-logout') {
+            if (ESP_Fast_Gate_WP::active() ||
+                ESP_Fast_Gate_Deployment::route_fast()) {
+                $result=new WP_Error('esp_ci_legacy_logout_requires_off');
+            } else {
+                $path=ESP_Option::get_current_setting('path')['fg_path'] ?? null;
+                $logout=new ESP_Logout();
+                $method=new ReflectionMethod('ESP_Logout','logout_from_path');
+                $result=$path && $method->invoke($logout,$path) === true;
+                ESP_Cookie::get_instance()->set_pending_cookies();
+            }
+        }
+        $response=['action'=>$action,'success'=>$result===true,
+            'error'=>$result instanceof WP_Error?$result->get_error_code():null]
+            +$state();
+        status_header($result===true?200:409);
+        header('Cache-Control: no-store');
+        header('Content-Type: application/json');
+        echo wp_json_encode($response);
+        exit;
+    }
     $supported = ['session', 'remember', 'redirect-session',
         'redirect-remember', 'refresh', 'logout',
-        'logout-fail-session', 'logout-fail-remember', 'rotate'];
+        'logout-fail-session', 'logout-fail-remember', 'rotate',
+        'login-page-setup', 'login-page-teardown'];
     if (!in_array($action, $supported, true)) {
         status_header(404);
         exit;
@@ -50,7 +188,38 @@ add_action('init', static function () {
     }
     $ok = false;
     $result = ['action' => $action];
-    if (in_array($action,
+    if ($action === 'login-page-setup') {
+        // Create the login page only after the legacy anonymous benchmark
+        // completed. Changing login_page in seed-release would invalidate
+        // the old-mode 403 baseline and mask regressions in other scenarios.
+        $login_id = wp_insert_post([
+            'post_type' => 'page',
+            'post_status' => 'publish',
+            'post_title' => 'FG CI Login',
+            'post_name' => 'fg-ci-login',
+            'post_content' => '[esp_login_form path_id="fg_path"]',
+        ], true);
+        $settings = get_option(ESP_Config::OPTION_KEY);
+        if (!is_wp_error($login_id) && (int)$login_id > 0 &&
+            is_array($settings) &&
+            isset($settings['path']['fg_path'])) {
+            $settings['path']['fg_path']['login_page'] = (int)$login_id;
+            $ok = update_option(ESP_Config::OPTION_KEY, $settings);
+            $result['login_page_id'] = (int)$login_id;
+        }
+        $result['login_page_configured'] = $ok;
+    } elseif ($action === 'login-page-teardown') {
+        // Do not leak this test-only login_page setting into the separate
+        // activation/rollback E2E, whose legacy anonymous baseline is 403.
+        $settings = get_option(ESP_Config::OPTION_KEY);
+        if (is_array($settings) &&
+            isset($settings['path']['fg_path']['login_page']) &&
+            (int)$settings['path']['fg_path']['login_page'] > 0) {
+            $settings['path']['fg_path']['login_page'] = 0;
+            $ok = update_option(ESP_Config::OPTION_KEY, $settings);
+        }
+        $result['login_page_restored_to_zero'] = $ok;
+    } elseif (in_array($action,
         ['session','remember','redirect-session','redirect-remember'], true)) {
         if (in_array($action, ['remember','redirect-remember'], true)) {
             $_POST['esp_remember'] = '1';

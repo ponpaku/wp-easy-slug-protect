@@ -12,11 +12,11 @@ container="esp-fg-bench-${GITHUB_RUN_ID:-local}-$$"
 started=0
 race_pid=""
 cleanup() {
+    rc=$?
     if [[ -n "$race_pid" ]]; then
         kill "$race_pid" >/dev/null 2>&1 || true
         wait "$race_pid" >/dev/null 2>&1 || true
     fi
-    rc=$?
     if [[ $started -eq 1 ]]; then
         docker logs "$container" >"$report_root/apache.log" 2>&1 || true
         docker rm -f "$container" >/dev/null 2>&1 || true
@@ -30,18 +30,54 @@ cleanup() {
     return "$rc"
 }
 trap cleanup EXIT
-curl -fsSL --retry 2 https://wordpress.org/wordpress-7.1.3.tar.gz |
-    tar -xz -C "$root"
-curl -fsSL --retry 2 \
+# WordPress release CDN sometimes returns intermittent 504 on Actions.
+# Fall back to its separately hosted tagged source archive, and assert the
+# exact WordPress core version after extraction (never use "latest").
+echo "FG_DOWNLOAD WordPress core exact release 7.1.3"
+wordpress_archive="$root/wp-7.1.3.tar.gz"
+if curl --fail --silent --show-error --location --retry 3 --retry-all-errors \
+    --retry-delay 2 https://wordpress.org/wordpress-7.1.3.tar.gz \
+    -o "$wordpress_archive"; then
+    tar -xz -C "$root" -f "$wordpress_archive"
+else
+    echo "WordPress.org download unavailable; trying tagged GitHub source" >&2
+    curl --fail --silent --show-error --location --retry 3 --retry-all-errors \
+      --retry-delay 2 \
+      https://github.com/WordPress/WordPress/archive/refs/tags/7.1.3.tar.gz \
+      -o "$wordpress_archive"
+    tar -xz -C "$root" -f "$wordpress_archive"
+    mv "$root/WordPress-7.1.3" "$root/wordpress"
+fi
+grep -Eq "wp_version = '7\\.1\\.3';" "$root/wordpress/wp-includes/version.php" || {
+    echo "Downloaded WordPress source has an unexpected version" >&2
+    exit 1
+}
+echo "FG_DOWNLOAD WP-CLI PHAR"
+curl -fsSL --retry 6 --retry-all-errors --retry-delay 2 \
     https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar \
     -o "$root/wp-cli.phar"
+echo "FG_DOWNLOAD WP-CLI downloaded"
 mkdir -p "$root/release"
-curl -fsSL --retry 2 \
+echo "FG_DOWNLOAD published v0.7.41 ZIP"
+release_zip="$root/release/easy-slug-protect-0.7.41.zip"
+pinned_release_sha=5e4c39b2e979c39b360cbb45b67d0f0f39a09bded54850560e30687563e8aafe
+if ! curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 \
     https://github.com/ponpaku/wp-easy-slug-protect/releases/download/v0.7.41/easy-slug-protect-0.7.41.zip \
-    -o "$root/release/easy-slug-protect-0.7.41.zip"
-curl -fsSL --retry 2 \
-    https://github.com/ponpaku/wp-easy-slug-protect/releases/download/v0.7.41/easy-slug-protect-0.7.41.zip.sha256 \
-    -o "$root/release/easy-slug-protect-0.7.41.zip.sha256"
+    -o "$release_zip"; then
+    # Some runners cannot reach the release binary CDN. Rebuild from the
+    # immutable public tag using THAT tag's release builder, then require
+    # byte-for-byte identity with GitHub Release's published SHA-256 digest.
+    echo "FG_DOWNLOAD release CDN unavailable; rebuild immutable v0.7.41 tag"
+    git fetch --depth=1 origin refs/tags/v0.7.41:refs/tags/v0.7.41
+    git worktree add --detach "$root/release-tag" v0.7.41
+    (cd "$root/release-tag"; python3 tools/build-release.py \
+        --tag v0.7.41 --output "$root/release")
+fi
+printf '%s  %s\n' "$pinned_release_sha" "$release_zip" | sha256sum -c -
+# The manifest may also be unavailable with a release asset CDN outage.
+# Comparing with GitHub's published digest is the stronger source of truth.
+printf '%s  %s\n' "$pinned_release_sha" "$(basename "$release_zip")" \
+    >"$root/release/easy-slug-protect-0.7.41.zip.sha256"
 (cd "$root/release"; sha256sum -c easy-slug-protect-0.7.41.zip.sha256)
 echo 'FG_LIFECYCLE Verified genuine published v0.7.41 ZIP digest' | tee -a "$report_root/stages.log"
 
@@ -408,4 +444,71 @@ result={'environment':'GitHub Actions shared runner, disposable Apache 2.4/PHP 8
 (r/'comparison.json').write_text(json.dumps(result,indent=2)+'\n')
 print('FG_HTTP_COMPARISON '+json.dumps(result))
 PY
-echo 'PASS: real v0.7.41 to PR, staged index/ledger, CLI/manual/Cron/crash/WAL, and Apache HTTP performance'
+# Exercise the REAL product activation controller, not the test-only
+# VirtualHost rule used for the independent throughput benchmark above.
+# The WordPress install URL is localhost:8096. Give Apache a local listener
+# on the same port so wp_remote_get() loopback can probe its installed route.
+docker exec "$container" sh -c "printf 'Listen 80\nListen 8096\n' > /etc/apache2/ports.conf"
+docker exec -i "$container" tee /etc/apache2/sites-enabled/000-default.conf \
+    >/dev/null <<'APACHE'
+<VirtualHost *:80>
+    ServerName localhost
+    DocumentRoot /var/www/html
+    ErrorLog ${APACHE_LOG_DIR}/error.log
+    CustomLog ${APACHE_LOG_DIR}/access.log combined
+</VirtualHost>
+<VirtualHost *:8096>
+    ServerName localhost
+    DocumentRoot /var/www/html
+    ErrorLog ${APACHE_LOG_DIR}/error.log
+    CustomLog ${APACHE_LOG_DIR}/access.log combined
+</VirtualHost>
+APACHE
+docker exec "$container" apache2ctl configtest
+docker exec "$container" apache2ctl graceful
+sleep 1
+# Real Apache PHP needs write access to the existing ESP-managed
+# uploads/.htaccess; the initial WordPress WP-CLI install ran as the runner.
+sudo chown -R 33:33 "$uploads"
+# This fixture bind-mounts the SAME WordPress tree at both the runner's
+# absolute ESP_WP_ROOT (used by WP-CLI provisioning) and /var/www/html
+# (used by Apache). Rebind the disposable keys.php uploads root to Apache's
+# realpath before strict product activation; never weaken production root
+# validation or alter the signing/identity secrets.
+docker exec --user www-data "$container" php -r '
+$private="/var/www/html/wp-content/esp-fast-gate-v2";
+$file=$private."/keys.php";
+$keys=require $file;
+$root=realpath("/var/www/html/wp-content/uploads");
+if (!is_array($keys) || !is_string($root)) exit(1);
+$keys["root"]=$root;
+$php="<?php\nreturn ".var_export($keys,true).";\n";
+$tmp=$private."/keys.php.ci-new";
+if (file_put_contents($tmp,$php,LOCK_EX)!==strlen($php) ||
+    !chmod($tmp,0600) ||
+    !rename($tmp,$file)) exit(1);
+echo "FG_DEPLOY_ROOT mapped disposable dual-bind fixture for Apache\n";
+'
+# Check that no test-only server-level rewrite remains before deployment.
+grep -Fq 'RewriteRule ^(.+)$' "$uploads/.htaccess"
+! grep -Fq '# Fast Gate: no static-file existence shortcut' "$uploads/.htaccess"
+python3 tests/fast-gate-activation-e2e.py \
+    | tee -a "$report_root/stages.log"
+# The browser drives the shipped WordPress admin forms against the same
+# disposable real Apache site and stores only settings-page screenshots.
+ESP_FG_UI_ARTIFACTS="$report_root/admin-ui" \
+    python3 tests/fast-gate-admin-ui-e2e.py \
+    | tee -a "$report_root/stages.log"
+# The live-route probes use a genuine non-secret uploads file. They must
+# remove it on successful verification AND injected failure.
+if find "$uploads" -maxdepth 1 -type f -name 'esp-fast-gate-route-*.jpg' \
+    -print -quit | grep -q .; then
+    echo "Deployment left a temporary HTTP probe image in uploads" >&2
+    exit 1
+fi
+# After the actual product deactivation, the managed ESP Rewrite must be
+# restored and the separate option marker must not remain "fast".
+! grep -Fq '# Fast Gate: no static-file existence shortcut' "$uploads/.htaccess"
+grep -Fq 'index.php?esp-media=' "$uploads/.htaccess"
+echo 'PASS: released upgrade, ledger/Cron/WAL, HTTP benchmark, AND verified product activation/rollback'
+

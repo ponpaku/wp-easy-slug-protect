@@ -70,6 +70,20 @@ final class ESP63_DB {
         if ($index !== count($args)) { throw new RuntimeException('argument overflow'); }
         return $ret;
     }
+    public function insert($table, $data, $format = null) {
+        // Match wpdb's per-field parameter formatting in this thin MySQL fake.
+        // Real charset handling is exercised by wordpress-media-index-ci.php.
+        $columns = array_keys($data);
+        $values = array_values($data);
+        $formats = is_array($format) ? $format :
+            array_fill(0, count($columns), is_string($format) ? $format : '%s');
+        if (count($formats) !== count($columns)) {
+            throw new RuntimeException('Invalid insert format count');
+        }
+        $sql = 'INSERT INTO ' . $table . ' (' .
+            implode(',', $columns) . ') VALUES (' . implode(',', $formats) . ')';
+        return $this->query($this->prepare($sql, $values));
+    }
     public function query($sql) {
         $this->last_error = '';
         if ($this->lose_pending_decrement_ack_once &&
@@ -240,6 +254,20 @@ try {
         'one lookup returns attachment and protection');
     esp63_assert(ESP_Media_Index::resolve($uploads . '/2026/10/cat-original.jpg')['status']
         === 'resolved', 'original_image belongs to attachment');
+    // WordPress/ESP must preserve Unicode filenames while the SHA-256 index
+    // column remains ascii_bin (the table contains mixed charsets).
+    $unicode_path = '2026/10/日本語-画像-🖼.jpg';
+    $escaped_unicode = $db->real_escape_string($unicode_path);
+    file_put_contents($uploads . '/' . $unicode_path, 'unicode fixture');
+    esp63_sql("INSERT INTO esp63_posts (ID,post_type) VALUES (12,'attachment')");
+    esp63_sql("INSERT INTO esp63_postmeta (post_id,meta_key,meta_value)
+        VALUES (12,'_wp_attached_file','$escaped_unicode')");
+    esp63_assert(ESP_Media_Index::reindex_attachment(12),
+        'Unicode attachment can be indexed with mixed ASCII/utf8mb4 columns');
+    $unicode_result = ESP_Media_Index::resolve($uploads . '/' . $unicode_path);
+    esp63_assert($unicode_result['status'] === 'resolved' &&
+        $unicode_result['attachment_id'] === 12,
+        'Unicode attachment is resolved after column-aware insert');
     // R01: one anonymous indexed SQL roundtrip has a hard result-row cap.
     // Many inactive generations must not be fetched into PHP without limit;
     // below the cap, the active owner still resolves normally.

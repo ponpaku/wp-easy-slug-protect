@@ -69,8 +69,11 @@ class Easy_Slug_Protect {
         require_once ESP_PATH . 'includes/class-esp-media-file-resolver.php';
         require_once ESP_PATH . 'includes/class-esp-media-index.php';
         require_once ESP_PATH . 'includes/class-esp-fast-gate-token.php';
+        require_once ESP_PATH . 'includes/class-esp-fast-gate-handoff.php';
+        require_once ESP_PATH . 'includes/class-esp-fast-gate-range.php';
         require_once ESP_PATH . 'includes/class-esp-fast-gate-store.php';
         require_once ESP_PATH . 'includes/class-esp-fast-gate-wp.php';
+        require_once ESP_PATH . 'includes/class-esp-fast-gate-deployment.php';
         require_once ESP_PATH . 'includes/class-esp-media-protection.php';
 
         // 管理画面クラスの読み込み
@@ -88,6 +91,7 @@ class Easy_Slug_Protect {
         ESP_Media_Index::register();
         // Fast Gate v2 is inert until explicitly activated after review.
         ESP_Fast_Gate_WP::register();
+        ESP_Fast_Gate_Deployment::register();
         // WordPressの通常のメタデータ更新は、まず失効できるか確認する。
         // 失効できないときに更新してしまうと次リクエストに旧認可が残り得る。
         foreach (['add_post_metadata', 'update_post_metadata'] as $hook) {

@@ -232,6 +232,61 @@ class ESP_Auth {
 
 
     /**
+     * Bridge-only MySQL authentication. Unlike is_logged_in(), this does
+     * not treat a MySQL hit as delivery permission and does not silently
+     * issue a Fast Gate ticket. Returns null on query failure, [] on no auth.
+     * Raw tokens remain PHP-internal and must not be logged or serialized.
+     */
+    public function fast_gate_bridge_candidates($path_settings) {
+        global $wpdb;
+        if (!is_array($path_settings) || !isset($path_settings['id']) ||
+            !is_object($wpdb)) { return null; }
+        $path = (string)$path_settings['id'];
+        $version = (int)($path_settings['password_version'] ?? 0);
+        $candidates = [];
+        $session_token = $this->cookie->get_session_cookie($path);
+        if (is_string($session_token) && strlen($session_token) >= 32 &&
+            strlen($session_token) <= 256) {
+            $hash = hash_hmac('sha256', $session_token, AUTH_SALT);
+            $table = $wpdb->prefix . ESP_Config::DB_TABLES['session'];
+            $row = $wpdb->get_row($wpdb->prepare(
+                "SELECT path_id, password_version, UNIX_TIMESTAMP(expires) AS expires_ts
+                 FROM $table WHERE token=%s AND expires>NOW() LIMIT 1", $hash));
+            if ($wpdb->last_error !== '') { return null; }
+            if ($row && (string)$row->path_id === $path &&
+                (int)$row->password_version === $version &&
+                (int)$row->expires_ts > time()) {
+                $candidates[] = ['kind'=>'session', 'user'=>'',
+                    'token'=>$session_token, 'expires'=>(int)$row->expires_ts];
+            }
+        }
+        $remember = $this->cookie->get_remember_cookies_for_path($path_settings);
+        if (is_array($remember) && isset($remember['id'], $remember['token']) &&
+            is_string($remember['id']) && strlen($remember['id']) >= 1 &&
+            strlen($remember['id']) <= 191 && is_string($remember['token']) &&
+            strlen($remember['token']) >= 32 && strlen($remember['token']) <= 256) {
+            $hash = hash_hmac('sha256', $remember['token'], AUTH_SALT);
+            $table = $wpdb->prefix . ESP_Config::DB_TABLES['remember'];
+            $row = $wpdb->get_row($wpdb->prepare(
+                "SELECT id, user_id, path_id, password_version,
+                        UNIX_TIMESTAMP(expires) AS expires_ts
+                 FROM $table WHERE user_id=%s AND token=%s
+                 AND path_id=%s AND expires>NOW() LIMIT 1",
+                $remember['id'], $hash, $path));
+            if ($wpdb->last_error !== '') { return null; }
+            if ($row && (string)$row->user_id === $remember['id'] &&
+                (string)$row->path_id === $path &&
+                (int)$row->password_version === $version &&
+                (int)$row->expires_ts > time()) {
+                $candidates[] = ['kind'=>'remember', 'user'=>$remember['id'],
+                    'token'=>$remember['token'], 'expires'=>(int)$row->expires_ts,
+                    'row_id'=>(int)$row->id];
+            }
+        }
+        return $candidates;
+    }
+
+    /**
      * ログイン状態のチェック
      * 
      * @param array $path_settings 保護対象のパス設定
