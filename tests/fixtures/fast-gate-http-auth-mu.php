@@ -59,7 +59,7 @@ add_action('init', static function () {
     if (in_array($action, [
         'deploy-prepare','deploy-enable-fail-probe','deploy-enable','deploy-disable',
         'deploy-enable-private-404','deploy-enable-private-exposed',
-        'deploy-status','deploy-legacy-logout',
+        'deploy-status','deploy-legacy-logout','deploy-materialize-unknown',
         'deploy-inject-stale-lock','deploy-recover',
         'deploy-upgrade-preflight','deploy-upgrade-no-server'
     ], true)) {
@@ -146,6 +146,32 @@ add_action('init', static function () {
             $result=ESP_Fast_Gate_Deployment::enable();
         } elseif ($action === 'deploy-disable') {
             $result=ESP_Fast_Gate_Deployment::disable();
+        } elseif ($action === 'deploy-materialize-unknown') {
+            // Fixed, non-secret filename in the disposable CI site only.
+            // Deliberately bypass WordPress metadata so this path is NOT
+            // added to the catalog. The same URL was tested as absent first.
+            $result = false;
+            $uploads = wp_upload_dir(null, false);
+            $root = realpath($uploads['basedir'] ?? '');
+            $ledger = ESP_Fast_Gate_WP::ledger(false);
+            $name = 'esp-unknown-probe.jpg';
+            if ($root && $ledger && $ledger->serving() &&
+                ESP_Fast_Gate_WP::active() &&
+                ESP_Fast_Gate_Deployment::route_fast() &&
+                $ledger->get_media($name) === null) {
+                $file = $root . '/' . $name;
+                $bytes = @file_get_contents($root . '/fg-life-public.jpg');
+                if (is_string($bytes) && strlen($bytes) > 100) {
+                    $handle = @fopen($file, 'x');
+                    if ($handle !== false) {
+                        $written = @fwrite($handle, $bytes) === strlen($bytes) &&
+                            @fflush($handle);
+                        $closed = @fclose($handle);
+                        $result = $written && $closed;
+                        if (!$result) { @unlink($file); }
+                    }
+                }
+            }
         } elseif ($action === 'deploy-legacy-logout') {
             if (ESP_Fast_Gate_WP::active() ||
                 ESP_Fast_Gate_Deployment::route_fast()) {

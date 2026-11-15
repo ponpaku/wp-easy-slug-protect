@@ -40,11 +40,30 @@ third-party Rewrite conflict detection, readback/audit, version guard)
 continue to operate.
 
 While fast mode is armed, the managed Rewrite catches **all candidate media
-extensions**, including new/unindexed files. It must NOT have a
-`RewriteCond %{REQUEST_FILENAME} -f` condition or LiteSpeed's old
-allow-through query-key shortcut. The standalone script decides if the
-path is present and authorized in SQLite; unknown/ambiguous/fenced entries
-are denied.
+extensions**, including new/unindexed files. A separate negative regular-file
+check (`RewriteCond %{REQUEST_FILENAME} !-f`) terminates matching requests
+with `[R=404,L]`; it does **not** fall through to static delivery. The
+existing unconditional route for all remaining candidate requests is retained.
+Never add a positive `-f` condition to the Gate Rewrite or restore LiteSpeed's
+old allow-through query-key shortcut: a file may appear after a negative
+existence check. Even if a file appears during a 404 request, that response
+must not serve its bytes. The next request is evaluated again.
+
+Existing unindexed, ambiguous and fenced files still reach the standalone
+Gate and are denied. An unavailable/non-regular file can receive 404 at
+the server boundary. This changes no SQLite authorization or revocation
+policy. Server-generated 404 uses the server's normal error handling;
+a configured custom ErrorDocument may itself invoke other application code.
+The physical-file signed activation probe is unchanged. Verify the exact
+product-managed route over real HTTP on Apache and LiteSpeed; a passing
+Apache result is not sufficient evidence for LiteSpeed.
+
+The regression test requests a missing filename (GET, HEAD and query),
+materializes a real unregistered JPEG at the **same URL**, verifies 403
+including with a valid ESP ticket, checks another missing URL and repeats
+the distinction after reactivation. The admin browser also checks both. The
+extra stat on candidate requests is not a performance improvement for
+existing media; only missing requests skip the standalone Gate.
 
 The gate script performs **no WordPress bootstrap or MySQL query** on its
 HTTP media path.
@@ -64,7 +83,8 @@ serving or change Rewrite.
    is not serving.
 2. Arm route marker and use the **existing atomic writer** to replace the
    ESP-managed block with the standalone target. The SQLite reader is still
-   **stopped**, so media requests during the transition fail closed (503).
+   **stopped**, so existing candidate media requests during the transition
+   fail closed (503); missing/non-regular media can terminate with 404.
    WordPress metadata/password mutations already require SQLite fences once
    the route is armed, *before* the active option is enabled.
 3. Create an **actual, non-secret and unique .jpg file** in the uploads

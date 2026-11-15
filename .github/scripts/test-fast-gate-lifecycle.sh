@@ -499,6 +499,9 @@ python3 tests/fast-gate-activation-e2e.py \
 ESP_FG_UI_ARTIFACTS="$report_root/admin-ui" \
     python3 tests/fast-gate-admin-ui-e2e.py \
     | tee -a "$report_root/stages.log"
+# The HTTP activation E2E deliberately materialized this disposable,
+# unregistered file and the admin browser E2E rechecked its denial.
+sudo rm -- "$uploads/esp-unknown-probe.jpg"
 # The live-route probes use a genuine non-secret uploads file. They must
 # remove it on successful verification AND injected failure.
 if find "$uploads" -maxdepth 1 -type f -name 'esp-fast-gate-route-*.jpg' \

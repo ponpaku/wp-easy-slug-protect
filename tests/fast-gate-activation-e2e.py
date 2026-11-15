@@ -10,12 +10,12 @@ BASE = "http://127.0.0.1:8096"
 passed = 0
 
 
-def request(path, jar=None, cookie=None):
+def request(path, jar=None, cookie=None, method="GET"):
     opener = urllib.request.build_opener(
         urllib.request.HTTPCookieProcessor(
             jar if jar is not None else http.cookiejar.CookieJar()))
     target = urllib.request.Request(BASE + path,
-        headers={"Cookie": cookie} if cookie is not None else {})
+        headers={"Cookie": cookie} if cookie is not None else {}, method=method)
     try:
         with opener.open(target, timeout=18) as response:
             return response.status, response.read(), dict(response.headers.items())
@@ -93,8 +93,30 @@ check(request("/wp-content/uploads/fg-life-public.jpg")[0] == 200,
       "installed Fast Gate serves catalog public media")
 check(request("/wp-content/uploads/fg-life-protected.jpg")[0] == 403,
       "installed Fast Gate denies anonymous protected media")
-check(request("/wp-content/uploads/esp-unknown-probe.jpg")[0] == 403,
-      "installed Fast Gate denies media absent from the ledger")
+# The same previously missing URL must not become a static bypass when
+# an unregistered file appears on disk after the negative existence check.
+unknown = "/wp-content/uploads/esp-unknown-probe.jpg"
+check(request(unknown)[0] == 404,
+      "physically absent media terminates with server 404")
+check(request(unknown + "?test=missing")[0] == 404,
+      "missing media query string does not change the 404 policy")
+head_status, head_body, _ = request(unknown, method="HEAD")
+check(head_status == 404 and head_body == b"",
+      "missing media HEAD returns 404 without a body")
+created = command("materialize-unknown", 200)
+check(created["success"] and created["serving"] and created["active"],
+      "disposable real file created without a ledger record")
+unknown_status, unknown_body, unknown_headers = request(unknown)
+check(unknown_status == 403 and unknown_body == b"" and
+      "no-store" in {k.lower(): v for k, v in unknown_headers.items()}.get(
+          "cache-control", ""),
+      "newly materialized unregistered media reaches Gate and is denied")
+check(request(unknown + "?test=exists")[0] == 403,
+      "query string does not bypass existing unregistered media denial")
+check(request(unknown, method="HEAD")[0] == 403,
+      "existing unregistered media HEAD is denied")
+check(request("/wp-content/uploads/esp-missing-probe.jpg")[0] == 404,
+      "another absent media URL still returns 404")
 
 jar = http.cookiejar.CookieJar()
 opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
@@ -105,6 +127,8 @@ check(any(x.name == "esp_gate_fg_path" for x in jar),
 with opener.open(BASE + "/wp-content/uploads/fg-life-protected.jpg", timeout=12) as res:
     check(res.status == 200 and len(res.read()) > 100,
           "live signed ticket authorizes protected image")
+check(request(unknown, jar=jar)[0] == 403,
+      "a valid ESP ticket does not authorize unregistered media")
 
 disabled = command("disable", 200)
 check(disabled["success"] is True and disabled["route"] == "legacy" and
@@ -133,6 +157,9 @@ check(request("/wp-content/uploads/fg-life-protected.jpg",
 reenabled = command("enable", 200)
 check(reenabled["success"] and reenabled["serving"] and reenabled["active"],
       "verified reactivation succeeds after a legacy-only logout")
+check(request(unknown)[0] == 403 and
+      request("/wp-content/uploads/esp-missing-probe.jpg")[0] == 404,
+      "reactivation preserves absent 404 and unregistered real-file 403")
 check(request("/wp-content/uploads/fg-life-protected.jpg",
               cookie=retained_cookies)[0] == 403,
       "previous deployment's signed ticket is invalid after generation rotation")

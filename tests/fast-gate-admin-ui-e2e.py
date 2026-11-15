@@ -141,7 +141,9 @@ def main():
                 screenshot(page, "04-running")
                 media(context.request, "fg-life-public.jpg", 200)
                 media(context.request, "fg-life-protected.jpg", 403)
+                # Activation E2E created this physical unregistered file.
                 media(context.request, "esp-unknown-probe.jpg", 403)
+                media(context.request, "esp-missing-probe.jpg", 404)
                 action(page, "disable", "success", "準備完了（従来方式で配信中）")
                 screenshot(page, "05-disabled")
                 media(context.request, "fg-life-public.jpg", 200)

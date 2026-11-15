@@ -1834,6 +1834,13 @@ class ESP_Media_Protection {
                     return new WP_Error('esp_fast_gate_target_invalid',
                         'Standalone gate URL cannot be constructed');
                 }
+                // A negative file check must TERMINATE with 404, not fall
+                // through to static delivery: the file could appear after
+                // the check. All other candidate requests still reach Gate.
+                $rules .= "{$indent}# Fast Gate: missing files terminate with HTTP 404\n";
+                $rules .= "{$indent}RewriteCond %{REQUEST_URI} ^.*\\.({$extensions_pattern})$ [NC]\n";
+                $rules .= "{$indent}RewriteCond %{REQUEST_FILENAME} !-f\n";
+                $rules .= "{$indent}RewriteRule ^(.+)$ - [R=404,L]\n";
                 $rules .= "{$indent}# Fast Gate: no static-file existence shortcut\n";
                 $rules .= "{$indent}RewriteCond %{REQUEST_URI} ^.*\\.({$extensions_pattern})$ [NC]\n";
                 $rules .= "{$indent}RewriteRule ^(.+)$ {$target} [L,QSA]\n";
