@@ -574,6 +574,7 @@ docker exec --user www-data "$container" php /tmp/esp-fg-subdir-setup.php seed-m
 docker exec "$container" apache2ctl configtest
 docker exec "$container" apache2ctl graceful
 sleep 1
-python3 tests/fast-gate-subdir-e2e.py run "$root" | tee -a "$report_root/stages.log"
+ESP_FG_UI_ARTIFACTS="$report_root/subdir-ui" \
+    python3 tests/fast-gate-subdir-e2e.py run "$root" | tee -a "$report_root/stages.log"
 echo 'PASS: physical subdirectory Apache/WordPress login, PDF/MP4 Range and legacy-cache policy'
 
