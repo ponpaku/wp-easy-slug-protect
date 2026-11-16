@@ -538,3 +538,42 @@ python3 tests/fast-gate-upgrade-e2e.py run | tee -a "$report_root/stages.log"
 grep -Fq 'index.php?esp-media=' "$uploads/.htaccess"
 echo 'PASS: released upgrade, ledger/Cron/WAL, HTTP benchmark, verified product activation/rollback, real next-version Core update'
 
+# Relocate only the disposable test site into a real subdirectory under a
+# new Apache document root. Reuse WordPress/MySQL data, NOT the old private
+# ledger/keys: provision fresh storage through the product. The prior
+# site is stopped and no longer routed by either VirtualHost.
+docker exec "$container" sh -eu -c '
+    test "$ESP_FG_CI_HTTP_AUTH" = 1
+    test ! -e /var/www/esp-fg-subdir
+    mkdir -p /var/www/esp-fg-subdir/blog
+    cp -a /var/www/html/. /var/www/esp-fg-subdir/blog/
+    rm -rf /var/www/esp-fg-subdir/blog/wp-content/esp-fast-gate-v2
+'
+python3 tests/fast-gate-subdir-e2e.py build "$root"
+for name in fg-ci-range.pdf fg-ci-range.mp4; do
+    docker cp "$root/$name" "$container:/var/www/esp-fg-subdir/blog/wp-content/uploads/$name"
+done
+docker cp tests/fixtures/fast-gate-subdir-setup.php "$container:/tmp/esp-fg-subdir-setup.php"
+docker exec -i "$container" tee /var/www/esp-fg-subdir/blog/.htaccess >/dev/null <<'HTACCESS'
+<IfModule mod_rewrite.c>
+RewriteEngine On
+RewriteBase /blog/
+RewriteRule ^index\.php$ - [L]
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule . /blog/index.php [L]
+</IfModule>
+HTACCESS
+docker exec "$container" sh -eu -c '
+    chown www-data:www-data /var/www/esp-fg-subdir/blog/.htaccess /var/www/esp-fg-subdir/blog/wp-content/uploads/fg-ci-range.*
+    sed -i "s@DocumentRoot /var/www/html@DocumentRoot /var/www/esp-fg-subdir@g" /etc/apache2/sites-enabled/000-default.conf
+    printf "<Directory /var/www/esp-fg-subdir>\nAllowOverride All\nRequire all granted\n</Directory>\n" > /etc/apache2/conf-enabled/esp-fg-subdirectory.conf
+'
+docker exec --user www-data "$container" php /tmp/esp-fg-subdir-setup.php move-home
+docker exec --user www-data "$container" php /tmp/esp-fg-subdir-setup.php seed-media
+docker exec "$container" apache2ctl configtest
+docker exec "$container" apache2ctl graceful
+sleep 1
+python3 tests/fast-gate-subdir-e2e.py run "$root" | tee -a "$report_root/stages.log"
+echo 'PASS: physical subdirectory Apache/WordPress login, PDF/MP4 Range and legacy-cache policy'
+

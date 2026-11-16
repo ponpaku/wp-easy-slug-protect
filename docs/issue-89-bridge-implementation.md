@@ -167,3 +167,25 @@ markers, regenerated Rewrite writer version, settings and authentication
 rows, legacy HTTP policy, explicit re-enable, original session/Remember
 recovery, stale revoked proof rejection and logout. The test is of Core's
 bulk updater, not a browser click or host-specific automatic update.
+
+## Physical subdirectory and non-image media coverage
+
+After the root-layout actual upgrade test, the disposable site's files are
+physically copied to a new Apache document root's /blog/ directory. Neither
+VirtualHost serves the prior root. The WordPress home and siteurl options
+are migrated in a test-only CLI process, the legacy Rewrite is regenerated,
+and the new layout provisions a genuinely new ledger instead of patching
+the old root/prefix keys. Two original generated test assets (a one-page
+PDF and one-frame H.264 MP4) are attached through WordPress, protected via
+normal metadata hooks and indexed. Test-only generated assets are never
+part of the distributable ZIP.
+
+Actual Chromium submits the shared password form and checks return to
+the original JPEG, scoped /blog/ Cookie, original-session handoff and
+logout. The PDF/MP4 tests verify actual original bytes for each of the
+legacy PHP, standalone Gate, and Range-preserving authenticated bridge
+paths, including full HTTP 200, bounded 206, HTTP HEAD, invalid 416,
+anonymous rejection, and new legacy HTTP after logout. The required
+no-store is asserted on all four authorized response forms. They test
+delivery, not PDF/video rendering fidelity, HTTPS, LiteSpeed internal
+redirects or arbitrary reverse-proxy policy.

@@ -69,17 +69,17 @@ def navigation_codes(response):
     return list(reversed(codes))
 
 
-def media_login_browser(browser):
+def media_login_browser(browser, base=BASE):
     # Actual Chromium top-level navigation and actual ESP password form,
     # under the installed product-managed route. An isolated guest context
     # has no WordPress administrator privilege.
     guest = browser.new_context(locale="ja-JP")
-    media_url = BASE + "/wp-content/uploads/fg-life-protected.jpg"
+    media_url = base + "/wp-content/uploads/fg-life-protected.jpg"
     gate_name = "esp_gate_fg_path"
     source_name = "esp_auth_fg_path"
     setup = False
     try:
-        result = guest.request.get(BASE + "/?esp_fg_ci_auth=login-page-setup")
+        result = guest.request.get(base + "/?esp_fg_ci_auth=login-page-setup")
         setup = result.status == 200
         check(setup and result.json().get("login_page_configured") is True,
               "disposable browser login page configured")
@@ -93,7 +93,8 @@ def media_login_browser(browser):
         check(form.count() == 1 and form.is_visible(),
               "configured ESP password form rendered")
         check(form.locator('input[name="redirect_to"]').input_value() ==
-              urlsplit(media_url).path, "form carries original media return path")
+              urlsplit(media_url).path[len(urlsplit(base).path):],
+              "form carries original home-relative media return path")
         form.locator('input[name="esp_password"]').fill("disposable-ci-password")
         with tab.expect_navigation(wait_until="domcontentloaded") as nav:
             form.locator('button[type="submit"]').click()
@@ -105,7 +106,7 @@ def media_login_browser(browser):
               "actual ESP form submission returned to original protected JPEG")
         cookies = {c["name"]: c for c in guest.cookies([media_url])}
         check(source_name in cookies and gate_name in cookies and
-              cookies[gate_name]["path"] == "/" and
+              cookies[gate_name]["path"] == (urlsplit(base).path.rstrip("/") + "/") and
               cookies[gate_name]["httpOnly"] is True and
               cookies[gate_name]["sameSite"] == "Strict",
               "actual Chromium accepted scoped ESP and Gate cookies")
@@ -122,11 +123,12 @@ def media_login_browser(browser):
         direct = tab.goto(media_url, wait_until="domcontentloaded")
         check(navigation_codes(direct) == [200] and direct.url == media_url,
               "subsequent real browser image stayed on fast path")
-        logout = guest.request.get(BASE + "/?esp_fg_ci_auth=logout")
+        logout = guest.request.get(base + "/?esp_fg_ci_auth=logout")
         check(logout.status == 200, "browser session logout completed")
         denied = guest.request.get(media_url, max_redirects=0)
         check(denied.status == 403, "new media request denied after browser logout")
         print("FG_REAL_BROWSER_MEDIA_LOGIN " + json.dumps({
+            "layout": urlsplit(base).path or "/",
             "login": "passed", "first_bridge": "passed",
             "direct_repeat": "passed", "logout": "passed"
         }), flush=True)
@@ -140,7 +142,7 @@ def media_login_browser(browser):
         try:
             if setup:
                 restored = guest.request.get(
-                    BASE + "/?esp_fg_ci_auth=login-page-teardown")
+                    base + "/?esp_fg_ci_auth=login-page-teardown")
                 check(restored.status == 200 and
                       restored.json().get("login_page_restored_to_zero") is True,
                       "browser login fixture restored to original setting")
