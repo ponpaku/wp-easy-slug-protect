@@ -126,6 +126,57 @@ final class ESP_Fast_Gate_Deployment {
         return !empty($status['ready']) && empty($status['error']);
     }
 
+    /**
+     * Administrator/transition-only read-only preflight. No attachment IDs,
+     * SQL, file names, or credentials escape. Global READY alone is not an
+     * assertion that every owner is settled. These probes are point-in-time
+     * diagnostics; enable() still rebuilds with the route stopped.
+     */
+    public static function index_preflight() {
+        global $wpdb;
+        $status = ESP_Media_Index::build_status(false);
+        $out = ['ready'=>!empty($status['ready']), 'error'=>!empty($status['error']),
+            'pending'=>false, 'backoff'=>false, 'repairable'=>false,
+            'orphan'=>false, 'orphan_repairable'=>false, 'file_without_state'=>false,
+            'unfinished'=>false, 'blocked'=>true];
+        if ($out['error'] || !$out['ready']) { return $out; }
+        $state = ESP_Media_Index::state_table();
+        $files = ESP_Media_Index::files_table();
+        // EXISTS avoids materializing owner lists or counts. The anti-joins
+        // are confined to explicit deployment/admin settings, not media GETs.
+        $sql = $wpdb->prepare("SELECT
+            EXISTS(SELECT 1 FROM $state WHERE attachment_id>0 AND pending_count<>0) AS pending,
+            EXISTS(SELECT 1 FROM $state WHERE attachment_id>0 AND status='dirty'
+                AND pending_count=0 AND retry_after>%d) AS backoff,
+            EXISTS(SELECT 1 FROM $state WHERE attachment_id>0 AND status='dirty'
+                AND pending_count=0 AND retry_after<=%d) AS repairable,
+            EXISTS(SELECT 1 FROM $state s LEFT JOIN {$wpdb->posts} p
+                ON p.ID=s.attachment_id AND p.post_type='attachment'
+                WHERE s.attachment_id>0 AND p.ID IS NULL) AS orphan,
+            EXISTS(SELECT 1 FROM $state s LEFT JOIN {$wpdb->posts} p
+                ON p.ID=s.attachment_id AND p.post_type='attachment'
+                WHERE s.attachment_id>0 AND s.pending_count=0 AND p.ID IS NULL) AS orphan_repairable,
+            EXISTS(SELECT 1 FROM $files f LEFT JOIN $state s
+                ON s.attachment_id=f.attachment_id WHERE s.attachment_id IS NULL) AS file_without_state,
+            EXISTS(SELECT 1 FROM $state WHERE attachment_id>0
+                AND (status<>'ready' OR pending_count<>0)) AS unfinished", time(), time());
+        $row = $wpdb->get_row($sql, ARRAY_A);
+        if (!is_array($row) || $wpdb->last_error !== '') {
+            $out['error'] = true;
+            return $out;
+        }
+        foreach (['pending','backoff','repairable','orphan','orphan_repairable',
+                  'file_without_state','unfinished'] as $field) {
+            if (!isset($row[$field]) || !in_array((string)$row[$field], ['0','1'], true)) {
+                $out['error'] = true;
+                return $out;
+            }
+            $out[$field] = (string)$row[$field] === '1';
+        }
+        $out['blocked'] = $out['unfinished'] || $out['orphan'] || $out['file_without_state'];
+        return $out;
+    }
+
     public static function prepare() {
         if (self::route_fast() || ESP_Fast_Gate_WP::active()) {
             return self::error('already_routed');
@@ -133,8 +184,10 @@ final class ESP_Fast_Gate_Deployment {
         // Preparing the Fast Gate is an explicit administrator opt-in to the
         // *existing* incremental media index. Do not require a separate hidden
         // option change or undocumented WP-CLI command.
+        $ran_batch = false;
         if (!ESP_Media_Index::ready()) {
             ESP_Media_Index::run_batch();
+            $ran_batch = true;
             if (!ESP_Media_Index::ready()) {
                 return self::error('index_build_pending');
             }
@@ -149,23 +202,18 @@ final class ESP_Fast_Gate_Deployment {
         // subsequently dirtied/deleted attachments. The SQLite export refuses
         // ANY unsettled owner. An explicit administrator prepare can first
         // perform one bounded repair batch (including orphan purging).
-        $index_status = ESP_Media_Index::build_status(false);
-        if (!empty($index_status['error'])) {
+        $index_status = self::index_preflight();
+        if ($index_status['error']) {
             return self::error('index_status_unavailable');
         }
-        if (!empty($index_status['repairable_dirty'])) {
+        if (!$ran_batch && ($index_status['repairable'] || $index_status['orphan_repairable'])) {
             ESP_Media_Index::run_batch();
+            $index_status = self::index_preflight();
         }
-        // Recheck from SQL, not cached progress counts: pending writers,
-        // backoff rows and a busy scan worker must not be silently omitted.
-        global $wpdb;
-        $state = ESP_Media_Index::state_table();
-        $unfinished = $wpdb->get_var("SELECT attachment_id FROM $state
-            WHERE attachment_id>0 AND (status<>'ready' OR pending_count<>0)
-            LIMIT 1");
-        if ($wpdb->last_error !== '' || $unfinished !== null) {
-            return self::error('index_repair_pending');
-        }
+        // Recheck actual SQL state, never cached display counts. No pending
+        // write is cleared manually and no retry backoff is overridden.
+        if ($index_status['error']) { return self::error('index_status_unavailable'); }
+        if ($index_status['blocked']) { return self::error('index_repair_pending'); }
         $dir = ESP_Fast_Gate_WP::private_dir();
         if (!$dir && !ESP_Fast_Gate_WP::provision()) {
             return self::error('provision_failed');
@@ -451,6 +499,9 @@ final class ESP_Fast_Gate_Deployment {
                 ESP_Fast_Gate_WP::active()) {
                 return self::error('not_prepared_or_unsupported');
             }
+            $index_status = self::index_preflight();
+            if ($index_status['error']) { return self::error('index_status_unavailable'); }
+            if ($index_status['blocked']) { return self::error('index_repair_pending'); }
             $db = ESP_Fast_Gate_WP::ledger(true);
             $keys = self::keys();
             if (!$db || !$db->ready() || $db->serving() || !$keys ||
@@ -630,9 +681,11 @@ final class ESP_Fast_Gate_Deployment {
     public static function render_settings_section() {
         if (!current_user_can('manage_options')) { wp_die('Forbidden'); }
         $db = ESP_Fast_Gate_WP::ledger(false);
-        $state = self::route_fast() ? (ESP_Fast_Gate_WP::active() &&
+        $fast = self::route_fast();
+        $preflight = $fast ? null : self::index_preflight();
+        $state = $fast ? (ESP_Fast_Gate_WP::active() &&
             $db && $db->serving() ? 'running' : 'stopped') :
-            (self::prepared() ? 'prepared' : 'unprepared');
+            (self::prepared() && !$preflight['blocked'] ? 'prepared' : 'unprepared');
         echo '<div class="esp-section" id="esp-fast-gate"><h2>高速ゲート（Fast Gate v2）</h2><p>';
         $states = [
             'running'=>'稼働中',
@@ -652,6 +705,34 @@ final class ESP_Fast_Gate_Deployment {
                 '操作に失敗しました。エラーコード: ' . $result;
             echo '<div class="notice ' . esc_attr($notice) .
                 ' inline" role="status"><p>' . esc_html($message) . '</p></div>';
+        }
+        if ($preflight !== null) {
+            echo '<p>台帳準備では1回につき既存の索引修復処理を最大1バッチ実行します。更新中の予約や再試行待ちを強制解除しません。</p>';
+            $messages = [
+                'pending'=>'更新中または中断された更新の予約が残っています。進行中の処理を確認してください。予約を強制解除しないでください。',
+                'backoff'=>'再試行待ちの索引があります。Cronの再試行を待ち、長期間残る場合はメディア情報を点検してください。',
+                'repairable'=>'修復対象の索引があります。「台帳を準備する」で上限付きの修復を実行できます。',
+                'orphan'=>'孤立した索引管理行があります。既存の修復バッチで処理します（予約がある行は除外）。',
+                'file_without_state'=>'管理行のない索引ファイル行があります。索引の全件監査サイクルで修復されるまで切替できません。',
+            ];
+            if ($preflight['error']) {
+                echo '<p>索引の状態を確認できません。DB・索引の状態を点検してください。</p>';
+            } elseif (!$preflight['ready']) {
+                echo '<p>メディア索引の初期構築が完了していません。</p>';
+            } else {
+                foreach ($messages as $field=>$description) {
+                    if ($preflight[$field]) {
+                        echo '<p>' . esc_html($description) . '</p>';
+                    }
+                }
+                if (!$preflight['blocked']) {
+                    echo '<p>索引の準備前点検: 更新待ち・孤立行なし（この時点の結果）。</p>';
+                } elseif (!$preflight['pending'] && !$preflight['backoff'] &&
+                    !$preflight['repairable'] && !$preflight['orphan'] &&
+                    !$preflight['file_without_state']) {
+                    echo '<p>未完了の索引があります。索引の状態を点検してください。</p>';
+                }
+            }
         }
         $actions = [
             'prepare'=>'台帳を準備する',

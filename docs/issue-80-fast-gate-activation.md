@@ -197,3 +197,23 @@ Administrative setup may time out for very large catalogs (use WP-CLI).
 The published release's default public media cache policy is not changed.
 
 References: #80, #81, #82, #83.
+
+## Preparation diagnostics (#85)
+
+A read-only administrator/transition preflight distinguishes initial global
+coverage, SQL errors, outstanding reservations, live-owner retry backoff,
+eligible dirty owners, orphan state and file rows lacking state. It returns
+only booleans, never IDs/SQL/paths/secrets. Global READY does not imply settled
+local owners. The explicit prepare action runs at most one existing bounded
+index batch per call; does not force delete a reservation or override a live
+row backoff; and refuses incomplete or orphaned state, with DB errors separate.
+A READY orphan with zero pending is also eligible for the existing orphan
+repair. File-only orphan cleanup remains the existing end-of-audit cycle.
+The initial enable preflight refuses unsettled state before changing routes;
+the existing post-route full catalog reconciliation is still required. No
+query is added to standalone GETs. The admin screen shows fixed actionable
+diagnostics and does not label blocked state as prepared.
+
+Real MySQL lifecycle tests cover pending orphan, live backoff, eligible
+orphan, refusal and recovery. Root cause of real-host repeated orphan
+creation and exhaustive catalog-build error-stage diagnosis remain open.

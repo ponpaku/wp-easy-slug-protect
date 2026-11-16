@@ -200,6 +200,11 @@ if($phase==='manual-build'){
         'changed_at' => time(),
     ], ['%d','%s','%d','%d']) === 1,
         'seed pending index writer');
+    $report = ESP_Fast_Gate_Deployment::index_preflight();
+    fg_life_check($report['ready'] && $report['pending'] && $report['orphan'] &&
+        !$report['repairable'] && !$report['orphan_repairable'] &&
+        $report['blocked'] && !$report['error'],
+        'preflight classifies pending orphan without changing reservations');
     $blocked_prepare = ESP_Fast_Gate_Deployment::prepare();
     fg_life_check(is_wp_error($blocked_prepare) &&
         $blocked_prepare->get_error_code() === 'esp_gate_index_repair_pending',
@@ -207,6 +212,29 @@ if($phase==='manual-build'){
     fg_life_check($wpdb->delete($state_table,
         ['attachment_id'=>$pending_id], ['%d']) === 1,
         'remove disposable pending fixture');
+
+    // Use a real attachment's state for backoff: orphan rows are purposely
+    // purged regardless of backoff as long as they have no reservation.
+    $old_state = $wpdb->get_row($wpdb->prepare(
+        "SELECT status,retry_after FROM $state_table WHERE attachment_id=%d",
+        $ids['public']), ARRAY_A);
+    fg_life_check($wpdb->update($state_table,
+        ['status'=>'dirty','retry_after'=>time()+1200],
+        ['attachment_id'=>$ids['public']]) === 1, 'seed live owner in backoff');
+    try {
+        $report = ESP_Fast_Gate_Deployment::index_preflight();
+        fg_life_check($report['backoff'] && $report['blocked'] &&
+            !$report['pending'] && !$report['repairable'] && !$report['orphan'],
+            'preflight distinguishes active backoff from repairable dirty');
+        $rejected = ESP_Fast_Gate_Deployment::prepare();
+        fg_life_check(is_wp_error($rejected) &&
+            $rejected->get_error_code()==='esp_gate_index_repair_pending',
+            'prepare does not override live owner backoff');
+    } finally {
+        $wpdb->update($state_table, $old_state, ['attachment_id'=>$ids['public']]);
+    }
+    fg_life_check(!ESP_Fast_Gate_Deployment::index_preflight()['blocked'],
+        'preflight shows clean once backoff fixture restored');
 
     fg_life_check($wpdb->insert($state_table, [
         'attachment_id' => $orphan_id,
@@ -218,6 +246,10 @@ if($phase==='manual-build'){
     fg_life_check(ESP_Media_Index::ready() &&
         ESP_Media_Index::build_status(false)['repairable_dirty'] === true,
         'repairable orphan must be visible without revoking global READY');
+    $report = ESP_Fast_Gate_Deployment::index_preflight();
+    fg_life_check($report['orphan'] && $report['orphan_repairable'] &&
+        $report['repairable'] && $report['blocked'] && !$report['pending'],
+        'preflight classifies repairable orphan');
     fg_life_check($db->set_ready(false), 'mark SQLite catalog unprepared for rebuild');
     fg_life_check(ESP_Fast_Gate_Deployment::prepare() === true,
         'administrator prepare must reconcile orphan before catalog build');
@@ -227,6 +259,8 @@ if($phase==='manual-build'){
     fg_life_check($db->ready() && !$db->serving() &&
         ESP_Fast_Gate_Deployment::prepared(),
         'repaired catalog ready without changing media route or serving');
+    fg_life_check(!ESP_Fast_Gate_Deployment::index_preflight()['blocked'],
+        'preflight verifies orphan repair without claiming HTTP verification');
     fg_life_emit('MANUAL_BUILD_COMPLETE',['elapsed_ms'=>round((microtime(true)-$start)*1000,1),
         'counts'=>$db->counts(), 'repairable_orphan_reconciled'=>true]);
     exit;
