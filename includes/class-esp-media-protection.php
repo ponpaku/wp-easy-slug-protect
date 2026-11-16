@@ -1303,6 +1303,74 @@ class ESP_Media_Protection {
     }
 
     /**
+     * Read-only evidence about managed rules, not an authorization or live
+     * HTTP routing proof. CLI environment variables cannot attest to a web
+     * server. No options or environment variables are changed.
+     */
+    public static function inspect_rewrite_policy() {
+        $cli = in_array(PHP_SAPI, ['cli', 'phpdbg'], true);
+        $software = $cli ? '' : self::get_server_software();
+        $family = 'unknown';
+        if (preg_match('/nginx|openresty|tengine/i', $software)) { $family = 'nginx'; }
+        elseif (preg_match('/litespeed/i', $software)) { $family = 'litespeed'; }
+        elseif (preg_match('/apache/i', $software)) { $family = 'apache'; }
+        $fast = class_exists('ESP_Fast_Gate_Deployment') && ESP_Fast_Gate_Deployment::route_fast();
+        $enabled = self::is_media_protection_enabled();
+        $out = ['status'=>'unknown', 'reason'=>'rewrite_unverified',
+            'context'=>$cli ? 'cli' : 'http', 'server_family'=>$family,
+            'route'=>$fast ? 'fast' : 'legacy', 'media_enabled'=>$enabled,
+            'file_status'=>'unverified', 'matched_policy'=>null];
+        if ($family === 'nginx') {
+            $out['status'] = $fast ? 'mismatch' : 'external';
+            $out['reason'] = $fast ? 'fast_route_unsupported' : 'external_rewrite';
+            return $out;
+        }
+        $dir = wp_upload_dir(null, false);
+        if (!empty($dir['error']) || empty($dir['basedir']) ||
+            !is_dir($dir['basedir']) || !is_readable($dir['basedir'])) {
+            $out['reason'] = 'uploads_unavailable';
+            return $out;
+        }
+        $file = trailingslashit($dir['basedir']) . '.htaccess';
+        clearstatcache(true, $file);
+        if (is_link($file) || (file_exists($file) && !is_file($file))) {
+            $out['status'] = 'mismatch';
+            $out['reason'] = 'invalid_rewrite_file';
+            $out['file_status'] = 'mismatch';
+            return $out;
+        }
+        $contents = is_file($file) ? @file_get_contents($file) : '';
+        if ($contents === false) {
+            $out['reason'] = 'rewrite_unreadable';
+            return $out;
+        }
+        $managed = strpos($contents, '# BEGIN ESP Media Protection') !== false ||
+            strpos($contents, '# END ESP Media Protection') !== false;
+        // Unknown legacy deployments may use external server rules. An
+        // absent managed block cannot prove their routing is broken.
+        if ($enabled && !$fast && $family === 'unknown' && !$managed) {
+            $out['reason'] = 'server_and_policy_unknown';
+            return $out;
+        }
+        if (!$enabled || $fast || $family !== 'unknown') {
+            $matches = self::rewrite_contents_match_policy($contents, $enabled, null,
+                $family === 'unknown' ? 'apache' : $family);
+            $out['matched_policy'] = $matches ? (!$enabled ? 'off' : ($fast ? 'fast' : $family)) : null;
+        } else {
+            $apache = self::rewrite_contents_match_policy($contents, true, null, 'apache');
+            $lite = self::rewrite_contents_match_policy($contents, true, null, 'litespeed');
+            $matches = $apache || $lite;
+            $out['matched_policy'] = $apache ? 'apache' : ($lite ? 'litespeed' : null);
+        }
+        $out['file_status'] = $matches ? 'match' : 'mismatch';
+        $out['status'] = !$matches ? 'mismatch' :
+            ($enabled && !$fast && $family === 'unknown' ? 'partial' : 'ok');
+        $out['reason'] = !$matches ? 'managed_rules_mismatch' :
+            ($out['status'] === 'partial' ? 'server_family_unverified' : 'file_policy_match');
+        return $out;
+    }
+
+    /**
      * キャッシュ上のバージョン印だけでなく、配置済みルールの内容を検証する。
      * 実際のWebサーバーでのRewrite動作検証に代わるものではない。
      */
@@ -1319,6 +1387,13 @@ class ESP_Media_Protection {
         if ($contents === false) {
             return false;
         }
+        return self::rewrite_contents_match_policy($contents, $enabled, $litespeed_key_override);
+    }
+
+    // Pure comparison of one captured file snapshot. An explicit family
+    // is used only by the read-only audit, never by the Rewrite writer.
+    private static function rewrite_contents_match_policy($contents, $enabled,
+        $litespeed_key_override = null, $audit_family = null) {
         $start = strpos($contents, '# BEGIN ESP Media Protection');
         $begin_count = substr_count($contents, '# BEGIN ESP Media Protection');
         $end_count = substr_count($contents, '# END ESP Media Protection');
@@ -1351,7 +1426,7 @@ class ESP_Media_Protection {
         // リクエストごとのルール照合では、キャッシュや各種フックを初期化しない。
         // .htaccessの内容を比較する処理だけを実行する。
         $media = (new \ReflectionClass(self::class))->newInstanceWithoutConstructor();
-        $expected = $media->get_htaccess_rules(true, true, $litespeed_key_override);
+        $expected = $media->get_htaccess_rules(true, true, $litespeed_key_override, $audit_family);
         if (is_wp_error($expected)) {
             return false;
         }
@@ -1797,7 +1872,9 @@ class ESP_Media_Protection {
      * @param bool|null $has_protected_media ルールを適用するか
      * @return string|WP_Error .htaccessルール
      */
-    private function get_htaccess_rules($has_protected_media = null, $read_only = false, $litespeed_key_override = null) {
+    private function get_htaccess_rules($has_protected_media = null, $read_only = false,
+        $litespeed_key_override = null, $audit_family = null) {
+        $litespeed = $audit_family === null ? $this->is_litespeed() : $audit_family === 'litespeed';
         if ($has_protected_media === null) {
             $has_protected_media = self::is_media_protection_enabled();
         }
@@ -1844,7 +1921,7 @@ class ESP_Media_Protection {
                 $rules .= "{$indent}# Fast Gate: no static-file existence shortcut\n";
                 $rules .= "{$indent}RewriteCond %{REQUEST_URI} ^.*\\.({$extensions_pattern})$ [NC]\n";
                 $rules .= "{$indent}RewriteRule ^(.+)$ {$target} [L,QSA]\n";
-            } elseif ($this->is_litespeed()) {
+            } elseif ($litespeed) {
                 // 監査・既存ルール比較はキーを生成しない。
                 // キーの作成・更新は明示的なRewrite更新処理だけで行う。
                 $litespeed_key = $litespeed_key_override !== null
@@ -1877,7 +1954,7 @@ class ESP_Media_Protection {
             // ディレクトリ区切りを維持する。LiteSpeedでは選択的[B=]が
             // ルーティングを素通りさせた実機事例があり、通常の[B]を使用。
             // 通常[B]の%2Fはクエリ値としてPHP側で復号される。
-            $rewrite_flags = $this->is_litespeed()
+            $rewrite_flags = $litespeed
                 ? '[B,L,QSA]' : '"[B= %&+#?;,L]"';
                 $rules .= "{$indent}RewriteRule ^(.+)$ {$home_path}index.php?" . self::REWRITE_ENDPOINT . "=$1 {$rewrite_flags}\n";
             }

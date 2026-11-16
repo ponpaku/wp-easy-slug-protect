@@ -694,6 +694,9 @@ class ESP_Admin_Menu {
                 <?php submit_button(); ?>
             </form>
             <?php
+            if (class_exists('ESP_Protection_State')) {
+                ESP_Protection_State::render_audit_panel();
+            }
             // Keep deployment actions separate from the options.php settings
             // form. Nested forms would lose nonces and could save settings.
             if (class_exists('ESP_Fast_Gate_Deployment')) {

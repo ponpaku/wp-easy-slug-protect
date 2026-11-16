@@ -594,6 +594,13 @@ check($media->update_htaccess() === true &&
 file_put_contents($file, $new);
 check($matchesPolicy->invoke(null, true) === true,
     'R02: restoring verified ESP-first policy remains possible');
+$report = ESP_Media_Protection::inspect_rewrite_policy();
+check($report['status'] === 'partial' && $report['matched_policy'] === 'apache',
+    'CLI identifies installed Apache candidate');
+file_put_contents($file, '# no managed rules');
+check(ESP_Media_Protection::inspect_rewrite_policy()['status'] === 'unknown',
+    'unknown legacy server with no ESP block is not called verified');
+file_put_contents($file, $new);
 
 check(strpos($new, 'avif') !== false, 'AVIF is covered in replacement');
 // LiteSpeedキー未設定の読取専用監査は、設定・Rewriteを一切変更しない。
@@ -612,6 +619,16 @@ check($media->update_htaccess() === true && $GLOBALS['litespeed_key'] !== '',
     'explicit LiteSpeed Rewrite update may initialize the missing key');
 $writes_after_install = $GLOBALS['litespeed_key_writes'];
 $installed_litespeed_rules = file_get_contents($file);
+unset($_SERVER['SERVER_SOFTWARE']);
+$report = ESP_Media_Protection::inspect_rewrite_policy();
+check($report['status'] === 'partial' && $report['matched_policy'] === 'litespeed' &&
+    $report['server_family'] === 'unknown', 'raw CLI verifies LiteSpeed candidate without assuming server family');
+file_put_contents($file, $installed_litespeed_rules . "\nRewriteEngine Off\n");
+check(ESP_Media_Protection::inspect_rewrite_policy()['status'] === 'mismatch',
+    'raw CLI detects real foreign Rewrite conflict');
+file_put_contents($file, $installed_litespeed_rules);
+check($GLOBALS['litespeed_key_writes'] === $writes_after_install, 'CLI inspection never writes key');
+$_SERVER['SERVER_SOFTWARE'] = 'LiteSpeed';
 check(ESP_Media_Protection::audit_rewrite_policy() === true,
     'LiteSpeed audit accepts a complete Rewrite with existing key');
 check($GLOBALS['litespeed_key_writes'] === $writes_after_install &&

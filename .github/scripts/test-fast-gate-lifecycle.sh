@@ -505,7 +505,7 @@ ESP_FG_CI_CONTAINER="$container" python3 tests/fast-gate-activation-e2e.py \
     | tee -a "$report_root/stages.log"
 # The browser drives the shipped WordPress admin forms against the same
 # disposable real Apache site and stores only settings-page screenshots.
-ESP_FG_UI_ARTIFACTS="$report_root/admin-ui" \
+ESP_AUDIT_CI_CONTAINER="$container" ESP_FG_UI_ARTIFACTS="$report_root/admin-ui" \
     python3 tests/fast-gate-admin-ui-e2e.py \
     | tee -a "$report_root/stages.log"
 # The HTTP activation E2E deliberately materialized this disposable,

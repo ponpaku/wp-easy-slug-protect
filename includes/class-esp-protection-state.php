@@ -163,6 +163,7 @@ final class ESP_Protection_State {
             self::verify_once($setup);
         });
         add_action('admin_notices', [self::class, 'render_audit_notice']);
+        add_action('admin_post_esp_recheck_audit', [self::class, 'handle_audit_recheck']);
         add_action('admin_post_esp_recover_stuck_upgrade', static function () use ($setup) {
             if (!current_user_can('manage_options')) {
                 wp_die(__('操作権限がありません。', ESP_Config::TEXT_DOMAIN), '', ['response' => 403]);
@@ -597,54 +598,167 @@ final class ESP_Protection_State {
      * 新規保護の直前検査は別途必須とし、Cron遅延へ安全性を依存させない。
      */
     public static function audit() {
-        $errors = [];
-        try {
-            $settings = get_option(ESP_Config::OPTION_KEY, null);
-            if (!self::valid_settings($settings)) {
-                $errors[] = 'settings_invalid';
-            }
-            $stored = get_option('esp_db_version', null);
-            $required = (int) ESP_Config::OPTION_DEFAULTS['db_version'];
-            if ((is_int($stored) || (is_string($stored) && ctype_digit($stored))) &&
-                (int) $stored > $required) {
-                $errors[] = 'future_schema';
-            }
-            if (!self::verify_legacy_security_schema()) {
-                $errors[] = 'schema_invalid';
-            }
-            if (class_exists('ESP_Media_Protection') &&
-                !ESP_Media_Protection::audit_rewrite_policy()) {
-                $errors[] = 'rewrite_mismatch';
-            }
-            $installed_version = get_option(ESP_Config::VERSION_OPTION_KEY, null);
-            if ($installed_version !== ESP_VERSION) {
-                $errors[] = 'version_unverified';
-            }
-            if (!self::is_verified_ready(self::get_runtime_state())) {
-                $errors[] = 'runtime_not_ready';
-            }
-        } catch (\Throwable $error) {
-            $errors[] = 'audit_exception';
-        }
-        update_option(self::AUDIT_OPTION, [
-            'checked_at' => time(), 'errors' => array_values(array_unique($errors)),
-        ], false);
-        // 管理者による明示的な復旧まで、外部ファイルを勝手に変更しない。
-        return $errors === [];
+        $saved = self::run_audit('daily_hook');
+        return is_array($saved) && $saved['errors'] === [];
     }
 
-    /** WP-Cronの点検異常は管理者へ表示し、毎アクセスで再検査しない。 */
+    // A separate, request-owned advisory lock serializes audit publishers
+    // without blocking the runtime verification or the serving path.
+    private static function run_audit($source) {
+        global $wpdb;
+        if (!is_object($wpdb) || !isset($wpdb->prefix)) { return null; }
+        $name = 'esp_audit_' . md5((defined('DB_NAME') ? DB_NAME : '') . ':' . $wpdb->prefix);
+        $connection = $wpdb->get_var('SELECT CONNECTION_ID()');
+        if (!is_numeric($connection) ||
+            (string)$wpdb->get_var($wpdb->prepare('SELECT GET_LOCK(%s, %d)', $name, 0)) !== '1') {
+            return null;
+        }
+        $lock = ['name'=>$name, 'connection'=>(string)$connection];
+        try {
+            if (!self::owns_verification_lock($lock)) { return null; }
+            if (function_exists('wp_cache_delete')) {
+                foreach (['alloptions','notoptions',self::AUDIT_OPTION] as $key) {
+                    wp_cache_delete($key, 'options');
+                }
+            }
+            $previous = get_option(self::AUDIT_OPTION, null);
+            $errors = [];
+            $rewrite = ['status'=>'unknown','reason'=>'audit_not_completed',
+                'context'=>in_array(PHP_SAPI, ['cli','phpdbg'], true) ? 'cli' : 'http',
+                'server_family'=>'unknown','file_status'=>'unverified'];
+            try {
+                $settings = get_option(ESP_Config::OPTION_KEY, null);
+                if (!self::valid_settings($settings)) { $errors[] = 'settings_invalid'; }
+                $stored = get_option('esp_db_version', null);
+                $required = (int) ESP_Config::OPTION_DEFAULTS['db_version'];
+                if ((is_int($stored) || (is_string($stored) && ctype_digit($stored))) &&
+                    (int)$stored > $required) { $errors[] = 'future_schema'; }
+                if (!self::verify_legacy_security_schema()) { $errors[] = 'schema_invalid'; }
+                if (class_exists('ESP_Media_Protection')) {
+                    $rewrite = ESP_Media_Protection::inspect_rewrite_policy();
+                }
+                $installed_version = get_option(ESP_Config::VERSION_OPTION_KEY, null);
+                if ($installed_version !== ESP_VERSION) { $errors[] = 'version_unverified'; }
+                if (!self::is_verified_ready(self::get_runtime_state())) { $errors[] = 'runtime_not_ready'; }
+            } catch (\Throwable $error) {
+                $errors[] = 'audit_exception';
+            }
+            if ($rewrite['status'] === 'mismatch') { $errors[] = 'rewrite_mismatch'; }
+            elseif ($rewrite['status'] === 'unknown') { $errors[] = 'rewrite_unverified'; }
+
+            // Preserve a previous HTTP failure (or a legacy mismatch of
+            // unknown provenance) until an equivalent HTTP file check passes.
+            // A successful CLI file check can clear its OWN earlier file error.
+            $retained = is_array($previous) ? ($previous['rewrite_http_failure'] ?? null) : null;
+            if (!is_array($retained) && is_array($previous) && !isset($previous['rewrite']) &&
+                in_array('rewrite_mismatch', (array)($previous['errors'] ?? []), true)) {
+                $retained = ['checked_at'=>(int)($previous['checked_at'] ?? 0),
+                    'server_family'=>'unknown','reason'=>'legacy_audit'];
+            }
+            $web_family = ($rewrite['context'] ?? '') === 'http' &&
+                in_array($rewrite['server_family'] ?? '', ['apache','litespeed','nginx'], true);
+            if ($web_family && $rewrite['status'] === 'mismatch') {
+                $retained = ['checked_at'=>time(),'server_family'=>$rewrite['server_family'],
+                    'reason'=>$rewrite['reason']];
+            } elseif ($web_family && $rewrite['status'] === 'ok') {
+                $retained = null;
+            }
+            if (is_array($retained)) { $errors[] = 'rewrite_mismatch'; }
+            $now = time();
+            $record = ['schema'=>2, 'checked_at'=>$now, 'version'=>ESP_VERSION,
+                'source'=>$source,
+                'last_daily_hook_at'=>$source === 'daily_hook' ? $now :
+                    (int)($previous['last_daily_hook_at'] ?? (!isset($previous['schema']) ? ($previous['checked_at'] ?? 0) : 0)),
+                'errors'=>array_values(array_unique($errors)), 'rewrite'=>$rewrite,
+                'rewrite_http_failure'=>$retained];
+            if (!self::owns_verification_lock($lock)) { return null; }
+            $written = update_option(self::AUDIT_OPTION, $record, false);
+            // update_option returns false for identical values, too.
+            if (!$written && get_option(self::AUDIT_OPTION, null) !== $record) { return null; }
+            return $record;
+        } finally {
+            self::release_verification_lock($lock);
+        }
+    }
+
+    public static function handle_audit_recheck() {
+        if (!current_user_can('manage_options') || ($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
+            wp_die(__('操作権限がありません。', ESP_Config::TEXT_DOMAIN), '', ['response'=>403]);
+        }
+        check_admin_referer('esp_recheck_audit');
+        $saved = self::run_audit('manual');
+        if (!is_array($saved)) {
+            wp_die(__('点検結果を保存できませんでした。DBまたは実行中の点検を確認して再試行してください。',
+                ESP_Config::TEXT_DOMAIN), '', ['response'=>503]);
+        }
+        wp_safe_redirect(admin_url('admin.php?page=esp-settings#esp-daily-audit'));
+        exit;
+    }
+
+    private static function audit_stale($audit) {
+        $checked = is_array($audit) ? (int)($audit['checked_at'] ?? 0) : 0;
+        return $checked <= 0 || $checked > time() || time() - $checked > 48 * 3600;
+    }
+
+    private static function audit_time($checked) {
+        return $checked > 0 ? wp_date('Y-m-d H:i:s T', $checked) : __('未実行', ESP_Config::TEXT_DOMAIN);
+    }
+
+    /** Only stored evidence; no schema or filesystem scan on admin load. */
     public static function render_audit_notice() {
-        if (!current_user_can('manage_options')) {
-            return;
-        }
+        if (!current_user_can('manage_options')) { return; }
         $audit = get_option(self::AUDIT_OPTION, null);
-        if (!is_array($audit) || empty($audit['errors'])) {
-            return;
+        if (!is_array($audit) || (empty($audit['errors']) && !self::audit_stale($audit))) { return; }
+        echo '<div class="notice notice-warning"><p>' .
+            esc_html__('Easy Slug Protect: 保存済み定期点検結果に異常、確認不能、または遅延があります。', ESP_Config::TEXT_DOMAIN) . ' ' .
+            esc_html(self::audit_time((int)($audit['checked_at'] ?? 0))) . ' ' .
+            esc_html(implode(', ', (array)($audit['errors'] ?? []))) .
+            ' <a href="' . esc_url(admin_url('admin.php?page=esp-settings#esp-daily-audit')) . '">' .
+            esc_html__('点検結果の確認・再実行', ESP_Config::TEXT_DOMAIN) . '</a></p></div>';
+    }
+
+    public static function render_audit_panel() {
+        if (!current_user_can('manage_options')) { return; }
+        $audit = get_option(self::AUDIT_OPTION, null);
+        $rewrite = is_array($audit) && is_array($audit['rewrite'] ?? null) ? $audit['rewrite'] : [];
+        $labels = [
+            'ok'=>__('管理ルールのファイル照合: 正常', ESP_Config::TEXT_DOMAIN),
+            'partial'=>__('管理ルールのファイル照合: 正常（サーバー適合性は未確認）', ESP_Config::TEXT_DOMAIN),
+            'mismatch'=>__('管理ルールの不整合を検出', ESP_Config::TEXT_DOMAIN),
+            'unknown'=>__('Rewriteを確認できませんでした', ESP_Config::TEXT_DOMAIN),
+            'external'=>__('外部サーバー設定で管理（未検証）', ESP_Config::TEXT_DOMAIN),
+        ];
+        echo '<div id="esp-daily-audit"><h2>' . esc_html__('定期点検', ESP_Config::TEXT_DOMAIN) . '</h2><p>' .
+            esc_html__('以下は保存された点検結果です。現在のHTTP配信・認可経路を証明するものではありません。', ESP_Config::TEXT_DOMAIN) .
+            '</p><p>' . esc_html__('最終点検日時: ', ESP_Config::TEXT_DOMAIN) .
+            esc_html(self::audit_time((int)($audit['checked_at'] ?? 0))) . '</p>';
+        $daily = (int)($audit['last_daily_hook_at'] ?? (!isset($audit['schema']) ? ($audit['checked_at'] ?? 0) : 0));
+        $next = (int)wp_next_scheduled(ESP_Config::DAILY_CLEANUP_HOOK);
+        echo '<p>' . esc_html__('日次フック最終実行: ', ESP_Config::TEXT_DOMAIN) .
+            esc_html(self::audit_time($daily)) . ' / ' . esc_html__('次回予約: ', ESP_Config::TEXT_DOMAIN) .
+            esc_html($next > 0 ? self::audit_time($next) : __('予約なし', ESP_Config::TEXT_DOMAIN)) . '</p>';
+        if (self::audit_stale($audit) || ($daily > 0 && time() - $daily > 48 * 3600) ||
+            $next <= 0 || $next + 3600 < time()) {
+            echo '<p>' . esc_html__('点検結果がない、古い、または日次予約が遅延しています。Cronの設定・実行状況を確認してください。', ESP_Config::TEXT_DOMAIN) . '</p>';
         }
-        echo '<div class="notice notice-warning"><p>'
-            . esc_html__('Easy Slug Protect: 定期点検で不整合を検出しました。保護設定とRewriteを確認し、必要ならESPの復旧画面から再検証してください。', ESP_Config::TEXT_DOMAIN)
-            . '</p></div>';
+        if (is_array($audit)) {
+            echo '<p>' . esc_html__('点検コード: ', ESP_Config::TEXT_DOMAIN) .
+                esc_html(empty($audit['errors']) ? __('なし', ESP_Config::TEXT_DOMAIN) : implode(', ', (array)$audit['errors'])) . '</p>';
+        }
+        if ($rewrite) {
+            echo '<p>' . esc_html($labels[$rewrite['status'] ?? 'unknown'] ?? $labels['unknown']) .
+                ' (' . esc_html(($rewrite['context'] ?? 'unknown') . ' / ' . ($rewrite['server_family'] ?? 'unknown') .
+                ' / ' . ($rewrite['reason'] ?? 'unknown')) . ')</p>';
+        }
+        if (is_array($audit['rewrite_http_failure'] ?? null)) {
+            echo '<p>' . esc_html__('以前のRewrite異常は、HTTP環境での正常なファイル照合が完了するまで維持します。', ESP_Config::TEXT_DOMAIN) . ' ' .
+                esc_html(self::audit_time((int)($audit['rewrite_http_failure']['checked_at'] ?? 0))) . '</p>';
+        }
+        echo '<p>' . esc_html__('不整合がある場合は保護設定・uploads/.htaccess・外部サーバー設定を確認してください。点検の再実行は保護状態の再検証やRewrite再設定とは異なり、監査結果のみ更新します。', ESP_Config::TEXT_DOMAIN) .
+            '</p><form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
+        wp_nonce_field('esp_recheck_audit');
+        echo '<input type="hidden" name="action" value="esp_recheck_audit" /><p><button type="submit" class="button button-secondary">' .
+            esc_html__('定期点検を再実行する', ESP_Config::TEXT_DOMAIN) . '</button></p></form></div>';
     }
 
     /** 設定欠損・形状異常だけは軽い認可前チェックで拒否する。 */
@@ -773,6 +887,7 @@ final class ESP_Protection_State {
             . '<p><button type="submit" class="button button-primary">'
             . esc_html__('保護状態を再検証する', ESP_Config::TEXT_DOMAIN)
             . '</button></p></form>';
+        self::render_audit_panel();
         $runtime = self::get_runtime_state();
         if ($runtime['state'] === 'UPDATING') {
             $since = $runtime['since'] ?? null;

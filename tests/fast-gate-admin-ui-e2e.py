@@ -6,6 +6,7 @@ contain only the CI administrator's settings page, never credentials or cookies.
 """
 import json
 import os
+import subprocess
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -150,6 +151,79 @@ def media_login_browser(browser, base=BASE):
             guest.close()
 
 
+def audit_cli(code):
+    # Only the explicitly disposable lifecycle container, never an external site.
+    container = os.environ["ESP_AUDIT_CI_CONTAINER"]
+    assert os.environ.get("CI") == "true" and os.environ.get("ESP_ALLOW_DISPOSABLE_DB") == "1"
+    prefix = ('require "/var/www/html/wp-load.php"; '
+              'if (DB_NAME !== "esp_fg_lifecycle") exit(2); ')
+    return subprocess.check_output(
+        ["docker", "exec", "-u", "www-data", container, "env", "-u",
+         "SERVER_SOFTWARE", "php", "-r", prefix + code], text=True).strip()
+
+
+def audit_record():
+    return json.loads(audit_cli('echo json_encode(get_option("esp_integrity_last_audit"));'))
+
+
+def audit_fingerprint():
+    return audit_cli('$d=wp_upload_dir(null,false); '
+                     'echo hash("sha256",serialize([hash_file("sha256",$d["basedir"]."/.htaccess"),'
+                     'get_option(ESP_Config::OPTION_KEY),get_option("esp_runtime_state"),'
+                     'get_option("esp_fast_gate_v2_route"),get_option("esp_fast_gate_v2_active")]));')
+
+
+def raw_cron_audit(expected):
+    before = audit_fingerprint()
+    audit_cli('wp_clear_scheduled_hook("esp_daily_cleanup"); '
+              'if (!wp_schedule_event(time()-10,"daily","esp_daily_cleanup")) exit(3); '
+              'delete_transient("doing_cron");')
+    subprocess.run(["docker", "exec", "-u", "www-data",
+                    os.environ["ESP_AUDIT_CI_CONTAINER"], "env", "-u",
+                    "SERVER_SOFTWARE", "php", "-f", "/var/www/html/wp-cron.php"],
+                   check=True)
+    record = audit_record()
+    rewrite = record["rewrite"]
+    check(record["source"] == "daily_hook" and rewrite["context"] == "cli"
+          and rewrite["server_family"] == "unknown" and rewrite["status"] == expected
+          and rewrite["matched_policy"] == ("fast" if expected == "ok" else "apache")
+          and not record["errors"], "real bare PHP wp-cron audit: " + expected)
+    check(audit_fingerprint() == before, "raw cron preserves protection options and Rewrite")
+    return record
+
+
+def recheck_audit(page, browser):
+    before = audit_fingerprint()
+    previous = audit_record()
+    form = page.locator("#esp-daily-audit form")
+    check(form.count() == 1 and form.locator('[name="_wpnonce"]').count() == 1,
+          "audit form is separate and carries a nonce")
+    check(page.locator("#esp-settings-form #esp-daily-audit").count() == 0,
+          "audit form not nested in options form")
+    other = browser.new_context()
+    try:
+        denied = other.request.post(BASE + "/wp-admin/admin-post.php",
+            form={"action": "esp_recheck_audit"}, max_redirects=0)
+        check(denied.status in (400, 403), "anonymous audit request denied")
+    finally:
+        other.close()
+    denied = page.request.post(BASE + "/wp-admin/admin-post.php",
+        form={"action": "esp_recheck_audit", "_wpnonce": "invalid"}, max_redirects=0)
+    check(denied.status == 403 and audit_record() == previous,
+          "bad nonce rejected without changing audit evidence")
+    with page.expect_navigation(wait_until="domcontentloaded"):
+        form.locator('button[type="submit"]').click()
+    record = audit_record()
+    check(record["source"] == "manual" and record["rewrite"]["context"] == "http"
+          and record["rewrite"]["server_family"] == "apache"
+          and record["rewrite"]["status"] == "ok" and not record["errors"],
+          "authenticated HTTP recheck records actual server and current file match")
+    check(record["last_daily_hook_at"] == previous["last_daily_hook_at"],
+          "manual recheck does not mask the last daily-hook timestamp")
+    check(audit_fingerprint() == before, "HTTP recheck does not change protection or Rewrite")
+    check(page.url.endswith("#esp-daily-audit"), "recheck returns to saved audit results")
+
+
 def main():
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
@@ -197,6 +271,11 @@ def main():
                 state(page, "準備完了（従来方式で配信中）")
                 screenshot(page, "01-initial")
 
+                if os.environ.get("ESP_AUDIT_CI_CONTAINER"):
+                    raw_cron_audit("partial")
+                    page.goto(ADMIN, wait_until="domcontentloaded")
+                    recheck_audit(page, browser)
+
                 action(page, "prepare", "success", "準備完了（従来方式で配信中）")
 
                 # Inject a route-probe transport error ONLY for this one
@@ -237,6 +316,11 @@ def main():
                 media(context.request, "esp-unknown-probe.jpg", 403)
                 media(context.request, "esp-missing-probe.jpg", 404)
                 media_login_browser(browser)
+                if os.environ.get("ESP_AUDIT_CI_CONTAINER"):
+                    raw_cron_audit("ok")
+                    page.goto(ADMIN, wait_until="domcontentloaded")
+                    recheck_audit(page, browser)
+                    print("ESP84_REAL_AUDIT_PASS", flush=True)
                 action(page, "disable", "success", "準備完了（従来方式で配信中）")
                 screenshot(page, "05-disabled")
                 media(context.request, "fg-life-public.jpg", 200)
