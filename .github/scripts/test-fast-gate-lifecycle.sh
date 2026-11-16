@@ -492,7 +492,7 @@ echo "FG_DEPLOY_ROOT mapped disposable dual-bind fixture for Apache\n";
 # Check that no test-only server-level rewrite remains before deployment.
 grep -Fq 'RewriteRule ^(.+)$' "$uploads/.htaccess"
 ! grep -Fq '# Fast Gate: no static-file existence shortcut' "$uploads/.htaccess"
-python3 tests/fast-gate-activation-e2e.py \
+ESP_FG_CI_CONTAINER="$container" python3 tests/fast-gate-activation-e2e.py \
     | tee -a "$report_root/stages.log"
 # The browser drives the shipped WordPress admin forms against the same
 # disposable real Apache site and stores only settings-page screenshots.

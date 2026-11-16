@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Disposable real Apache transition regression. No production config changes."""
 import concurrent.futures
+from contextlib import contextmanager
 import copy
 import http.cookiejar
 from http.cookies import SimpleCookie
 import json
 import math
+import os
 import statistics
+import subprocess
 import threading
 import time
 import urllib.error
@@ -19,6 +22,7 @@ passed = 0
 MEDIA = BASE + "/wp-content/uploads/fg-life-protected.jpg"
 GATE_COOKIE = "esp_gate_fg_path"
 BRIDGE_REPORT = []
+FAULT_REPORT = []
 
 
 def request(path, jar=None, cookie=None, method="GET"):
@@ -218,6 +222,180 @@ def rejected_handoffs(sources):
               "invalid or unauthenticated handoff refused without ticket/bytes")
 
 
+
+def fault_fetch(path, cookies=(), fault=None):
+    jar = client_jar(cookies)
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPCookieProcessor(jar), StopRedirect())
+    headers = {"Cache-Control": "no-cache"}
+    if fault:
+        headers["X-ESP-CI-Bridge-Fault"] = fault
+    target = urllib.request.Request(BASE + path, headers=headers)
+    try:
+        try:
+            response = opener.open(target, timeout=20)
+        except urllib.error.HTTPError as exc:
+            response = exc
+        with response:
+            return response.code, response.read(), response.headers
+    except Exception as exc:
+        raise RuntimeError("Fault request failed: " + type(exc).__name__) from None
+
+
+def fresh_handoff(cookies):
+    status, body, headers = fault_fetch(urlsplit(MEDIA).path, cookies)
+    location = headers.get("Location", "")
+    target = urlsplit(location)
+    check(status == 307 and body == b"" and
+          (target.scheme, target.netloc, target.path) == ("", "", "/") and
+          set(parse_qs(target.query)) == {"esp_gate_bridge"} and
+          "no-store" in headers.get("Cache-Control", ""),
+          "real Gate issued a bounded origin-local handoff")
+    return location
+
+
+def assert_fault(path, cookies, expected, label, fault=None, body_expected=b""):
+    status, body, headers = fault_fetch(path, cookies, fault)
+    issued = []
+    for raw in headers.get_all("Set-Cookie", []):
+        parsed = SimpleCookie()
+        parsed.load(raw)
+        if GATE_COOKIE in parsed:
+            issued.append(parsed[GATE_COOKIE])
+    check(status == expected and body == body_expected and
+          not issued and not headers.get("Location") and
+          "no-store" in headers.get("Cache-Control", "") and
+          (not fault or headers.get("X-ESP-CI-Fault-Applied") == fault),
+          label + " refused without protected bytes/new proof/redirect")
+    FAULT_REPORT.append({"case": label, "http": status, "passed": True})
+
+
+def fixture_action(jar, name):
+    # Fixture payload may include an encrypted expired handoff. Do not use
+    # command(), which logs public deployment results.
+    status, body, _ = request("/?esp_fg_ci_auth=" + name, jar=jar)
+    check(status == 200, name + " fixture succeeded")
+    try:
+        return json.loads(body)
+    except ValueError:
+        raise RuntimeError("Invalid fault fixture JSON") from None
+
+
+def expired_credentials(expected):
+    original = http.cookiejar.CookieJar()
+    fixture_action(original, "remember")
+    valid = source_cookies(original, "remember")
+    expired = client_jar(valid)
+    data = fixture_action(expired, "mint-expired-proof")
+    check(data.get("expired_signed_ticket") is True and
+          isinstance(data.get("expired_handoff"), str) and
+          any(c.name == GATE_COOKIE for c in expired),
+          "real backdated proof is signed but expired and client sends it")
+    assert_fault("/?esp_gate_bridge=" + data["expired_handoff"], valid,
+                 403, "expired authenticated handoff")
+    # The real stale proof forces a fresh bridge; a live MySQL Remember
+    # row allows recovery and the second request is direct.
+    stale = tuple(copy.copy(c) for c in expired)
+    bridge_round_trip(stale, expected)
+    check(True, "expired Gate proof with live source recovered")
+    FAULT_REPORT.append({"case": "expired-proof-live-source",
+                         "http": 200, "passed": True})
+    check(fixture_action(expired, "expire-remember-source").get(
+              "source_expired") is True, "exact MySQL Remember row expired")
+    # The signed Gate proof carried here is expired; a positive lookup in
+    # the already-expired MySQL row is impossible. No revocation row masks
+    # the expected bridge-side rejection.
+    assert_fault(fresh_handoff(stale), stale, 403,
+                 "expired Gate proof and expired source row")
+
+
+def private_command(script, kind):
+    container = os.environ.get("ESP_FG_CI_CONTAINER", "")
+    if (os.environ.get("CI") != "true" or
+            os.environ.get("ESP_ALLOW_DISPOSABLE_DB") != "1" or
+            not container.startswith("esp-fg-bench-")):
+        raise RuntimeError("Refusing non-disposable storage fault")
+    subprocess.run(["docker", "exec", "--user", "www-data", container,
+                    "sh", "-eu", "-c", script, "fg-ci", kind],
+                   check=True, timeout=20,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+PRIVATE_GUARD = """
+test "$ESP_FG_CI_HTTP_AUTH" = 1
+cd /var/www/html/wp-content/esp-fast-gate-v2
+test -f .htaccess
+test ! -L .htaccess
+backup=fg-ci-storage-fault-backup
+"""
+
+
+@contextmanager
+def storage_fault(kind):
+    # Entire SQLite file family is moved while these isolated requests are
+    # serial, including WAL/SHM. Backup stays inside the denied directory.
+    # No production path or supplied filename is accepted.
+    private_command(PRIVATE_GUARD + """
+test ! -e "$backup"
+mkdir -m 700 "$backup"
+""", kind)
+    try:
+        private_command(PRIVATE_GUARD + """
+case "$1" in
+  missing-key)
+    mv keys.php "$backup/keys.php"
+    ;;
+  missing-ledger|corrupt-ledger)
+    for f in gate-ledger.sqlite-wal gate-ledger.sqlite-shm; do
+        if test -f "$f"; then mv "$f" "$backup/$f"; fi
+    done
+    mv gate-ledger.sqlite "$backup/gate-ledger.sqlite"
+    if test "$1" = corrupt-ledger; then
+        umask 077
+        printf 'not an SQLite database\\n' > gate-ledger.sqlite
+    fi
+    ;;
+  *) exit 1 ;;
+esac
+""", kind)
+        yield
+    finally:
+        private_command(PRIVATE_GUARD + """
+if test -f "$backup/gate-ledger.sqlite"; then
+    rm -f gate-ledger.sqlite gate-ledger.sqlite-wal gate-ledger.sqlite-shm
+fi
+for f in keys.php gate-ledger.sqlite gate-ledger.sqlite-wal gate-ledger.sqlite-shm; do
+    if test -f "$backup/$f"; then mv "$backup/$f" "$f"; fi
+done
+rmdir "$backup"
+""", kind)
+
+
+def fault_acceptance(session_sources, remember_sources, signed, expected):
+    for kind, sources in (("mysql-session", session_sources),
+                          ("mysql-remember", remember_sources)):
+        assert_fault(fresh_handoff(sources), sources, 503, kind, fault=kind)
+        bridge_round_trip(sources, expected)
+    assert_fault(fresh_handoff(session_sources), session_sources, 200,
+                 "headers already sent (only CI marker)", fault="headers-sent",
+                 body_expected=b"CI_HEADERS_SENT\n")
+    bridge_round_trip(session_sources, expected)
+    for kind in ("missing-key", "missing-ledger", "corrupt-ledger"):
+        handoff = fresh_handoff(session_sources)
+        with storage_fault(kind):
+            assert_fault(urlsplit(MEDIA).path, signed, 503,
+                         kind + " protected standalone")
+            assert_fault("/wp-content/uploads/fg-life-public.jpg", (), 503,
+                         kind + " public standalone")
+            assert_fault(handoff, session_sources, 503, kind + " WordPress bridge")
+        # The backed-up store was restored, not rebuilt or opened publicly.
+        check(fault_fetch(urlsplit(MEDIA).path, signed)[:2] == (200, expected),
+              kind + " restored previous authorized ticket")
+        bridge_round_trip(session_sources, expected)
+    expired_credentials(expected)
+    print("FG_BRIDGE_FAULTS " + json.dumps(FAULT_REPORT), flush=True)
+
+
 before = command("status", 200)
 check(before["route"] == "legacy" and before["serving"] is False and
       before["active"] is False,
@@ -321,6 +499,8 @@ check(request("/?esp_fg_ci_auth=remember", jar=remember_jar)[0] == 200,
 remember_sources = source_cookies(remember_jar, "remember")
 bridge_round_trip(remember_sources, protected_payload)
 check(True, "Remember-only client bridges then serves directly")
+fault_acceptance(session_sources, remember_sources,
+                 tuple(copy.copy(c) for c in jar), protected_payload)
 
 disabled = command("disable", 200)
 check(disabled["success"] is True and disabled["route"] == "legacy" and
@@ -402,4 +582,5 @@ print("FG_VERIFIED_DEPLOYMENT_HTTP " + json.dumps(
      "generation_rotation_after_legacy_logout": "passed",
      "stale_lock_recovery": "passed",
      "upgrade_preinstall_fallback": "passed",
-     "bridge_bursts": BRIDGE_REPORT}))
+     "bridge_bursts": BRIDGE_REPORT,
+     "bridge_faults": FAULT_REPORT}))

@@ -80,3 +80,33 @@ the real ESP password form, checks return 200/no-store and accepted cookies,
 removes only the Gate cookie, verifies browser-driven 307/200 and subsequent
 direct 200, and logs out. The disposable login-page option is restored.
 CI uses HTTP root-layout Apache, not a claim of HTTPS/LiteSpeed compatibility.
+
+## Additional real HTTP fault-injection acceptance
+
+The product-managed Apache route is exercised with a cryptographically valid
+but expired Gate proof and handoff (real signer, backdated issuance, no clock
+change), including a live Remember source that can recover and a separate
+MySQL expiry update that cannot. The fixture transmits the expired proof in a
+still-live client Cookie; direct SQL is not an instantaneous supported
+revocation mechanism and valid previously issued proofs are not tested as
+if they were expired.
+
+The real MySQL session and Remember credential SELECTs are each replaced by
+a query to a nonexistent table in the disposable fixture; a response marker
+proves injection was reached. The expected bridge response is 503 with no
+new ticket or image bytes. A deliberately committed response tests the real
+headers_sent() branch of cookie emission; its already-committed HTTP 200
+cannot be changed, so only the non-media marker may appear, without a new
+Cookie or redirect. This does not separately force a native setcookie()
+false result when headers remain writable; client Cookie rejection was
+tested earlier.
+
+The disposable Docker fixture temporarily moves keys.php or the complete
+SQLite file family, including WAL/SHM, inside the denied private directory.
+Missing key, missing ledger and corrupt ledger must reject protected/public
+standalone HTTP and the existing WP handoff (503), issue no Gate Cookie and
+return no media bytes. A finally block restores the fixture; the previously
+valid proof and a new bridge must work again. No production files or time
+settings are touched. Fault report contains labels/statuses only. This
+covers read-side availability faults, not every SQLite write/commit or
+power-loss failure and not host-specific filesystem/OPcache behavior.

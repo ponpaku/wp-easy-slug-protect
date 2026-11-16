@@ -18,6 +18,46 @@ if (getenv('ESP_FG_CI_HTTP_AUTH') === '1' &&
         static function () { return '1'; }, 1);
 }
 
+// Faults are request-local and execute before the actual product bridge.
+// A real SQL error is injected only at the exact credential SELECT, never
+// into ownership queries or the authorization decision itself.
+add_action('template_redirect', static function () {
+    if (getenv('ESP_FG_CI_HTTP_AUTH') !== '1' ||
+        !defined('DB_NAME') || DB_NAME !== 'esp_fg_lifecycle' ||
+        !isset($_GET['esp_gate_bridge'])) { return; }
+    $fault = $_SERVER['HTTP_X_ESP_CI_BRIDGE_FAULT'] ?? '';
+    if (in_array($fault, ['mysql-session', 'mysql-remember'], true)) {
+        global $wpdb;
+        $kind = $fault === 'mysql-session' ? 'session' : 'remember';
+        $table = $wpdb->prefix . ESP_Config::DB_TABLES[$kind];
+        $wpdb->suppress_errors(true);
+        add_filter('query', static function ($sql) use ($table, $fault) {
+            if (preg_match('/^\s*SELECT\b/i', $sql) &&
+                strpos($sql, 'UNIX_TIMESTAMP(expires) AS expires_ts') !== false &&
+                preg_match('/\bFROM\s+\x60?' . preg_quote($table, '/') .
+                    '\x60?\s+WHERE\b/i', $sql)) {
+                header('X-ESP-CI-Fault-Applied: ' . $fault);
+                return 'SELECT id FROM esp_fg_ci_nonexistent_table';
+            }
+            return $sql;
+        }, 1);
+    } elseif ($fault === 'headers-sent') {
+        // Intentionally commit an HTTP status and a non-media marker before
+        // the product runs. Already-sent headers cannot be changed to 503;
+        // success means no additional bytes, redirect, or Gate Set-Cookie.
+        while (ob_get_level() > 0 && @ob_end_clean()) {}
+        header('Content-Type: text/plain');
+        header('Cache-Control: no-store');
+        header('X-ESP-CI-Fault-Applied: headers-sent');
+        status_header(200);
+        echo "CI_HEADERS_SENT\n";
+        flush();
+        if (!headers_sent()) {
+            throw new RuntimeException('CI headers-sent injection did not commit');
+        }
+    }
+}, -100);
+
 add_action('init', static function () {
     // Test-only fault injection for an actual administrator form submission.
     // Scoped to the disposable DB, explicitly enabled fixture and one request.
@@ -196,7 +236,8 @@ add_action('init', static function () {
     $supported = ['session', 'remember', 'redirect-session',
         'redirect-remember', 'refresh', 'logout',
         'logout-fail-session', 'logout-fail-remember', 'rotate',
-        'login-page-setup', 'login-page-teardown'];
+        'login-page-setup', 'login-page-teardown',
+        'mint-expired-proof', 'expire-remember-source'];
     if (!in_array($action, $supported, true)) {
         status_header(404);
         exit;
@@ -261,6 +302,63 @@ add_action('init', static function () {
         }
         if ($ok) { ESP_Cookie::get_instance()->set_pending_cookies(); }
         $result['authenticated'] = $ok;
+    } elseif ($action === 'mint-expired-proof') {
+        // Use the real signer and a backdated issuance time: not a forged
+        // signature, and no clock change or 24h sleep. Scope to an actually
+        // valid Remember credential. Keep the client cookie alive so it
+        // really transmits the cryptographically expired proof.
+        $auth = new ESP_Auth();
+        $credentials = $auth->fast_gate_bridge_candidates($path);
+        $current = is_array($credentials) && count($credentials) === 1
+            ? $credentials[0] : null;
+        $keys = require ESP_Fast_Gate_WP::private_dir() . '/keys.php';
+        $key = $ledger->ticket_signing_key_strict($keys['sig']);
+        if ($current && $current['kind'] === 'remember' && $key !== null) {
+            $now = time();
+            $issued = $now - ESP_Fast_Gate_Token::MAX_AGE - 10;
+            $which = (string)$path['id'];
+            $version = (int)$path['password_version'];
+            $ticket = ESP_Fast_Gate_Token::issue($keys['site'], $which,
+                'remember', $current['user'], $current['token'],
+                $version, $current['expires'], $key, $keys['id'], $issued);
+            $handoff = ESP_Fast_Gate_Handoff::issue($keys['site'], $which,
+                'fg-life-protected.jpg', 'GET', $key,
+                $now - ESP_Fast_Gate_Handoff::MAX_AGE - 10);
+            if ($ticket && $handoff &&
+                ESP_Fast_Gate_Token::verify($ticket, $keys['site'], $which,
+                    $_COOKIE, $version, $key, $keys['id'], $issued) !== null &&
+                ESP_Fast_Gate_Token::verify($ticket, $keys['site'], $which,
+                    $_COOKIE, $version, $key, $keys['id'], $now) === null &&
+                ESP_Fast_Gate_Handoff::verify($handoff, $keys['site'], 'GET',
+                    $key, $now - ESP_Fast_Gate_Handoff::MAX_AGE - 10) !== null &&
+                ESP_Fast_Gate_Handoff::verify($handoff, $keys['site'], 'GET',
+                    $key, $now) === null) {
+                $cookies = ESP_Cookie::get_instance();
+                $cookies->queue_gate_ticket($which, $ticket, $now + 3600);
+                $ok = $cookies->set_pending_cookies();
+                // Private fixture response only; never print the value.
+                $result['expired_handoff'] = $handoff;
+                $result['expired_signed_ticket'] = $ok;
+            }
+        }
+    } elseif ($action === 'expire-remember-source') {
+        // Expire only this disposable source row, without revoking it.
+        // Test the bridge with the ALREADY EXPIRED Gate proof, not the
+        // still-valid proof of another client (direct SQL is not a supported
+        // instantaneous revocation mechanism).
+        global $wpdb;
+        $remember = ESP_Cookie::get_instance()->get_remember_cookies_for_path($path);
+        if (is_array($remember) && isset($remember['id'], $remember['token'])) {
+            $table = $wpdb->prefix . ESP_Config::DB_TABLES['remember'];
+            $where = $wpdb->prepare(" WHERE user_id=%s AND token=%s AND path_id=%s",
+                $remember['id'], hash_hmac('sha256', $remember['token'], AUTH_SALT),
+                $path['id']);
+            $changed = $wpdb->query("UPDATE $table SET expires=DATE_SUB(NOW(), INTERVAL 10 SECOND)"
+                . $where . " AND expires>NOW()");
+            $ok = $changed === 1 && (int)$wpdb->get_var(
+                "SELECT COUNT(*) FROM $table" . $where . " AND expires<=NOW()") === 1;
+        }
+        $result['source_expired'] = $ok;
     } elseif ($action === 'refresh') {
         $auth = new ESP_Auth();
         $ok = $auth->is_logged_in($path);
