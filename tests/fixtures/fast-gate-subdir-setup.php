@@ -16,8 +16,14 @@ function fg_subdir_require($ok, $label) {
 }
 if (($argv[1] ?? '') === 'move-home') {
     fg_subdir_require(home_url() === 'http://127.0.0.1:8096', 'original fixture origin');
+    // The root HTTP fixture explicitly sets upload_url_path; it does not
+    // follow siteurl automatically. Relocate this fixture option as well.
+    fg_subdir_require(get_option('upload_url_path') ===
+        'http://127.0.0.1:8096/wp-content/uploads', 'original explicit uploads URL');
     fg_subdir_require(update_option('home', 'http://127.0.0.1:8096/blog') &&
-        update_option('siteurl', 'http://127.0.0.1:8096/blog'), 'relocate WordPress');
+        update_option('siteurl', 'http://127.0.0.1:8096/blog') &&
+        update_option('upload_url_path', 'http://127.0.0.1:8096/blog/wp-content/uploads'),
+        'relocate WordPress and its explicitly configured uploads URL');
     exit;
 }
 fg_subdir_require(($argv[1] ?? '') === 'seed-media' &&
