@@ -351,7 +351,7 @@ $wpdb->insert($wpdb->postmeta, ['post_id'=>1000,
     'meta_key'=>'_esp_media_protected_path_id', 'meta_value'=>'path_kept']);
 option_db('esp_db_version', 4);
 t($empty_id > 0 && run_migration() && (int)get_option('esp_db_version') === 6 &&
-    $wpdb->get_var($wpdb->prepare("SELECT meta_value FROM {$wpdb->postmeta} WHERE meta_id=%d", $empty_id)) === '',
+    ($wpdb->get_row($wpdb->prepare("SELECT meta_value FROM {$wpdb->postmeta} WHERE meta_id=%d", $empty_id), ARRAY_A)['meta_value'] ?? null) === '',
     'exact empty public protection meta and valid protected ID survive migration unchanged');
 foreach ([' ', 'PATH_KEPT', 'path_kept ', '0'] as $invalid_id) {
     $wpdb->insert($wpdb->postmeta, ['post_id'=>1001,
