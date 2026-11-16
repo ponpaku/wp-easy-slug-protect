@@ -340,6 +340,33 @@ $wpdb->insert($wpdb->postmeta, ['post_id' => 999, 'meta_key' => '_esp_media_prot
 option_db('esp_db_version', 4);
 t(!run_migration() && (int) get_option('esp_db_version') === 4, 'orphan protected attachment ID is diagnostic-only');
 
+// A present but exactly empty protection-meta value is already public
+// in the live media resolver and index. Do not turn it into a site-wide
+// migration failure on an upgrade or updater retry.
+create_current(); settings_fixture();
+$wpdb->insert($wpdb->postmeta, ['post_id'=>999,
+    'meta_key'=>'_esp_media_protected_path_id', 'meta_value'=>'']);
+$empty_id = (int)$wpdb->insert_id;
+$wpdb->insert($wpdb->postmeta, ['post_id'=>1000,
+    'meta_key'=>'_esp_media_protected_path_id', 'meta_value'=>'path_kept']);
+option_db('esp_db_version', 4);
+t($empty_id > 0 && run_migration() && (int)get_option('esp_db_version') === 6 &&
+    $wpdb->get_var($wpdb->prepare("SELECT meta_value FROM {$wpdb->postmeta} WHERE meta_id=%d", $empty_id)) === '',
+    'exact empty public protection meta and valid protected ID survive migration unchanged');
+foreach ([' ', 'PATH_KEPT', 'path_kept ', '0'] as $invalid_id) {
+    $wpdb->insert($wpdb->postmeta, ['post_id'=>1001,
+        'meta_key'=>'_esp_media_protected_path_id', 'meta_value'=>$invalid_id]);
+    $invalid_meta = (int)$wpdb->insert_id;
+    option_db('esp_db_version', 4);
+    t($invalid_meta > 0 && !run_migration() &&
+        (int)get_option('esp_db_version') === 4 &&
+        (get_option(ESP_Migrator::STATE_OPTION)['reason'] ?? '') === 'path_reference_invalid',
+        'only byte-exact empty or registered protection IDs are accepted');
+    $wpdb->delete($wpdb->postmeta, ['meta_id'=>$invalid_meta]);
+}
+t(run_migration() && (int)get_option('esp_db_version') === 6,
+    'migration recovers after invalid fixture references are removed');
+
 create_current(); settings_fixture(); delete_option('esp_db_version');
 $fail_read = static function ($sql) { return strpos($sql, 'SELECT option_value') !== false && strpos($sql, "'esp_db_version'") !== false ? 'SELECT missing_column FROM missing_table' : $sql; };
 add_filter('query', $fail_read);

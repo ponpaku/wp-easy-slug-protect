@@ -452,11 +452,17 @@ final class ESP_Migrator {
 
     private function verify_references($paths) {
         global $wpdb;
-        // Protected attachment IDs must resolve. Stale auth/rate-limit rows belonging
-        // to paths intentionally removed by an administrator are retained for cleanup.
-        $ids = $wpdb->get_col($wpdb->prepare("SELECT DISTINCT meta_value FROM `{$wpdb->postmeta}` WHERE meta_key = %s", '_esp_media_protected_path_id'));
+        // Protected attachment IDs must resolve. An exact empty string is
+        // already the public-media sentinel in both delivery and the index.
+        // Compare bytes before deduplication so a case-insensitive or
+        // space-padding collation cannot hide an invalid nonempty ID.
+        // Stale auth/rate-limit rows for removed paths are retained for cleanup.
+        $ids = $wpdb->get_col($wpdb->prepare("SELECT DISTINCT CAST(meta_value AS BINARY) FROM `{$wpdb->postmeta}` WHERE meta_key = %s", '_esp_media_protected_path_id'));
         if ($wpdb->last_error !== '' || !is_array($ids)) { throw new RuntimeException('schema_read_failed'); }
-        foreach ($ids as $id) { if (!isset($paths[$id])) { return false; } }
+        foreach ($ids as $id) {
+            if ($id === '') { continue; }
+            if (!is_string($id) || !isset($paths[$id])) { return false; }
+        }
         return true;
     }
 

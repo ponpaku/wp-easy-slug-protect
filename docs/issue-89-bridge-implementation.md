@@ -130,3 +130,25 @@ after fault restoration, observes its before/after runtime, update and
 migration status fields, and checks protected media and bridge recovery.
 This is a stable-state test; it does not itself settle the observed Cron
 versus deployment transition race or claim a production fix.
+
+### Shared reference-validation inconsistency
+
+Static inspection of the first failing lifecycle identified a concrete
+inconsistency: `cron-check` in `tests/wordpress-fast-gate-lifecycle-ci.php`
+restores a formerly protected JPEG by storing an exact empty protection-meta
+value. The live index resolves it as public and both normal and standalone
+media permission use the empty public sentinel. However the shared
+`ESP_Migrator::verify_references()` rejects every ID absent from the
+configured path map, including that empty value. A later updater retry can
+therefore reject an otherwise correctly functioning installation. The
+first failure log alone does not establish the stored migration reason.
+
+The shared validator now accepts **only** the exact empty string as the
+existing public sentinel, without altering rows or any authorization
+decision. Byte-exact SQL deduplication preserves invalid nonempty values
+(including space and case variants) that a site collation could otherwise
+collapse. Real MySQL migration tests keep the empty and a valid protected
+reference, reject whitespace/case/unknown IDs, and confirm recovery.
+The lifecycle fixture deliberately retains its empty metadata value;
+the explicit actual updater Cron retry must pass against it, rather than
+changing the fixture to delete the metadata and concealing the inconsistency.
