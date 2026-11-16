@@ -396,6 +396,35 @@ def fault_acceptance(session_sources, remember_sources, signed, expected):
     print("FG_BRIDGE_FAULTS " + json.dumps(FAULT_REPORT), flush=True)
 
 
+def explicit_runtime_retry(signed, sources, expected):
+    command("arm-runtime-retry", 200)
+    status, _, _ = request("/wp-cron.php")
+    check(status == 200, "explicit real wp-cron.php HTTP request")
+    report = {}
+    for attempt in range(40):
+        code, payload, _ = request("/?esp_fg_ci_auth=deploy-runtime-retry-status")
+        if code != 200:
+            raise RuntimeError("runtime retry status request failed")
+        report = json.loads(payload).get("retry", {})
+        if report.get("phase") == "after":
+            break
+        time.sleep(.25)
+    print("FG_RUNTIME_RETRY_RESULT " + json.dumps(report), flush=True)
+    check(report.get("phase") == "after",
+          "real Cron retry callback completed and was observed")
+    for phase in ("before", "after"):
+        state = report[phase]
+        check(state["runtime"].get("state") == "READY" and
+              state["route_fast"] and state["active"] and state["serving"],
+              "runtime and Gate remain ready " + phase + " explicit retry")
+    check(fault_fetch(urlsplit(MEDIA).path, signed)[:2] == (200, expected),
+          "valid protected media survives real updater Cron")
+    check(fault_fetch(urlsplit(MEDIA).path)[0] == 403,
+          "anonymous protected media stays denied after real updater Cron")
+    bridge_round_trip(sources, expected)
+    check(True, "old-source bridge survives real updater Cron")
+
+
 before = command("status", 200)
 check(before["route"] == "legacy" and before["serving"] is False and
       before["active"] is False,
@@ -501,6 +530,8 @@ bridge_round_trip(remember_sources, protected_payload)
 check(True, "Remember-only client bridges then serves directly")
 fault_acceptance(session_sources, remember_sources,
                  tuple(copy.copy(c) for c in jar), protected_payload)
+explicit_runtime_retry(tuple(copy.copy(c) for c in jar),
+                       session_sources, protected_payload)
 
 disabled = command("disable", 200)
 check(disabled["success"] is True and disabled["route"] == "legacy" and

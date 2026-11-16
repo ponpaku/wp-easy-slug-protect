@@ -110,3 +110,23 @@ valid proof and a new bridge must work again. No production files or time
 settings are touched. Fault report contains labels/statuses only. This
 covers read-side availability faults, not every SQLite write/commit or
 power-loss failure and not host-specific filesystem/OPcache behavior.
+
+### First fault-run result and independent Cron observation
+
+At `ac980d8e`, all 15 reported bridge fault cases passed; the deployment
+HTTP stage reached 104 checks. The subsequent real browser login sequence
+also passed, but the last admin enable confirmation failed. The Apache
+log shows HTTP 204 signed route probes and admin success redirect followed
+by wp-cron.php and `ESP: runtime verification failed`; the next settings
+page was not the expected full page. No causal diagnosis is established.
+See failed lifecycle job 133050772675 / run 43791511808. This run is NOT
+reported as a green full suite.
+
+To remove nondeterministic automatic Cron spawning during intentional
+physical SQLite/key faults, the disposable HTTP stage disables automatic
+spawning only after the earlier genuine index Cron phases. The HTTP suite
+schedules the genuine updater retry and explicitly invokes wp-cron.php
+after fault restoration, observes its before/after runtime, update and
+migration status fields, and checks protected media and bridge recovery.
+This is a stable-state test; it does not itself settle the observed Cron
+versus deployment transition race or claim a production fix.

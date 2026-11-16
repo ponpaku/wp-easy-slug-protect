@@ -58,6 +58,53 @@ add_action('template_redirect', static function () {
     }
 }, -100);
 
+// Observe the actual updater retry callback in a real wp-cron.php worker.
+// Record only fixed status/reason fields, independently of the HTTP caller.
+function esp_fg_ci_retry_snapshot() {
+    $out = [];
+    foreach (['runtime'=>ESP_Protection_State::RUNTIME_STATE_OPTION,
+              'migration'=>ESP_Migrator::STATE_OPTION,
+              'update'=>ESP_Updater::STATE_OPTION] as $kind=>$option) {
+        $raw = ESP_Migrator::read_option($option, []);
+        $out[$kind] = [];
+        foreach (['state','status','step','reason','version'] as $field) {
+            $value = is_array($raw) ? ($raw[$field] ?? null) : null;
+            if (is_string($value) && preg_match('/^[A-Za-z0-9_.-]{1,80}$/D', $value)) {
+                $out[$kind][$field] = $value;
+            }
+        }
+    }
+    $reason = ESP_Migrator::last_failure_reason();
+    $out['migration_reason'] = is_string($reason) &&
+        preg_match('/^[a-z_]{1,80}$/D', $reason) ? $reason : null;
+    $db = ESP_Fast_Gate_WP::ledger(false);
+    $out['route_fast'] = ESP_Fast_Gate_Deployment::route_fast();
+    $out['active'] = ESP_Fast_Gate_WP::active();
+    $out['serving'] = $db && $db->serving();
+    return $out;
+}
+foreach ([-100=>'before', 100=>'after'] as $priority=>$phase) {
+    add_action('esp_update_retry', static function () use ($phase) {
+        if (getenv('ESP_FG_CI_HTTP_AUTH') !== '1' ||
+            !defined('DB_NAME') || DB_NAME !== 'esp_fg_lifecycle' ||
+            !defined('DOING_CRON') || !DOING_CRON) { return; }
+        $report = get_option('esp_fg_ci_retry_report', []);
+        if (!is_array($report) ||
+            ($report['phase'] ?? '') !== ($phase === 'before' ? 'armed' : 'before')) {
+            return;
+        }
+        try {
+            $report[$phase] = esp_fg_ci_retry_snapshot();
+            $report['phase'] = $phase;
+            update_option('esp_fg_ci_retry_report', $report, false);
+            error_log('FG_CI_RUNTIME_RETRY ' . wp_json_encode($report));
+        } catch (\Throwable $e) {
+            // Never record exception payloads; report the failed observation.
+            error_log('FG_CI_RUNTIME_RETRY observation_failed');
+        }
+    }, $priority);
+}
+
 add_action('init', static function () {
     // Test-only fault injection for an actual administrator form submission.
     // Scoped to the disposable DB, explicitly enabled fixture and one request.
@@ -101,7 +148,8 @@ add_action('init', static function () {
         'deploy-enable-private-404','deploy-enable-private-exposed',
         'deploy-status','deploy-legacy-logout','deploy-materialize-unknown',
         'deploy-inject-stale-lock','deploy-recover',
-        'deploy-upgrade-preflight','deploy-upgrade-no-server'
+        'deploy-upgrade-preflight','deploy-upgrade-no-server',
+        'deploy-arm-runtime-retry','deploy-runtime-retry-status'
     ], true)) {
         // Deployment endpoint is a disposable fixture only. Unlike the auth
         // fixture it never forces the active option or serving flag.
@@ -115,6 +163,21 @@ add_action('init', static function () {
         $result = true;
         if ($action === 'deploy-prepare') {
             $result=ESP_Fast_Gate_Deployment::prepare();
+        } elseif ($action === 'deploy-arm-runtime-retry') {
+            // The physical fault phase and the real Cron phase are explicitly
+            // serialized. Stale retries can legitimately still be queued on a
+            // READY site after post-update work finished in an admin request.
+            $before = esp_fg_ci_retry_snapshot();
+            $result = false;
+            if (($before['runtime']['state'] ?? '') === 'READY' &&
+                $before['route_fast'] && $before['active'] && $before['serving']) {
+                wp_clear_scheduled_hook('esp_update_retry');
+                delete_transient('doing_cron');
+                update_option('esp_fg_ci_retry_report', ['phase'=>'armed'], false);
+                $result = wp_schedule_single_event(time() - 1, 'esp_update_retry', [], true);
+            }
+        } elseif ($action === 'deploy-runtime-retry-status') {
+            $result = true;
         } elseif ($action === 'deploy-inject-stale-lock') {
             $db=ESP_Fast_Gate_WP::ledger(true);
             $result=false;
@@ -227,6 +290,9 @@ add_action('init', static function () {
         $response=['action'=>$action,'success'=>$result===true,
             'error'=>$result instanceof WP_Error?$result->get_error_code():null]
             +$state();
+        if ($action === 'deploy-runtime-retry-status') {
+            $response['retry'] = get_option('esp_fg_ci_retry_report', []);
+        }
         status_header($result===true?200:409);
         header('Cache-Control: no-store');
         header('Content-Type: application/json');

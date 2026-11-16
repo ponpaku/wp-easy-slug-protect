@@ -260,6 +260,11 @@ RewriteRule . /index.php [L]
 </IfModule>
 HTACCESS
 wp config set DB_HOST host.docker.internal --type=constant
+# Earlier phases already exercise the real index Cron via WP-CLI. Do not let
+# unrelated automatic spawning race the deliberate on-disk fault windows.
+# The HTTP suite explicitly schedules and runs a real wp-cron.php updater
+# retry after restoration and records its before/after runtime states.
+wp config set DISABLE_WP_CRON true --raw
 # Add a disposable, environment-gated HTTP driver to the REAL WordPress
 # fixture, not to the distributable plugin ZIP.
 mkdir -p "$ESP_WP_ROOT/wp-content/mu-plugins"
