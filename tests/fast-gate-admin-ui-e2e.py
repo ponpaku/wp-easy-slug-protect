@@ -7,6 +7,7 @@ contain only the CI administrator's settings page, never credentials or cookies.
 import json
 import os
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from playwright.sync_api import sync_playwright
 
@@ -56,6 +57,95 @@ def media(api, path, code):
     response = api.get(BASE + "/wp-content/uploads/" + path,
                        max_redirects=0, timeout=15000)
     check(response.status == code, path + " HTTP " + str(code))
+
+
+def navigation_codes(response):
+    codes = []
+    request = response.request if response is not None else None
+    while request is not None:
+        item = request.response()
+        codes.append(item.status if item is not None else None)
+        request = request.redirected_from
+    return list(reversed(codes))
+
+
+def media_login_browser(browser):
+    # Actual Chromium top-level navigation and actual ESP password form,
+    # under the installed product-managed route. An isolated guest context
+    # has no WordPress administrator privilege.
+    guest = browser.new_context(locale="ja-JP")
+    media_url = BASE + "/wp-content/uploads/fg-life-protected.jpg"
+    gate_name = "esp_gate_fg_path"
+    source_name = "esp_auth_fg_path"
+    setup = False
+    try:
+        result = guest.request.get(BASE + "/?esp_fg_ci_auth=login-page-setup")
+        setup = result.status == 200
+        check(setup and result.json().get("login_page_configured") is True,
+              "disposable browser login page configured")
+        tab = guest.new_page()
+        tab.set_default_timeout(30000)
+        tab.set_default_navigation_timeout(60000)
+        landing = tab.goto(media_url, wait_until="domcontentloaded")
+        check(navigation_codes(landing) == [307, 302, 200],
+              "real Chromium anonymous media navigated to login via 307/302/200")
+        form = tab.locator(".esp-login-form form")
+        check(form.count() == 1 and form.is_visible(),
+              "configured ESP password form rendered")
+        check(form.locator('input[name="redirect_to"]').input_value() ==
+              urlsplit(media_url).path, "form carries original media return path")
+        form.locator('input[name="esp_password"]').fill("disposable-ci-password")
+        with tab.expect_navigation(wait_until="domcontentloaded") as nav:
+            form.locator('button[type="submit"]').click()
+        image = nav.value
+        check(image is not None and image.status == 200 and
+              image.url == media_url and
+              image.headers.get("content-type", "").startswith("image/jpeg") and
+              "no-store" in image.headers.get("cache-control", ""),
+              "actual ESP form submission returned to original protected JPEG")
+        cookies = {c["name"]: c for c in guest.cookies([media_url])}
+        check(source_name in cookies and gate_name in cookies and
+              cookies[gate_name]["path"] == "/" and
+              cookies[gate_name]["httpOnly"] is True and
+              cookies[gate_name]["sameSite"] == "Strict",
+              "actual Chromium accepted scoped ESP and Gate cookies")
+        # Remove only the Gate proof, not the source session, then require a
+        # browser-driven bridge and a subsequent non-redirected request.
+        guest.clear_cookies(name=gate_name)
+        check(any(c["name"] == source_name for c in guest.cookies([media_url])),
+              "source login persists when Gate cookie is removed")
+        bridged = tab.goto(media_url, wait_until="domcontentloaded")
+        check(navigation_codes(bridged) == [307, 200] and
+              "no-store" in bridged.headers.get("cache-control", "") and
+              any(c["name"] == gate_name for c in guest.cookies([media_url])),
+              "real browser old-session bridge delivered JPEG and installed ticket")
+        direct = tab.goto(media_url, wait_until="domcontentloaded")
+        check(navigation_codes(direct) == [200] and direct.url == media_url,
+              "subsequent real browser image stayed on fast path")
+        logout = guest.request.get(BASE + "/?esp_fg_ci_auth=logout")
+        check(logout.status == 200, "browser session logout completed")
+        denied = guest.request.get(media_url, max_redirects=0)
+        check(denied.status == 403, "new media request denied after browser logout")
+        print("FG_REAL_BROWSER_MEDIA_LOGIN " + json.dumps({
+            "login": "passed", "first_bridge": "passed",
+            "direct_repeat": "passed", "logout": "passed"
+        }), flush=True)
+    except AssertionError:
+        raise
+    except Exception as exc:
+        # Playwright exception diagnostics may include handoff URLs.
+        raise RuntimeError("Browser media login failed: " +
+                           type(exc).__name__) from None
+    finally:
+        try:
+            if setup:
+                restored = guest.request.get(
+                    BASE + "/?esp_fg_ci_auth=login-page-teardown")
+                check(restored.status == 200 and
+                      restored.json().get("login_page_restored_to_zero") is True,
+                      "browser login fixture restored to original setting")
+        finally:
+            guest.close()
 
 
 def main():
@@ -144,6 +234,7 @@ def main():
                 # Activation E2E created this physical unregistered file.
                 media(context.request, "esp-unknown-probe.jpg", 403)
                 media(context.request, "esp-missing-probe.jpg", 404)
+                media_login_browser(browser)
                 action(page, "disable", "success", "準備完了（従来方式で配信中）")
                 screenshot(page, "05-disabled")
                 media(context.request, "fg-life-public.jpg", 200)

@@ -354,8 +354,18 @@ class ESP_Core {
         // URLデコード（エンコードされている場合）
         $decoded_path = rawurldecode($path);
 
-        // プロトコルとドメインを除去
-        $path_only = preg_replace('#^https?://[^/]+#', '', $decoded_path);
+        // ログイン後は home_url() がサイトのベースパスを付与する。
+        // メディア誘導の絶対URLが同じホームURL配下なら、その接頭辞を
+        // 一度だけ除く。フォームPOSTのホーム相対パスは再度除去しない。
+        $home = rtrim(home_url('/'), '/');
+        if ($decoded_path === $home) {
+            $path_only = '/';
+        } elseif (strpos($decoded_path, $home . '/') === 0) {
+            $path_only = substr($decoded_path, strlen($home));
+        } else {
+            // 他の入力は従来どおりプロトコルとドメインを除去する。
+            $path_only = preg_replace('#^https?://[^/]+#', '', $decoded_path);
+        }
 
         // パスを正規化
         $normalized = wp_normalize_path($path_only);

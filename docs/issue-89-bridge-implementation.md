@@ -53,3 +53,30 @@ contain no raw ESP cookie but must not be assumed redacted by the plugin.
 See CI for actual results. Remains separate from SQLite/write fault injection,
 expired-but-live source credential tests, updater integration at a changed
 version, LiteSpeed host capacity and other open acceptance criteria.
+
+## Follow-up: full login return target on subdirectory sites
+
+Static review and local execution of the actual previous release-candidate
+ZIP exposed a shared login-form bug: for home
+`https://example.test/blog`, a media return URL
+`https://example.test/blog/wp-content/uploads/example.jpg` was reduced only
+to `/blog/wp-content/uploads/example.jpg`; completing the form reapplied
+`home_url()`, incorrectly producing `/blog/blog/wp-content/uploads/example.jpg`.
+This is not a Fast Gate-specific second redirect builder defect.
+
+The shared `ESP_Core::sanitize_path()` now removes the exact current home
+URL prefix once from same-home absolute URLs. Home-relative values posted
+by the form remain relative and are not stripped again. The shared legacy
+media redirect still emits its existing encoded absolute URL; the Gate,
+MySQL and SQLite authorization code are unchanged. The regression explicitly
+tests both form and POST normalization, root and subdirectory cases, a
+real nested same-name slug, path prefix boundaries, and local-only handling
+of external-origin input. This is a CPU-only PHP contract test of the
+return target; a real subdirectory WordPress deployment is still untested.
+
+The actual Chromium admin E2E additionally opens the protected JPEG in a
+fresh non-admin browser context, follows the 307/302/login form, submits
+the real ESP password form, checks return 200/no-store and accepted cookies,
+removes only the Gate cookie, verifies browser-driven 307/200 and subsequent
+direct 200, and logs out. The disposable login-page option is restored.
+CI uses HTTP root-layout Apache, not a claim of HTTPS/LiteSpeed compatibility.

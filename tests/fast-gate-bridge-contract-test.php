@@ -7,6 +7,7 @@ require_once __DIR__ . '/../gate/class-esp-fast-gate-server.php';
 define('ABSPATH', dirname(__DIR__) . '/');
 define('WEEK_IN_SECONDS', 604800);
 require_once __DIR__ . '/../includes/class-esp-media-protection.php';
+require_once __DIR__ . '/../includes/class-esp-core.php';
 
 
 function check($condition, $name) {
@@ -91,6 +92,44 @@ check(($subdir_args['redirect_to'] ?? null) ===
 check(ESP_Media_Protection::media_login_redirect_url(
     ['login_page'=>456], '2026/09/dsc_0009.jpg') === null,
     'unpublished login page fails closed');
+
+// The return URL is normalized twice: when rendering the login form and
+// when submitting it. ESP_Cookie::do_redirect then applies home_url().
+// Validate the final target, not just the first redirect's query.
+function wp_normalize_path($path) {
+    return preg_replace('|/+|', '/', str_replace('\\', '/', $path));
+}
+$core = (new ReflectionClass(ESP_Core::class))->newInstanceWithoutConstructor();
+$sanitize = new ReflectionMethod(ESP_Core::class, 'sanitize_path');
+$sanitize->setAccessible(true);
+$fg_test_home = 'https://example.test/blog';
+$first = $sanitize->invoke($core, $subdir_args['redirect_to']);
+$posted = $sanitize->invoke($core, $first);
+check($first === '/wp-content/uploads/2026/09/dsc_0009.jpg' &&
+    $posted === $first &&
+    home_url($posted) === $subdir_args['redirect_to'],
+    'actual shared login normalization returns to original subdirectory media');
+foreach ([
+    ['https://example.test/blog', '/blog/nested.jpg',
+        'https://example.test/blog/blog/nested.jpg'],
+    ['https://example.test/blog', 'https://example.test/blog/blog/nested.jpg',
+        'https://example.test/blog/blog/nested.jpg'],
+    ['https://example.test/blog', 'https://example.test/blogger/nested.jpg',
+        'https://example.test/blog/blogger/nested.jpg'],
+    ['https://example.test/blog', 'https://external.test/blog/nested.jpg',
+        'https://example.test/blog/blog/nested.jpg'],
+    ['https://example.test/blog', 'https://example.test/blog',
+        'https://example.test/blog/'],
+    ['https://example.test/blog', 'https://example.test/blog/uploads/a%20b.jpg',
+        'https://example.test/blog/uploads/a b.jpg'],
+    ['https://example.test', $login_args['redirect_to'], $login_args['redirect_to']],
+] as [$test_home, $input, $expected]) {
+    $fg_test_home = $test_home;
+    $form = $sanitize->invoke($core, $input);
+    $submitted = $sanitize->invoke($core, $form);
+    check($form === $submitted && home_url($submitted) === $expected,
+        'home-relative return path stable across form and POST: ' . $input);
+}
 
 $cases = [
     ['bytes=0-0', 100, 206, 0, 0],
