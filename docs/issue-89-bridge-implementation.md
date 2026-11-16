@@ -26,3 +26,30 @@
 * Existing `ESP_Media_Deriver` internal send modes and product/WordPress semantics require regression tests. `setcookie()` `true` only means PHP queued an HTTP header, not that a browser accepted it.
 * Direct URL top-level login navigation depends on `Sec-Fetch-Mode: navigate` and `Sec-Fetch-Dest: document`. Clients without these headers retain safe 403; do not claim full legacy 302 parity without browser coverage.
 * Default user-facing behavior must not silently update live production sites. Keep PR #83 draft until required real HTTP and fault-injection tests pass.
+
+## Additional product-managed HTTP acceptance regression
+
+The deployment E2E now drives the actual installed uploads Rewrite after
+successful activation (not the earlier temporary VirtualHost benchmark):
+1/20/100 simultaneously dispatched old-session requests, each receiving
+exactly one origin-local 307, WordPress 200 with identical protected bytes,
+no-store/no-referrer and one HttpOnly/SameSite=Strict Gate cookie; then each
+client repeats the original media GET with no redirect or cookie issuance.
+A 30-second per-request liveness guard applies in disposable CI, with p50,
+p95, p99, max and wall time recorded. This is not a production throughput SLA
+or a claim of 100 distinct physical image files: the same disposable JPEG is
+used and client jars are separate to model already-in-flight requests.
+
+The same suite simulates rejecting the Gate cookie while retaining a valid
+source cookie (each request may bridge once, never loop), checks Remember-only
+recovery including rotation on disable/re-enable, and rejects tampered,
+handmade, method-mismatched, extra-query and credential-free handoffs.
+No cookie or handoff value is written to the test result. The real browsers'
+HTTPS, actual Cookie scope/SameSite enforcement and server access-log
+redaction are separate matters; the HTTP client cookie policy is not a browser
+test. Default server logs may include encrypted handoff query strings; they
+contain no raw ESP cookie but must not be assumed redacted by the plugin.
+
+See CI for actual results. Remains separate from SQLite/write fault injection,
+expired-but-live source credential tests, updater integration at a changed
+version, LiteSpeed host capacity and other open acceptance criteria.
