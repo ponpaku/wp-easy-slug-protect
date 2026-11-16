@@ -265,11 +265,15 @@ wp config set DB_HOST host.docker.internal --type=constant
 # The HTTP suite explicitly schedules and runs a real wp-cron.php updater
 # retry after restoration and records its before/after runtime states.
 wp config set DISABLE_WP_CRON true --raw
+# Direct filesystem method only for the disposable HTTP updater fixture.
+wp config set FS_METHOD direct
 # Add a disposable, environment-gated HTTP driver to the REAL WordPress
 # fixture, not to the distributable plugin ZIP.
 mkdir -p "$ESP_WP_ROOT/wp-content/mu-plugins"
 cp tests/fixtures/fast-gate-http-auth-mu.php \
     "$ESP_WP_ROOT/wp-content/mu-plugins/fg-disposable-http-auth.php"
+cp tests/fixtures/fast-gate-upgrade-mu.php \
+    "$ESP_WP_ROOT/wp-content/mu-plugins/fg-disposable-upgrade.php"
 sudo chown -R 33:33 "$ESP_WP_ROOT/wp-content/esp-fast-gate-v2"
 docker build --progress=plain -f tests/fixtures/fast-gate-apache.Dockerfile \
     -t esp-fast-gate-apache-ci . 2>&1 | tee "$report_root/apache-build.log"
@@ -518,5 +522,19 @@ fi
 # restored and the separate option marker must not remain "fast".
 ! grep -Fq '# Fast Gate: no static-file existence shortcut' "$uploads/.htaccess"
 grep -Fq 'index.php?esp-media=' "$uploads/.htaccess"
-echo 'PASS: released upgrade, ledger/Cron/WAL, HTTP benchmark, AND verified product activation/rollback'
+# Actual Core bulk upgrade while Fast Gate is serving, after previous tests
+# have used the unmodified candidate package. Synthetic next-version archive
+# is not placed in the web root and is never uploaded as a release artifact.
+python3 tests/fast-gate-upgrade-e2e.py build "$pr_zip" "$root/fg-next.zip"
+docker cp "$root/fg-next.zip" "$container:/tmp/esp-fg-ci-next.zip"
+docker exec "$container" chmod 644 /tmp/esp-fg-ci-next.zip
+# The disposable bind mount was provisioned by runner CLI; Apache must own
+# the Core maintenance directory and plugin tree to perform a direct update.
+sudo chown 33:33 "$ESP_WP_ROOT" "$ESP_WP_ROOT/wp-content"
+sudo chown -R 33:33 "$ESP_WP_ROOT/wp-content/plugins"
+docker exec "$container" sh -eu -c 'mkdir -p /var/www/html/wp-content/upgrade /var/www/html/wp-content/upgrade-temp-backup; chown -R www-data:www-data /var/www/html/wp-content/upgrade /var/www/html/wp-content/upgrade-temp-backup'
+python3 tests/fast-gate-upgrade-e2e.py run | tee -a "$report_root/stages.log"
+! grep -Fq '# Fast Gate: no static-file existence shortcut' "$uploads/.htaccess"
+grep -Fq 'index.php?esp-media=' "$uploads/.htaccess"
+echo 'PASS: released upgrade, ledger/Cron/WAL, HTTP benchmark, verified product activation/rollback, real next-version Core update'
 

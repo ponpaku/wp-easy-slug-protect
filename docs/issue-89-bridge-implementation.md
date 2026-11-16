@@ -152,3 +152,18 @@ reference, reject whitespace/case/unknown IDs, and confirm recovery.
 The lifecycle fixture deliberately retains its empty metadata value;
 the explicit actual updater Cron retry must pass against it, rather than
 changing the fixture to delete the metadata and concealing the inconsistency.
+
+## Actual Core version-change upgrade while serving
+
+The disposable HTTP lifecycle adds a synthetic next-patch ZIP derived from
+the exact built candidate; only its version header and constant change.
+No real tag or release is created. The real Core Plugin_Upgrader bulk API
+runs in the Apache request, with only the external release/API download
+transport substituted. It observes the actual pre-install hooks after they
+stop serving and restore legacy Rewrite, before file replacement. It checks
+old PHP cannot certify new code, observes the real shutdown callback, runs
+wp-cron through HTTP, then verifies the new code's READY/version/update
+markers, regenerated Rewrite writer version, settings and authentication
+rows, legacy HTTP policy, explicit re-enable, original session/Remember
+recovery, stale revoked proof rejection and logout. The test is of Core's
+bulk updater, not a browser click or host-specific automatic update.
