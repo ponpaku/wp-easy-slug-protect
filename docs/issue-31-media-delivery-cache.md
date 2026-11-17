@@ -20,6 +20,11 @@
 - 認証不足によるログインリダイレクトはWordPressの nocache_headers() を利用する。
 - これはレスポンスのキャッシュ指示であり、入口でPHPに到達しない静的配信や、ヘッダーを無視するCDNを強制的に制御するものではない。
 
+### LiteSpeed 委譲配信の許容仕様（#87）
+
+- 従来の `X-LiteSpeed-Location` 配信では、サーバー設定により認証済みメディアがブラウザーにキャッシュされ、ログアウト後も表示される場合がある。既取得データのブラウザー内保持は許容する（実機で観測した7日間は鮮度期限であり、消去期限ではない）。
+- ログアウト後の新規取得は認可で制限し、共有キャッシュへの漏洩は許容しない。Fast Gate・PHP直接配信の `no-store` 指定は維持する。取得済みデータの消去は保証しない。委譲配信を変更せず、[#87](https://github.com/ponpaku/wp-easy-slug-protect/issues/87) は対応不要とする。
+
 ## 自動テスト
 
 1. php tests/security-media-cache-policy-test.php — PHPローカルHTTPサーバーで保護/公開のGET/HEAD/Range 206/416とX-Sendfile委譲ヘッダーを検証。
