@@ -138,7 +138,7 @@ final class ESP_Fast_Gate_Deployment {
         $out = ['ready'=>!empty($status['ready']), 'error'=>!empty($status['error']),
             'pending'=>false, 'backoff'=>false, 'repairable'=>false,
             'orphan'=>false, 'orphan_repairable'=>false, 'file_without_state'=>false,
-            'unfinished'=>false, 'blocked'=>true];
+            'missing_state'=>false, 'unfinished'=>false, 'blocked'=>true];
         if ($out['error'] || !$out['ready']) { return $out; }
         $state = ESP_Media_Index::state_table();
         $files = ESP_Media_Index::files_table();
@@ -158,6 +158,9 @@ final class ESP_Fast_Gate_Deployment {
                 WHERE s.attachment_id>0 AND s.pending_count=0 AND p.ID IS NULL) AS orphan_repairable,
             EXISTS(SELECT 1 FROM $files f LEFT JOIN $state s
                 ON s.attachment_id=f.attachment_id WHERE s.attachment_id IS NULL) AS file_without_state,
+            EXISTS(SELECT 1 FROM {$wpdb->posts} p LEFT JOIN $state s
+                ON s.attachment_id=p.ID WHERE p.post_type='attachment'
+                AND s.attachment_id IS NULL) AS missing_state,
             EXISTS(SELECT 1 FROM $state WHERE attachment_id>0
                 AND (status<>'ready' OR pending_count<>0)) AS unfinished", time(), time());
         $row = $wpdb->get_row($sql, ARRAY_A);
@@ -166,14 +169,15 @@ final class ESP_Fast_Gate_Deployment {
             return $out;
         }
         foreach (['pending','backoff','repairable','orphan','orphan_repairable',
-                  'file_without_state','unfinished'] as $field) {
+                  'file_without_state','missing_state','unfinished'] as $field) {
             if (!isset($row[$field]) || !in_array((string)$row[$field], ['0','1'], true)) {
                 $out['error'] = true;
                 return $out;
             }
             $out[$field] = (string)$row[$field] === '1';
         }
-        $out['blocked'] = $out['unfinished'] || $out['orphan'] || $out['file_without_state'];
+        $out['blocked'] = $out['unfinished'] || $out['orphan'] ||
+            $out['file_without_state'] || $out['missing_state'];
         return $out;
     }
 
@@ -714,6 +718,7 @@ final class ESP_Fast_Gate_Deployment {
                 'repairable'=>'修復対象の索引があります。「台帳を準備する」で上限付きの修復を実行できます。',
                 'orphan'=>'孤立した索引管理行があります。既存の修復バッチで処理します（予約がある行は除外）。',
                 'file_without_state'=>'管理行のない索引ファイル行があります。索引の全件監査サイクルで修復されるまで切替できません。',
+                'missing_state'=>'索引管理行のない添付ファイルがあります。Cronによる索引監査・再構築が完了するまで切替できません。',
             ];
             if ($preflight['error']) {
                 echo '<p>索引の状態を確認できません。DB・索引の状態を点検してください。</p>';
@@ -729,7 +734,7 @@ final class ESP_Fast_Gate_Deployment {
                     echo '<p>索引の準備前点検: 更新待ち・孤立行なし（この時点の結果）。</p>';
                 } elseif (!$preflight['pending'] && !$preflight['backoff'] &&
                     !$preflight['repairable'] && !$preflight['orphan'] &&
-                    !$preflight['file_without_state']) {
+                    !$preflight['file_without_state'] && !$preflight['missing_state']) {
                     echo '<p>未完了の索引があります。索引の状態を点検してください。</p>';
                 }
             }

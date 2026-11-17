@@ -182,10 +182,40 @@ if($phase==='manual-build'){
         $db->get_media($private)['policy']==='protected',
         'catalog policy incorrect');
 
+    // A global READY flag may coexist with an attachment missing BOTH its
+    // state and file rows. This must block preparation rather than silently
+    // export an incomplete catalog (unknown media would be denied at runtime).
+    // Use a MySQL transaction so the real test attachment is fully restored.
+    $state_table = ESP_Media_Index::state_table();
+    $missing_owner_id = $ids['public'];
+    fg_life_check($wpdb->query('START TRANSACTION') !== false,
+        'begin isolated missing-owner regression');
+    try {
+        fg_life_check($wpdb->delete(ESP_Media_Index::files_table(),
+            ['attachment_id'=>$missing_owner_id], ['%d']) > 0,
+            'temporarily hide real attachment file rows');
+        fg_life_check($wpdb->delete($state_table,
+            ['attachment_id'=>$missing_owner_id], ['%d']) === 1,
+            'temporarily hide real attachment state');
+        $report = ESP_Fast_Gate_Deployment::index_preflight();
+        fg_life_check($report['ready'] && !$report['error'] &&
+            $report['missing_state'] && !$report['file_without_state'] &&
+            !$report['orphan'] && !$report['unfinished'] && $report['blocked'],
+            'preflight detects attachment missing both index tables');
+        $blocked_prepare = ESP_Fast_Gate_Deployment::prepare();
+        fg_life_check(is_wp_error($blocked_prepare) &&
+            $blocked_prepare->get_error_code() === 'esp_gate_index_repair_pending',
+            'prepare refuses incomplete catalog when owner state is absent');
+    } finally {
+        $wpdb->query('ROLLBACK');
+    }
+    $restored = ESP_Fast_Gate_Deployment::index_preflight();
+    fg_life_check(!$restored['missing_state'] && !$restored['blocked'],
+        'missing-owner regression rolled back without changing state');
+
     // PR #83: the global media index can remain READY while a deleted
     // attachment leaves a repairable dirty state row. Catalog export must
     // never silently skip it; administrator preparation repairs it first.
-    $state_table = ESP_Media_Index::state_table();
     $pending_id = 987654320;
     $orphan_id = 987654321;
     foreach ([$pending_id, $orphan_id] as $candidate_id) {

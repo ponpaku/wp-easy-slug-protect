@@ -209,6 +209,11 @@ index batch per call; does not force delete a reservation or override a live
 row backoff; and refuses incomplete or orphaned state, with DB errors separate.
 A READY orphan with zero pending is also eligible for the existing orphan
 repair. File-only orphan cleanup remains the existing end-of-audit cycle.
+A missing state row for a live attachment, even when both state and file
+rows are absent, blocks preparation and activation; global READY does not
+certify every owner remains indexed. A transactionally isolated real-MySQL
+regression checks refusal and subsequent restoration without modifying
+production data.
 The initial enable preflight refuses unsettled state before changing routes;
 the existing post-route full catalog reconciliation is still required. No
 query is added to standalone GETs. The admin screen shows fixed actionable
