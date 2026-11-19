@@ -55,8 +55,37 @@ final class ESP_Fast_Gate_Deployment {
         return $new;
     }
 
-    private static function error($code) {
-        return new WP_Error('esp_gate_' . $code, $code);
+    /**
+     * Fixed, non-sensitive stage labels. Only admin transitions report them;
+     * never return file names, owner IDs, SQL, credentials, or raw exceptions.
+     */
+    private static function catalog_stage_messages() {
+        return [
+            'index_precondition'=>'メディア索引の有効化と初期構築状態を確認してください。',
+            'sqlite_open_or_schema'=>'SQLite台帳と鍵の読み書き・スキーマを確認してください。',
+            'sqlite_disable_ready'=>'SQLite台帳を安全側停止状態にできませんでした。書込権限や容量を確認してください。',
+            'uploads_mapping'=>'アップロード先と台帳の基準パス設定が一致しません。',
+            'path_settings'=>'保護パス設定を取得できません。',
+            'index_owner_scan'=>'MySQL索引の未完了行や取得エラーを確認してください。',
+            'file_record_invalid'=>'索引に不正なファイル管理行があります。',
+            'owner_resolve'=>'実在ファイルの所有者情報を正常に解決できません。',
+            'path_versions'=>'保護パスのパスワード世代設定が不正です。',
+            'serving_guard'=>'台帳構築中に配信または有効状態を検出しました。',
+            'sqlite_media_replace'=>'SQLiteメディア一覧の書き換えに失敗しました。',
+            'sqlite_paths_replace'=>'SQLite保護パス一覧の書き換えに失敗しました。',
+            'post_build_verification'=>'台帳構築後のMySQL索引検証に失敗しました。',
+            'sqlite_finalize_ready'=>'SQLite台帳を準備完了状態にできませんでした。',
+            'prepared_state'=>'再構築後の準備完了条件を確認できませんでした。',
+        ];
+    }
+
+    private static function error($code, $stage = null) {
+        $data = null;
+        if (is_string($stage)) {
+            $messages = self::catalog_stage_messages();
+            if (isset($messages[$stage])) { $data = ['stage'=>$stage]; }
+        }
+        return new WP_Error('esp_gate_' . $code, $code, $data);
     }
 
     private static function write_route($route) {
@@ -226,8 +255,9 @@ final class ESP_Fast_Gate_Deployment {
         if (!$db || !$db->schema_ok() || !self::keys()) {
             return self::error('invalid_ledger_or_keys');
         }
-        if (!$db->ready() && !ESP_Fast_Gate_WP::build_catalog()) {
-            return self::error('catalog_build_failed');
+        $failure_stage = null;
+        if (!$db->ready() && !ESP_Fast_Gate_WP::build_catalog($failure_stage)) {
+            return self::error('catalog_build_failed', $failure_stage);
         }
         return self::prepared() ? true : self::error('catalog_not_ready');
     }
@@ -542,12 +572,14 @@ final class ESP_Fast_Gate_Deployment {
                 // During the rebuild, media/password writes are fenced or
                 // rejected by the existing WP index bridge even though the
                 // user-facing active flag is not yet set.
-                $catalog_ok = ESP_Fast_Gate_WP::build_catalog() &&
+                $failure_stage = null;
+                $catalog_ok = ESP_Fast_Gate_WP::build_catalog($failure_stage) &&
                     self::prepared();
                 if (!self::owns_lock()) { return self::error('transition_lock_lost'); }
                 if (!$catalog_ok) {
                     self::rollback_enable($db);
-                    return self::error('catalog_recheck_failed');
+                    return self::error('catalog_recheck_failed',
+                        $failure_stage ?? 'prepared_state');
                 }
                 // 4. Every re-activation must invalidate tickets copied
                 // before a legacy-mode logout. Legacy WP logout does not
@@ -703,12 +735,22 @@ final class ESP_Fast_Gate_Deployment {
         $result = isset($_GET['esp_fg_result']) ?
             sanitize_key(wp_unslash($_GET['esp_fg_result'])) : '';
         if ($result !== '') {
+            $stage = isset($_GET['esp_fg_stage']) ?
+                sanitize_key(wp_unslash($_GET['esp_fg_stage'])) : '';
+            $stage_messages = self::catalog_stage_messages();
             $succeeded = $result === 'success';
             $notice = $succeeded ? 'notice-success' : 'notice-error';
             $message = $succeeded ? '操作が完了しました。' :
                 '操作に失敗しました。エラーコード: ' . $result;
             echo '<div class="notice ' . esc_attr($notice) .
-                ' inline" role="status"><p>' . esc_html($message) . '</p></div>';
+                ' inline" role="status"><p>' . esc_html($message);
+            if (in_array($result, ['esp_gate_catalog_build_failed',
+                    'esp_gate_catalog_recheck_failed'], true) &&
+                isset($stage_messages[$stage])) {
+                echo ' / 失敗段階: ' . esc_html($stage) . ' — ' .
+                    esc_html($stage_messages[$stage]);
+            }
+            echo '</p></div>';
         }
         if ($preflight !== null) {
             echo '<p>台帳準備では1回につき既存の索引修復処理を最大1バッチ実行します。更新中の予約や再試行待ちを強制解除しません。</p>';
@@ -773,7 +815,18 @@ final class ESP_Fast_Gate_Deployment {
         }
         $message = $result === true ? 'success' :
             ($result instanceof WP_Error ? $result->get_error_code() : 'failed');
-        wp_safe_redirect(add_query_arg('esp_fg_result', $message,
+        $query = ['esp_fg_result'=>$message];
+        if ($result instanceof WP_Error &&
+            in_array($message, ['esp_gate_catalog_build_failed',
+                'esp_gate_catalog_recheck_failed'], true)) {
+            $details = $result->get_error_data();
+            $stage = is_array($details) ? ($details['stage'] ?? null) : null;
+            $labels = self::catalog_stage_messages();
+            if (is_string($stage) && isset($labels[$stage])) {
+                $query['esp_fg_stage'] = $stage;
+            }
+        }
+        wp_safe_redirect(add_query_arg($query,
             admin_url('admin.php?page=esp-settings')) . '#esp-fast-gate');
         exit;
     }
