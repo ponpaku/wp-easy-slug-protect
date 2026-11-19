@@ -210,7 +210,8 @@ final class ESP_Fast_Gate_WP {
      *
      * Future work: incremental mutation replication and strict routing tests.
      */
-    public static function build_catalog() {
+    public static function build_catalog(&$failure_stage = null) {
+        $failure_stage = 'index_precondition';
         global $wpdb;
         if (!ESP_Media_Index::enabled() || !ESP_Media_Index::ready() ||
             !is_object($wpdb)) {
@@ -220,12 +221,16 @@ final class ESP_Fast_Gate_WP {
         if (empty($status['ready']) || !empty($status['error'])) {
             return false;
         }
+        $failure_stage = 'sqlite_open_or_schema';
         $db = self::ledger(true);
         $keys = self::keys();
-        if (!$db || !$keys || !$db->schema_ok() || !$db->set_ready(false)) {
+        if (!$db || !$keys || !$db->schema_ok()) {
             return false;
         }
+        $failure_stage = 'sqlite_disable_ready';
+        if (!$db->set_ready(false)) { return false; }
 
+        $failure_stage = 'uploads_mapping';
         $uploads = wp_upload_dir(null, false);
         $root = realpath($uploads['basedir'] ?? '');
         $prefix = isset($uploads['baseurl'])
@@ -235,6 +240,7 @@ final class ESP_Fast_Gate_WP {
             return false;
         }
 
+        $failure_stage = 'path_settings';
         $files = ESP_Media_Index::files_table();
         $state = ESP_Media_Index::state_table();
         $paths = ESP_Option::get_current_setting('path');
@@ -242,6 +248,7 @@ final class ESP_Fast_Gate_WP {
 
         // A stale/dirty owner is never silently excluded from an otherwise
         // "ready" export: require the index to be settled before building.
+        $failure_stage = 'index_owner_scan';
         $unstable = $wpdb->get_var("SELECT COUNT(*) FROM $state
             WHERE attachment_id>0 AND (status<>'ready' OR pending_count<>0)");
         if ($unstable === null || $wpdb->last_error !== '' || (int)$unstable > 0) {
@@ -256,6 +263,7 @@ final class ESP_Fast_Gate_WP {
         $catalog = [];
         $owners = [];
         foreach ($rows as $record) {
+            $failure_stage = 'file_record_invalid';
             $file = $record['file_path'] ?? null;
             $id_owner = isset($record['attachment_id']) ? (int)$record['attachment_id'] : 0;
             if (!ESP_Media_Index::valid_path($file) || $id_owner <= 0) { return false; }
@@ -273,6 +281,7 @@ final class ESP_Fast_Gate_WP {
                 $catalog[$file] = ['policy' => 'deny', 'path_id' => ''];
                 continue;
             }
+            $failure_stage = 'owner_resolve';
             $result = ESP_Media_Index::resolve($absolute);
             if ($result['status'] === 'error') { return false; }
             if ($result['status'] === 'ambiguous' ||
@@ -292,6 +301,7 @@ final class ESP_Fast_Gate_WP {
             }
         }
 
+        $failure_stage = 'path_versions';
         $versions = [];
         foreach ($paths as $id => $item) {
             if (!is_array($item) || !isset($item['password_version'])) {
@@ -300,17 +310,22 @@ final class ESP_Fast_Gate_WP {
             $versions[(string)$id] = (int)$item['password_version'];
         }
         // These operations disable the gate until the final explicit READY.
+        $failure_stage = 'serving_guard';
         if (self::active() || $db->serving()) { return false; }
-        if (!$db->replace_catalog($catalog, $owners) ||
-            !$db->replace_paths($versions)) {
-            return false;
-        }
+        $failure_stage = 'sqlite_media_replace';
+        if (!$db->replace_catalog($catalog, $owners)) { return false; }
+        $failure_stage = 'sqlite_paths_replace';
+        if (!$db->replace_paths($versions)) { return false; }
+        $failure_stage = 'post_build_verification';
         $after = ESP_Media_Index::build_status(false);
         if (empty($after['ready']) || !empty($after['error'])) {
             return false;
         }
         // Ready is ONLY catalog completeness; serving remains OFF.
-        return $db->set_ready(true);
+        $failure_stage = 'sqlite_finalize_ready';
+        if (!$db->set_ready(true)) { return false; }
+        $failure_stage = null;
+        return true;
     }
 
     /**
