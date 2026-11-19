@@ -172,7 +172,34 @@ if($phase==='catalog-status'){
 }
 if($phase==='manual-build'){
     $start=microtime(true);
-    fg_life_check(ESP_Fast_Gate_WP::build_catalog(),'manual catalog build failed');
+    $failure_stage = 'stale';
+    fg_life_check(ESP_Fast_Gate_WP::build_catalog($failure_stage) &&
+        $failure_stage === null, 'manual catalog build failed or retained an old stage');
+    // Exercise an early failure without touching SQLite: a disabled index
+    // must return a bounded stage and preserve the existing bool contract.
+    $prior_enabled = get_option(ESP_Media_Index::ENABLE_OPTION);
+    try {
+        update_option(ESP_Media_Index::ENABLE_OPTION, '0', false);
+        $failure_stage = null;
+        fg_life_check(!ESP_Media_Index::enabled() &&
+            !ESP_Fast_Gate_WP::build_catalog($failure_stage) &&
+            $failure_stage === 'index_precondition',
+            'catalog failure stage was not index_precondition');
+    } finally {
+        update_option(ESP_Media_Index::ENABLE_OPTION, $prior_enabled, false);
+    }
+    // Error-code compatibility and allowlisted, non-sensitive diagnostics.
+    $error_method = new ReflectionMethod(ESP_Fast_Gate_Deployment::class, 'error');
+    $diagnostic_error = $error_method->invoke(null, 'catalog_build_failed',
+        'index_owner_scan');
+    fg_life_check($diagnostic_error->get_error_code() ===
+        'esp_gate_catalog_build_failed' &&
+        $diagnostic_error->get_error_data()['stage'] === 'index_owner_scan',
+        'catalog WP_Error lost safe failure stage');
+    $rejected_stage = $error_method->invoke(null, 'catalog_build_failed',
+        '/private/file/secret');
+    fg_life_check($rejected_stage->get_error_data() === null,
+        'unapproved stage leaked into the diagnostic error');
     $db=fg_life_gate();
     fg_life_check($db->ready()&&!$db->serving(),'manual build incorrectly activated');
     $counts=$db->counts();
