@@ -104,23 +104,22 @@ class ESP_Cookie {
      * リダイレクト直前に呼び出す
      */
     public function set_pending_cookies() {
-        if (empty($this->pending_cookies)) {
-            return;
-        }
+        if (empty($this->pending_cookies)) { return true; }
+        if (headers_sent()) { return false; }
 
         foreach ($this->pending_cookies as $name => $data) {
             if (version_compare(PHP_VERSION, '7.3.0', '>=')) {
                 // PHP 7.3以上ではオプション配列を使用
                 $options = $this->get_cookie_options();
                 $options['expires'] = $data['expires'];
-                setcookie(
+                $ok = setcookie(
                     $name,
                     $data['value'],
                     $options
                 );
             } else {
                 // 古いPHPバージョン用の互換性コード
-                setcookie(
+                $ok = setcookie(
                     $name,
                     $data['value'],
                     $data['expires'],
@@ -130,9 +129,11 @@ class ESP_Cookie {
                     true
                 );
             }
+            if (!$ok) { return false; }
         }
 
         $this->pending_cookies = [];
+        return true;
     }
 
     /**

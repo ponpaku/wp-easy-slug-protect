@@ -149,9 +149,12 @@ class ESP_Media_Protection {
         }
         return false;
     }
-    public static function audit_rewrite_policy() {
+    public static $audit_result = null;
+    public static function inspect_rewrite_policy() {
         self::$audits++;
-        return self::$audit_ok;
+        return self::$audit_result ?? ['status'=>self::$audit_ok ? 'ok' : 'mismatch',
+            'reason'=>self::$audit_ok ? 'file_policy_match' : 'managed_rules_mismatch',
+            'context'=>'http','server_family'=>'apache','file_status'=>self::$audit_ok ? 'match' : 'mismatch'];
     }
 }
 class WP_Error {
@@ -170,6 +173,7 @@ function esc_html($value) { return (string) $value; }
 function esc_url($url) { return $url; }
 function admin_url($uri) { return '/wp-admin/' . $uri; }
 function wp_nonce_field($action) { echo '<input name="_wpnonce" value="test" />'; }
+function wp_date($format, $timestamp) { return gmdate($format, $timestamp); }
 function maybe_serialize($value) { return serialize($value); }
 function maybe_unserialize($value) { return unserialize($value); }
 function get_option($name, $default = null) {
@@ -642,8 +646,38 @@ check(in_array('rewrite_mismatch', get_option('esp_integrity_last_audit')['error
     'Cron persists an actionable non-secret error code');
 check(saved_runtime_state() === 'READY' && ESP_Media_Protection::$checks > 0,
     'read-only Cron does not auto-repair Rewrite or overwrite READY');
+ESP_Media_Protection::$audit_result = ['status'=>'ok','reason'=>'file_policy_match',
+    'context'=>'cli','server_family'=>'unknown','file_status'=>'match'];
+check(ESP_Protection_State::audit() === false &&
+    in_array('rewrite_mismatch', get_option('esp_integrity_last_audit')['errors'], true),
+    'CLI file match cannot erase earlier HTTP mismatch');
+ESP_Media_Protection::$audit_result = null;
 ESP_Media_Protection::$audit_ok = true;
 check(ESP_Protection_State::audit() === true, 'successful Cron audit persists no errors');
+ESP_Media_Protection::$audit_result = ['status'=>'partial','reason'=>'server_family_unverified',
+    'context'=>'cli','server_family'=>'unknown','file_status'=>'match'];
+check(ESP_Protection_State::audit() === true &&
+    get_option('esp_integrity_last_audit')['rewrite']['status'] === 'partial',
+    'legacy CLI file match records partial evidence without false mismatch');
+ESP_Media_Protection::$audit_result = ['status'=>'unknown','reason'=>'rewrite_unreadable',
+    'context'=>'cli','server_family'=>'unknown','file_status'=>'unverified'];
+check(ESP_Protection_State::audit() === false &&
+    get_option('esp_integrity_last_audit')['errors'] === ['rewrite_unverified'],
+    'unreadable rule is neither a mismatch nor a verified success');
+ESP_Media_Protection::$audit_result = null;
+check(ESP_Protection_State::audit() === true, 'HTTP recheck clears unverified result');
+$good_audit = get_option('esp_integrity_last_audit');
+$wpdb->lock_busy = true;
+check(ESP_Protection_State::audit() === false &&
+    get_option('esp_integrity_last_audit') === $good_audit,
+    'busy audit retains prior snapshot without falsely reporting success');
+$wpdb->lock_busy = false;
+$GLOBALS['options']['esp_integrity_last_audit'] = ['checked_at'=>time()-3*86400,'errors'=>[]];
+ob_start();
+ESP_Protection_State::render_audit_notice();
+$stale_notice = ob_get_clean();
+check(strpos($stale_notice, 'esp-daily-audit') !== false, 'stale successful daily audit has actionable notice');
+$GLOBALS['options']['esp_integrity_last_audit'] = $good_audit;
 
 ESP_Protection_State::register_recovery_admin();
 $hook = $GLOBALS['actions']['admin_menu'][0][0];

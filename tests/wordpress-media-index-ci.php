@@ -51,6 +51,33 @@ if (!ESP_Media_Index::ready()) {
     throw new RuntimeException('index batch did not publish verified initial scan');
 }
 $uploads = wp_upload_dir();
+// Real WordPress regression for mixed-charset index tables: path_hash is
+// ASCII, while file_path is utf8mb4. wpdb::query() rejects a prepared INSERT
+// containing Unicode media paths on these tables even when SQL is valid.
+$unicode_path = '2026/11/索引-日本語-🖼.jpg';
+$unicode_id = wp_insert_post([
+    'post_type' => 'attachment',
+    'post_status' => 'inherit',
+    'post_title' => 'ESP UTF8 index regression',
+    'post_mime_type' => 'image/jpeg',
+], true);
+if (is_wp_error($unicode_id) || (int)$unicode_id < 1 ||
+    $wpdb->insert($wpdb->postmeta, [
+        'post_id' => (int)$unicode_id,
+        'meta_key' => '_wp_attached_file',
+        'meta_value' => $unicode_path,
+    ], ['%d', '%s', '%s']) !== 1 ||
+    !ESP_Media_Index::reindex_attachment((int)$unicode_id)) {
+    throw new RuntimeException('mixed-charset media index rejected a valid Unicode path');
+}
+$unicode_saved = $wpdb->get_var($wpdb->prepare(
+    'SELECT file_path FROM ' . ESP_Media_Index::files_table() .
+    ' WHERE attachment_id=%d AND path_hash=%s LIMIT 1',
+    (int)$unicode_id, hash('sha256', $unicode_path)));
+if ($unicode_saved !== $unicode_path) {
+    throw new RuntimeException('indexed Unicode path was changed or missing');
+}
+echo "PASS: real WordPress accepted a Unicode path in mixed-charsets media index\n";
 $path = $uploads['basedir'] . '/esp31-protected-150x150.jpg';
 $public = $uploads['basedir'] . '/esp31-public-150x150.jpg';
 $index = ESP_Media_Index::resolve($path);

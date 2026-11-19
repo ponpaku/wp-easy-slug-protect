@@ -8,6 +8,8 @@
  */
 ini_set('display_errors', '0');
 require_once __DIR__ . '/../includes/class-esp-fast-gate-token.php';
+require_once __DIR__ . '/../includes/class-esp-fast-gate-handoff.php';
+require_once __DIR__ . '/../includes/class-esp-fast-gate-range.php';
 require_once __DIR__ . '/../includes/class-esp-fast-gate-store.php';
 require_once __DIR__ . '/class-esp-fast-gate-server.php';
 
@@ -43,11 +45,47 @@ try {
         !is_string($keys['prefix'] ?? null)) {
         esp_fast_gate_status(503);
     }
+    // Authentication-only installation probe. It returns NO media bytes and
+    // no secret; a random nonce must be authenticated with a site-wide HMAC.
+    // The admin verifier needs this to prove Apache routed an uploads URL
+    // to THIS standalone PHP script rather than to WordPress or static files.
+    $probe = $_SERVER['HTTP_X_ESP_GATE_ROUTE_PROBE'] ?? null;
+    if (is_string($probe) &&
+        preg_match('/^([a-f0-9]{32}):([a-f0-9]{64})$/D', $probe, $parts) &&
+        hash_equals(hash_hmac('sha256', 'route|' . $parts[1], $keys['sig']),
+            $parts[2])) {
+        http_response_code(204);
+        header('Cache-Control: private, no-store');
+        header('X-ESP-Gate-Route-Ack: ' .
+            hash_hmac('sha256', 'ack|' . $parts[1], $keys['sig']));
+        header('X-Content-Type-Options: nosniff');
+        exit;
+    }
     $store = ESP_Fast_Gate_Store::open($private . '/gate-ledger.sqlite', false);
+    $ticket_signing_key = $store ? $store->ticket_signing_key_strict($keys['sig']) : null;
+    if ($ticket_signing_key === null) { esp_fast_gate_status(503); }
     $decision = ESP_Fast_Gate_Server::authorize(
         $_SERVER['REQUEST_URI'] ?? '', $_COOKIE, $keys['site'],
-        $keys['root'], $keys['prefix'], $keys['sig'], $keys['id'], $store
+        $keys['root'], $keys['prefix'], $ticket_signing_key, $keys['id'], $store,
+        null, $_SERVER['HTTP_SEC_FETCH_MODE'] ?? null,
+        $_SERVER['HTTP_SEC_FETCH_DEST'] ?? null
     );
+    if ($decision['status'] === 307) {
+        $bridge_path = $store->bridge_path();
+        if ($bridge_path === null) { esp_fast_gate_status(503); }
+        $handoff = ESP_Fast_Gate_Handoff::issue(
+            $keys['site'], $decision['path_id'], $decision['relative'],
+            $method, $ticket_signing_key, null,
+            $decision['purpose'] ?? 'auth');
+        if ($handoff === null) { esp_fast_gate_status(503); }
+        // Location is an origin-relative configured path. Never use Host.
+        header('Location: ' . $bridge_path . '?esp_gate_bridge=' . $handoff,
+            true, 307);
+        header('Cache-Control: private, no-store, max-age=0');
+        header('Referrer-Policy: no-referrer');
+        header('X-Content-Type-Options: nosniff');
+        exit;
+    }
     if ($decision['status'] !== 200) {
         esp_fast_gate_status($decision['status']);
     }
@@ -59,40 +97,18 @@ try {
         if ($handle) { fclose($handle); }
         esp_fast_gate_status(503);
     }
-    $start = 0;
-    $end = $length > 0 ? $length - 1 : 0;
-    $partial = false;
-    if (isset($_SERVER['HTTP_RANGE'])) {
-        $range = (string)$_SERVER['HTTP_RANGE'];
-        if (!preg_match('/^bytes=(\d*)-(\d*)$/D', $range, $m) ||
-            ($m[1] === '' && $m[2] === '') || $length === 0) {
-            fclose($handle);
-            header('Content-Range: bytes */' . $length);
-            esp_fast_gate_status(416);
-        }
-        if ($m[1] === '') {
-            $suffix = (int)$m[2];
-            if ($suffix <= 0) {
-                fclose($handle);
-                header('Content-Range: bytes */' . $length);
-                esp_fast_gate_status(416);
-            }
-            $start = max(0, $length - $suffix);
-        } else {
-            $start = (int)$m[1];
-        }
-        if ($m[2] !== '' && $m[1] !== '') {
-            $end = min($length - 1, (int)$m[2]);
-        } else {
-            $end = $length - 1;
-        }
-        if ($start >= $length || $end < $start) {
-            fclose($handle);
-            header('Content-Range: bytes */' . $length);
-            esp_fast_gate_status(416);
-        }
-        $partial = true;
+    // RFC 9110: Range applies to GET only. HEAD ignores it.
+    $range_header = $method === 'GET' && isset($_SERVER['HTTP_RANGE'])
+        ? (string)$_SERVER['HTTP_RANGE'] : null;
+    $range = ESP_Fast_Gate_Range::parse($range_header, $length);
+    if ($range !== null && $range['status'] !== 206) {
+        fclose($handle);
+        header('Content-Range: bytes */' . $length);
+        esp_fast_gate_status(416);
     }
+    $partial = $range !== null;
+    $start = $partial ? $range['start'] : 0;
+    $end = $partial ? $range['end'] : ($length > 0 ? $length - 1 : 0);
 
     http_response_code($partial ? 206 : 200);
     header('Content-Type: ' . ESP_Fast_Gate_Server::content_type($file));

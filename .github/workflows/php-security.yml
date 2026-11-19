@@ -23,6 +23,8 @@ jobs:
         run: find . -name '*.php' -print0 | xargs -0 -n1 php -l
       - name: Test Fast Gate v2 token and SQLite fail-closed core
         run: php tests/security-fast-gate-core-test.php
+      - name: Test Fast Gate bridge handoff, revocation and Range contract
+        run: php tests/fast-gate-bridge-contract-test.php
       - name: Test Fast Gate v2 automatic PHP-key provisioning
         run: php tests/security-fast-gate-provision-test.php
       - name: Test Fast Gate Remember Me stale/missing credential handling
@@ -162,7 +164,8 @@ jobs:
           ESP_ALLOW_DISPOSABLE_DB: "1"
         run: bash .github/scripts/test-fast-gate-wordpress.sh
   fast-gate-upgrade-lifecycle:
-    runs-on: ubuntu-latest
+    # Playwright 1.56 supports Ubuntu 24.04; ubuntu-latest is now 26.04.
+    runs-on: ubuntu-24.04
     services:
       mysql:
         image: mysql:8.0
@@ -180,7 +183,14 @@ jobs:
           php-version: '8.3'
           extensions: mysqli, sqlite3
           coverage: none
-      - name: Upgrade released ZIP, verify lifecycle and measure Apache HTTP
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install pinned Playwright and Chromium for real admin UI test
+        run: |
+          python3 -m pip install --disable-pip-version-check playwright==1.56.0
+          python3 -m playwright install --with-deps chromium
+      - name: Upgrade released ZIP, verify lifecycle, Apache HTTP and Chromium admin UI
         env:
           ESP_ALLOW_DISPOSABLE_DB: "1"
         run: bash .github/scripts/test-fast-gate-lifecycle.sh

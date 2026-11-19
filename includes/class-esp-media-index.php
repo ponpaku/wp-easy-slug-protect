@@ -692,12 +692,19 @@ final class ESP_Media_Index {
         if ($wpdb->last_error !== '' || $revision === null) { return false; }
         $files = self::table(self::files_table());
         foreach ($paths as $path) {
-            $written = $wpdb->query($wpdb->prepare(
-                "INSERT INTO $files
-                 (path_hash,file_path,attachment_id,generation,protected_path_id)
-                 VALUES (%s,%s,%d,%d,'')",
-                hash('sha256', $path), $path, $id, $revision));
-            if ($written === false || $wpdb->last_error !== '') { return false; }
+            // The hash column is ASCII while file_path is utf8mb4. Running an
+            // interpolated INSERT through wpdb::query() makes Core validate
+            // the WHOLE SQL using the table's mixed-charset fallback (ASCII),
+            // rejecting otherwise valid Unicode paths before MySQL sees them.
+            // insert() validates each value against its own column charset.
+            $written = $wpdb->insert($files, [
+                'path_hash' => hash('sha256', $path),
+                'file_path' => $path,
+                'attachment_id' => $id,
+                'generation' => $revision,
+                'protected_path_id' => '',
+            ], ['%s', '%s', '%d', '%d', '%s']);
+            if ($written !== 1 || $wpdb->last_error !== '') { return false; }
         }
         return true;
     }
@@ -1161,11 +1168,17 @@ final class ESP_Media_Index {
             // old owner evidence while the state is dirty: another public
             // attachment could otherwise appear to be the only owner.
             foreach ($paths as $path) {
-                $sql = $wpdb->prepare("INSERT INTO $files
-                    (path_hash,file_path,attachment_id,generation,protected_path_id)
-                    VALUES (%s,%s,%d,%d,%s)",
-                    hash('sha256', $path), $path, $id, $revision, $protection);
-                if ($wpdb->query($sql) === false) {
+                // Per-column charset validation is essential here: the
+                // path_hash column uses ascii_bin, but media paths can contain
+                // Japanese or other valid utf8mb4 characters.
+                $written = $wpdb->insert($files, [
+                    'path_hash' => hash('sha256', $path),
+                    'file_path' => $path,
+                    'attachment_id' => $id,
+                    'generation' => $revision,
+                    'protected_path_id' => $protection,
+                ], ['%s', '%s', '%d', '%d', '%s']);
+                if ($written !== 1 || $wpdb->last_error !== '') {
                     throw new RuntimeException('insert index row');
                 }
             }

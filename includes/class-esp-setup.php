@@ -157,6 +157,18 @@ class ESP_Setup {
     }
 
     public function deactivate() {
+        // Never remove a Fast Gate Rewrite while its SQLite reader may serve.
+        // If we cannot restore the verified legacy protection, retain the
+        // stopped Fast Gate route (503) instead of exposing static uploads.
+        if (class_exists('ESP_Fast_Gate_Deployment') &&
+            (ESP_Fast_Gate_Deployment::route_fast() ||
+             ESP_Fast_Gate_WP::active())) {
+            $result = ESP_Fast_Gate_Deployment::disable();
+            if ($result !== true) {
+                error_log('ESP: plugin deactivation retained non-serving Fast Gate rewrite after unsafe fallback');
+                return;
+            }
+        }
         // Cronタスクの削除
         wp_clear_scheduled_hook(ESP_Config::DAILY_CLEANUP_HOOK);
         wp_clear_scheduled_hook(ESP_Config::INTEGRITY_CHECK_HOOK);

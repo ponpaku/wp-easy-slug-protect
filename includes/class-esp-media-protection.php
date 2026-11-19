@@ -812,7 +812,11 @@ class ESP_Media_Protection {
         
         // 認証チェック
         if (!$this->auth->is_logged_in($path_settings)) {
-            $this->redirect_to_login($path_settings, $requested_file);
+            // The legacy media path and Fast Gate bridge use exactly the
+            // same WordPress login redirect, not separate URL builders.
+            if (!self::redirect_to_login($path_settings, $requested_file)) {
+                $this->send_403();
+            }
             return;
         }
         
@@ -984,28 +988,59 @@ class ESP_Media_Protection {
      * @param array $path_settings 保護パス設定
      * @param string $requested_file リクエストされたファイル
      */
-    private function redirect_to_login($path_settings, $requested_file) {
-        $login_page_id = $path_settings['login_page'];
-        if (empty($login_page_id) || !get_post($login_page_id)) {
-            $this->send_403();
-            return;
+    /**
+     * Shared login target for legacy WordPress media delivery and the
+     * Fast Gate's already-verified WordPress bridge. Returning a URL is
+     * not an authorization decision: both callers check their own media
+     * ownership and protection state before invoking this code.
+     *
+     * Keep the original legacy media return URL convention: an encoded
+     * absolute uploads URL. ESP_Core::sanitize_path() converts it to a
+     * same-site path before a successful login redirects the user.
+     */
+    public static function media_login_redirect_url($path_settings, $requested_file) {
+        if (!is_array($path_settings) ||
+            !isset($path_settings['login_page']) ||
+            !is_string($requested_file) || $requested_file === '') {
+            return null;
         }
-        
-        // 正しいURLパスを構築
-        $upload_dir = wp_upload_dir();
-        $upload_path = str_replace(home_url(), '', $upload_dir['baseurl']);
-        
-        // リダイレクト後の戻り先URLを正しく構築
-        // esp-media/... ではなく /wp-content/uploads/... を使用
-        $current_url = home_url($upload_path . '/' . $requested_file);
-        
-        $login_url = get_permalink($login_page_id);
-        $login_url = add_query_arg('redirect_to', urlencode($current_url), $login_url);
-        
-        // 認証状態に依存するリダイレクトも共有キャッシュには保存しない。
+        $page_id = (int) $path_settings['login_page'];
+        $page = $page_id > 0 ? get_post($page_id) : null;
+        if (!$page || $page->post_status !== 'publish') {
+            return null;
+        }
+        $uploads = wp_upload_dir(null, false);
+        if (!is_array($uploads) || !empty($uploads['error']) ||
+            empty($uploads['baseurl']) || !is_string($uploads['baseurl'])) {
+            return null;
+        }
+        $upload_path = str_replace(home_url(), '', $uploads['baseurl']);
+        $return_url = home_url($upload_path . '/' . $requested_file);
+        $login_page_url = get_permalink($page_id);
+        $login_url = $login_page_url
+            ? wp_validate_redirect($login_page_url, '') : '';
+        if (!$login_url) { return null; }
+        // add_query_arg() does not encode new values; match the original
+        // ESP_Media_Protection URL contract for both request paths.
+        return add_query_arg('redirect_to', urlencode($return_url), $login_url);
+    }
+
+    /**
+     * The single real login redirect used by the legacy media handler
+     * and by the Fast Gate WordPress handoff. This method exits on success;
+     * false means that no safe configured login page was available.
+     */
+    public static function redirect_to_login($path_settings, $requested_file) {
+        $login_url = self::media_login_redirect_url(
+            $path_settings, $requested_file);
+        if ($login_url === null) { return false; }
+
         nocache_headers();
-        // ESP_Cookieを使用してリダイレクト
-        $this->cookie->do_redirect($login_url, false);
+        header('Cache-Control: private, no-store, max-age=0');
+        header('X-LiteSpeed-Cache-Control: no-store');
+        header('Referrer-Policy: no-referrer');
+        ESP_Cookie::get_instance()->do_redirect($login_url, false);
+        return true;
     }
 
     /**
@@ -1268,6 +1303,74 @@ class ESP_Media_Protection {
     }
 
     /**
+     * Read-only evidence about managed rules, not an authorization or live
+     * HTTP routing proof. CLI environment variables cannot attest to a web
+     * server. No options or environment variables are changed.
+     */
+    public static function inspect_rewrite_policy() {
+        $cli = in_array(PHP_SAPI, ['cli', 'phpdbg'], true);
+        $software = $cli ? '' : self::get_server_software();
+        $family = 'unknown';
+        if (preg_match('/nginx|openresty|tengine/i', $software)) { $family = 'nginx'; }
+        elseif (preg_match('/litespeed/i', $software)) { $family = 'litespeed'; }
+        elseif (preg_match('/apache/i', $software)) { $family = 'apache'; }
+        $fast = class_exists('ESP_Fast_Gate_Deployment') && ESP_Fast_Gate_Deployment::route_fast();
+        $enabled = self::is_media_protection_enabled();
+        $out = ['status'=>'unknown', 'reason'=>'rewrite_unverified',
+            'context'=>$cli ? 'cli' : 'http', 'server_family'=>$family,
+            'route'=>$fast ? 'fast' : 'legacy', 'media_enabled'=>$enabled,
+            'file_status'=>'unverified', 'matched_policy'=>null];
+        if ($family === 'nginx') {
+            $out['status'] = $fast ? 'mismatch' : 'external';
+            $out['reason'] = $fast ? 'fast_route_unsupported' : 'external_rewrite';
+            return $out;
+        }
+        $dir = wp_upload_dir(null, false);
+        if (!empty($dir['error']) || empty($dir['basedir']) ||
+            !is_dir($dir['basedir']) || !is_readable($dir['basedir'])) {
+            $out['reason'] = 'uploads_unavailable';
+            return $out;
+        }
+        $file = trailingslashit($dir['basedir']) . '.htaccess';
+        clearstatcache(true, $file);
+        if (is_link($file) || (file_exists($file) && !is_file($file))) {
+            $out['status'] = 'mismatch';
+            $out['reason'] = 'invalid_rewrite_file';
+            $out['file_status'] = 'mismatch';
+            return $out;
+        }
+        $contents = is_file($file) ? @file_get_contents($file) : '';
+        if ($contents === false) {
+            $out['reason'] = 'rewrite_unreadable';
+            return $out;
+        }
+        $managed = strpos($contents, '# BEGIN ESP Media Protection') !== false ||
+            strpos($contents, '# END ESP Media Protection') !== false;
+        // Unknown legacy deployments may use external server rules. An
+        // absent managed block cannot prove their routing is broken.
+        if ($enabled && !$fast && $family === 'unknown' && !$managed) {
+            $out['reason'] = 'server_and_policy_unknown';
+            return $out;
+        }
+        if (!$enabled || $fast || $family !== 'unknown') {
+            $matches = self::rewrite_contents_match_policy($contents, $enabled, null,
+                $family === 'unknown' ? 'apache' : $family);
+            $out['matched_policy'] = $matches ? (!$enabled ? 'off' : ($fast ? 'fast' : $family)) : null;
+        } else {
+            $apache = self::rewrite_contents_match_policy($contents, true, null, 'apache');
+            $lite = self::rewrite_contents_match_policy($contents, true, null, 'litespeed');
+            $matches = $apache || $lite;
+            $out['matched_policy'] = $apache ? 'apache' : ($lite ? 'litespeed' : null);
+        }
+        $out['file_status'] = $matches ? 'match' : 'mismatch';
+        $out['status'] = !$matches ? 'mismatch' :
+            ($enabled && !$fast && $family === 'unknown' ? 'partial' : 'ok');
+        $out['reason'] = !$matches ? 'managed_rules_mismatch' :
+            ($out['status'] === 'partial' ? 'server_family_unverified' : 'file_policy_match');
+        return $out;
+    }
+
+    /**
      * キャッシュ上のバージョン印だけでなく、配置済みルールの内容を検証する。
      * 実際のWebサーバーでのRewrite動作検証に代わるものではない。
      */
@@ -1284,6 +1387,13 @@ class ESP_Media_Protection {
         if ($contents === false) {
             return false;
         }
+        return self::rewrite_contents_match_policy($contents, $enabled, $litespeed_key_override);
+    }
+
+    // Pure comparison of one captured file snapshot. An explicit family
+    // is used only by the read-only audit, never by the Rewrite writer.
+    private static function rewrite_contents_match_policy($contents, $enabled,
+        $litespeed_key_override = null, $audit_family = null) {
         $start = strpos($contents, '# BEGIN ESP Media Protection');
         $begin_count = substr_count($contents, '# BEGIN ESP Media Protection');
         $end_count = substr_count($contents, '# END ESP Media Protection');
@@ -1316,7 +1426,7 @@ class ESP_Media_Protection {
         // リクエストごとのルール照合では、キャッシュや各種フックを初期化しない。
         // .htaccessの内容を比較する処理だけを実行する。
         $media = (new \ReflectionClass(self::class))->newInstanceWithoutConstructor();
-        $expected = $media->get_htaccess_rules(true, true, $litespeed_key_override);
+        $expected = $media->get_htaccess_rules(true, true, $litespeed_key_override, $audit_family);
         if (is_wp_error($expected)) {
             return false;
         }
@@ -1762,7 +1872,9 @@ class ESP_Media_Protection {
      * @param bool|null $has_protected_media ルールを適用するか
      * @return string|WP_Error .htaccessルール
      */
-    private function get_htaccess_rules($has_protected_media = null, $read_only = false, $litespeed_key_override = null) {
+    private function get_htaccess_rules($has_protected_media = null, $read_only = false,
+        $litespeed_key_override = null, $audit_family = null) {
+        $litespeed = $audit_family === null ? $this->is_litespeed() : $audit_family === 'litespeed';
         if ($has_protected_media === null) {
             $has_protected_media = self::is_media_protection_enabled();
         }
@@ -1788,7 +1900,28 @@ class ESP_Media_Protection {
         
         // 有効なら保護メディアが0件でもルールを適用（初回追加の直配信漏洩防止）
         if ($has_protected_media) {
-            if ($this->is_litespeed()) {
+            // The Fast Gate route belongs inside THIS existing ESP-managed
+            // block. Never create an independent uploads/.htaccess writer.
+            // Every candidate media extension (even a not-yet-indexed file)
+            // must be routed BEFORE Apache can serve its static bytes.
+            if (class_exists('ESP_Fast_Gate_Deployment') &&
+                ESP_Fast_Gate_Deployment::route_fast()) {
+                $target = ESP_Fast_Gate_Deployment::gate_target();
+                if ($target === null) {
+                    return new WP_Error('esp_fast_gate_target_invalid',
+                        'Standalone gate URL cannot be constructed');
+                }
+                // A negative file check must TERMINATE with 404, not fall
+                // through to static delivery: the file could appear after
+                // the check. All other candidate requests still reach Gate.
+                $rules .= "{$indent}# Fast Gate: missing files terminate with HTTP 404\n";
+                $rules .= "{$indent}RewriteCond %{REQUEST_URI} ^.*\\.({$extensions_pattern})$ [NC]\n";
+                $rules .= "{$indent}RewriteCond %{REQUEST_FILENAME} !-f\n";
+                $rules .= "{$indent}RewriteRule ^(.+)$ - [R=404,L]\n";
+                $rules .= "{$indent}# Fast Gate: no static-file existence shortcut\n";
+                $rules .= "{$indent}RewriteCond %{REQUEST_URI} ^.*\\.({$extensions_pattern})$ [NC]\n";
+                $rules .= "{$indent}RewriteRule ^(.+)$ {$target} [L,QSA]\n";
+            } elseif ($litespeed) {
                 // 監査・既存ルール比較はキーを生成しない。
                 // キーの作成・更新は明示的なRewrite更新処理だけで行う。
                 $litespeed_key = $litespeed_key_override !== null
@@ -1810,20 +1943,23 @@ class ESP_Media_Protection {
                 $rules .= "{$indent}RewriteRule ^ - [L]\n";
             }
 
-            $rules .= "{$indent}# 保護されたファイル拡張子へのアクセスをWordPress経由に\n";
-            $rules .= "{$indent}RewriteCond %{REQUEST_FILENAME} -f\n";
-            $rules .= "{$indent}RewriteCond %{REQUEST_URI} ^.*\\.({$extensions_pattern})$ [NC]\n";
+            if (!class_exists('ESP_Fast_Gate_Deployment') ||
+                !ESP_Fast_Gate_Deployment::route_fast()) {
+                $rules .= "{$indent}# 保護されたファイル拡張子へのアクセスをWordPress経由に\n";
+                $rules .= "{$indent}RewriteCond %{REQUEST_FILENAME} -f\n";
+                $rules .= "{$indent}RewriteCond %{REQUEST_URI} ^.*\\.({$extensions_pattern})$ [NC]\n";
 
             // mod_rewriteは照合前にURLをデコードするため、&/+/#/?/空白等を
             // クエリ値へ埋め込む前に再エスケープする。Apacheは選択的[B=]で
             // ディレクトリ区切りを維持する。LiteSpeedでは選択的[B=]が
             // ルーティングを素通りさせた実機事例があり、通常の[B]を使用。
             // 通常[B]の%2Fはクエリ値としてPHP側で復号される。
-            $rewrite_flags = $this->is_litespeed()
+            $rewrite_flags = $litespeed
                 ? '[B,L,QSA]' : '"[B= %&+#?;,L]"';
-            $rules .= "{$indent}RewriteRule ^(.+)$ {$home_path}index.php?" . self::REWRITE_ENDPOINT . "=$1 {$rewrite_flags}\n";
+                $rules .= "{$indent}RewriteRule ^(.+)$ {$home_path}index.php?" . self::REWRITE_ENDPOINT . "=$1 {$rewrite_flags}\n";
+            }
         }
-        
+
         $rules .= "</IfModule>\n";
         $rules .= "# END ESP Media Protection\n";
         
