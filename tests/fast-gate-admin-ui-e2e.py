@@ -269,6 +269,35 @@ def main():
                 check("Apache / LiteSpeed 専用" in page.locator(SECTION).inner_text(),
                       "supported server warning is visible")
                 state(page, "準備完了（従来方式で配信中）")
+                # Diagnose only: query values are display hints, not authority
+                # to change the ledger or the media authorization path.
+                for error_code in ("esp_gate_catalog_build_failed",
+                                   "esp_gate_catalog_recheck_failed"):
+                    page.goto(ADMIN + "&esp_fg_result=" + error_code +
+                              "&esp_fg_stage=index_owner_scan",
+                              wait_until="domcontentloaded")
+                    notice = page.locator(SECTION + " .notice p")
+                    check(notice.count() == 1 and
+                          error_code in notice.inner_text() and
+                          "失敗段階: index_owner_scan" in notice.inner_text() and
+                          "MySQL索引" in notice.inner_text(),
+                          "allowlisted catalog stage visible: " + error_code)
+                page.goto(ADMIN +
+                          "&esp_fg_result=esp_gate_catalog_build_failed" +
+                          "&esp_fg_stage=%2Fprivate%2Fsecret",
+                          wait_until="domcontentloaded")
+                check("失敗段階:" not in
+                      page.locator(SECTION + " .notice p").inner_text(),
+                      "unapproved diagnostic stage is not reflected")
+                page.goto(ADMIN +
+                          "&esp_fg_result=esp_gate_http_probe_failed" +
+                          "&esp_fg_stage=index_owner_scan",
+                          wait_until="domcontentloaded")
+                check("失敗段階:" not in
+                      page.locator(SECTION + " .notice p").inner_text(),
+                      "unrelated deployment errors ignore catalog stage")
+                page.goto(ADMIN, wait_until="domcontentloaded")
+                state(page, "準備完了（従来方式で配信中）")
                 screenshot(page, "01-initial")
 
                 if os.environ.get("ESP_AUDIT_CI_CONTAINER"):
